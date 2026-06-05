@@ -2,6 +2,7 @@
 
 const express = require("express");
 const path = require("path");
+const crypto = require("crypto");
 const db = require("./db");
 const { researchCompany } = require("./research");
 
@@ -81,6 +82,44 @@ function leadFromResearch(research, input) {
   };
 }
 
+// --- Recherche-Jobs --------------------------------------------------------
+// Die Web-Recherche dauert oft 1–2 Minuten und würde einen synchronen Request
+// in einen Gateway-Timeout (524) laufen lassen. Daher läuft sie als
+// Hintergrund-Job; das Frontend pollt Status + Fortschritt.
+const researchJobs = new Map();
+
+function startResearchJob(runner) {
+  const id = crypto.randomUUID();
+  const job = { id, status: "running", steps: [], lead: null, error: null, finishedAt: 0 };
+  researchJobs.set(id, job);
+
+  const onProgress = (text) => {
+    if (typeof text !== "string" || !text) return;
+    job.steps.push({ t: Date.now(), text });
+    if (job.steps.length > 60) job.steps.shift();
+  };
+
+  (async () => {
+    try {
+      job.lead = await runner(onProgress);
+      job.status = "done";
+    } catch (err) {
+      console.error("Recherche-Fehler:", err.message);
+      job.error = "Recherche fehlgeschlagen. Bitte erneut versuchen.";
+      job.status = "error";
+    } finally {
+      job.finishedAt = Date.now();
+    }
+  })();
+
+  // Alte, abgeschlossene Jobs aufräumen (älter als 15 Minuten).
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  for (const [key, j] of researchJobs) {
+    if (j.finishedAt && j.finishedAt < cutoff) researchJobs.delete(key);
+  }
+  return job;
+}
+
 // Kleiner Wrapper, damit Fehler in async-Handlern sauber als 500 landen.
 const wrap = (fn) => (req, res) =>
   Promise.resolve(fn(req, res)).catch((err) => {
@@ -140,30 +179,22 @@ app.post("/api/leads", wrap(async (req, res) => {
 }));
 
 // Lead per Recherche anlegen: Eingabe = Firmenname ODER Website-URL.
-// Recherchiert automatisch alle Skill-Felder und speichert sie.
+// Startet einen Hintergrund-Job und liefert sofort eine Job-ID zurück.
 app.post("/api/leads/research", wrap(async (req, res) => {
   if (!requireAi(res)) return;
   const input = typeof req.body.input === "string" ? req.body.input.trim() : "";
   if (!input) {
     return res.status(400).json({ error: "Firmenname oder Website-URL ist erforderlich." });
   }
-  try {
-    const research = await researchCompany(anthropic, input, currentModel);
-    const data = {
-      ...leadFromResearch(research, input),
-      status: "neu",
-      value: 0,
-      notes: "",
-    };
-    const lead = await db.createLead(data, research);
-    res.status(201).json(lead);
-  } catch (err) {
-    console.error("Recherche-Fehler:", err.message);
-    res.status(502).json({ error: "Recherche fehlgeschlagen. Bitte erneut versuchen." });
-  }
+  const job = startResearchJob(async (onProgress) => {
+    const research = await researchCompany(anthropic, input, currentModel, onProgress);
+    const data = { ...leadFromResearch(research, input), status: "neu", value: 0, notes: "" };
+    return db.createLead(data, research);
+  });
+  res.status(202).json({ jobId: job.id });
 }));
 
-// Bestehenden Lead neu recherchieren (Daten aktualisieren).
+// Bestehenden Lead neu recherchieren (Daten aktualisieren) – ebenfalls als Job.
 app.post("/api/leads/:id/research", wrap(async (req, res) => {
   if (!requireAi(res)) return;
   const lead = await db.getLead(req.params.id);
@@ -176,16 +207,20 @@ app.post("/api/leads/:id/research", wrap(async (req, res) => {
   if (!input) {
     return res.status(400).json({ error: "Kein Recherche-Input vorhanden." });
   }
-  try {
-    const research = await researchCompany(anthropic, input, currentModel);
+  const job = startResearchJob(async (onProgress) => {
+    const research = await researchCompany(anthropic, input, currentModel, onProgress);
     const data = leadFromResearch(research, input);
-    const updated = await db.setLeadResearch(lead.id, research, data);
-    res.json(updated);
-  } catch (err) {
-    console.error("Recherche-Fehler:", err.message);
-    res.status(502).json({ error: "Recherche fehlgeschlagen. Bitte erneut versuchen." });
-  }
+    return db.setLeadResearch(lead.id, research, data);
+  });
+  res.status(202).json({ jobId: job.id });
 }));
+
+// Status + Fortschritt eines Recherche-Jobs abfragen (Polling).
+app.get("/api/research/:jobId", (req, res) => {
+  const job = researchJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "Recherche-Job nicht gefunden." });
+  res.json({ status: job.status, steps: job.steps, lead: job.lead, error: job.error });
+});
 
 // Lead aktualisieren
 app.put("/api/leads/:id", wrap(async (req, res) => {

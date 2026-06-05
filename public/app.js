@@ -11,6 +11,7 @@ let currentModel = "";
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
 const $ = (sel) => document.querySelector(sel);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmtEuro = (n) => (Number(n) || 0).toLocaleString("de-DE") + " €";
 const esc = (s) =>
   String(s || "").replace(/[&<>"']/g, (c) =>
@@ -483,9 +484,51 @@ async function saveSettings(e) {
 function openResearchModal() {
   $("#researchForm").reset();
   $("#researchLoading").classList.add("hidden");
+  const steps = $("#researchSteps");
+  steps.classList.add("hidden");
+  steps.innerHTML = "";
   setResearchBusy(false);
   $("#researchModal").classList.remove("hidden");
   $("#researchInput").focus();
+}
+
+function renderSteps(list) {
+  const el = $("#researchSteps");
+  el.classList.remove("hidden");
+  // Nur die letzten ~12 Schritte zeigen, neueste unten.
+  el.innerHTML = (list || [])
+    .slice(-12)
+    .map((s) => `<li>${esc(s.text)}</li>`)
+    .join("");
+  el.scrollTop = el.scrollHeight;
+}
+
+// Pollt einen Recherche-Job bis er fertig ist und zeigt den Fortschritt an.
+async function trackResearch(jobId) {
+  renderSteps([]);
+  while (true) {
+    await sleep(1500);
+    let data;
+    try {
+      data = await api(`/api/research/${jobId}`);
+    } catch (err) {
+      // Einzelne fehlgeschlagene Polls tolerieren und weiter versuchen.
+      continue;
+    }
+    renderSteps(data.steps);
+    if (data.status === "done") {
+      toast("Recherche abgeschlossen", "success");
+      closeResearchModal();
+      await refresh();
+      if (data.lead && data.lead.research) openDetailModal(data.lead.id);
+      return;
+    }
+    if (data.status === "error") {
+      toast(data.error || "Recherche fehlgeschlagen", "error");
+      setResearchBusy(false);
+      return;
+    }
+  }
 }
 
 function closeResearchModal() {
@@ -508,14 +551,11 @@ async function submitResearch(e) {
   }
   setResearchBusy(true);
   try {
-    const lead = await api("/api/leads/research", {
+    const { jobId } = await api("/api/leads/research", {
       method: "POST",
       body: JSON.stringify({ input }),
     });
-    toast("Lead recherchiert und angelegt", "success");
-    closeResearchModal();
-    await refresh();
-    if (lead && lead.research) openDetailModal(lead.id);
+    await trackResearch(jobId);
   } catch (err) {
     toast(err.message, "error");
     setResearchBusy(false);
@@ -528,6 +568,7 @@ async function submitResearch(e) {
 async function researchLead(id, btn) {
   const l = leads.find((x) => x.id === id);
   let body = {};
+  let label = (l && (l.company || l.source)) || "";
   if (l && l.research) {
     const suggested = l.research.input || l.company || "";
     const input = prompt("Was soll recherchiert werden? (Website oder Firmenname)", suggested);
@@ -535,26 +576,29 @@ async function researchLead(id, btn) {
     const t = input.trim();
     if (!t) return;
     body = { input: t };
+    label = t;
   } else if (!(l && (l.company || l.source))) {
     const input = prompt("Website oder Firmenname für die Recherche:", "");
     if (input === null) return;
     const t = input.trim();
     if (!t) return;
     body = { input: t };
+    label = t;
   }
   // sonst: kein Input → Server recherchiert anhand Firma/Quelle des Leads.
-  const original = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = "⏳…";
-  toast("Recherche läuft… das dauert einen Moment.");
+  openResearchModal();
+  $("#researchInput").value = label;
+  setResearchBusy(true);
   try {
-    await api(`/api/leads/${id}/research`, { method: "POST", body: JSON.stringify(body) });
-    toast("Recherche abgeschlossen", "success");
-    await refresh();
+    const { jobId } = await api(`/api/leads/${id}/research`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    await trackResearch(jobId);
   } catch (err) {
     toast(err.message, "error");
-    btn.disabled = false;
-    btn.textContent = original;
+    setResearchBusy(false);
+    closeResearchModal();
   }
 }
 

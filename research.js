@@ -153,7 +153,7 @@ const RESEARCH_SCHEMA = {
 // Phase 1: agentische Web-Recherche → Markdown-Dossier.
 // Server-Tools laufen in einer serverseitigen Schleife; bei Erreichen des
 // Iterationslimits liefert die API stop_reason "pause_turn" und wir setzen fort.
-async function runResearch(anthropic, input, model) {
+async function runResearch(anthropic, input, model, onProgress) {
   const messages = [
     {
       role: "user",
@@ -175,12 +175,25 @@ async function runResearch(anthropic, input, model) {
     };
     if (thinking) params.thinking = thinking;
     const stream = anthropic.messages.stream(params);
+
+    // Fortschritt melden, sobald die KI eine Web-Suche/Seitenabruf nutzt.
+    stream.on("contentBlock", (block) => {
+      if (!block || block.type !== "server_tool_use") return;
+      const inp = block.input || {};
+      if (block.name === "web_search" && inp.query) {
+        onProgress(`🔍 Suche: ${inp.query}`);
+      } else if (block.name === "web_fetch" && inp.url) {
+        onProgress(`🌐 Öffne: ${inp.url}`);
+      }
+    });
+
     const msg = await stream.finalMessage();
 
     if (msg.stop_reason === "pause_turn") {
       // Server hat das interne Tool-Limit erreicht – Assistant-Turn anhängen
       // und erneut senden, der Server nimmt automatisch wieder auf.
       messages.push({ role: "assistant", content: msg.content });
+      onProgress("… recherchiere weiter");
       continue;
     }
 
@@ -218,9 +231,12 @@ async function extractFields(anthropic, input, dossier, model) {
 }
 
 // Öffentliche API: vollständige Recherche → strukturiertes Objekt inkl. Markdown.
-async function researchCompany(anthropic, input, model = DEFAULT_MODEL) {
-  const dossier = await runResearch(anthropic, input, model);
+async function researchCompany(anthropic, input, model = DEFAULT_MODEL, onProgress = () => {}) {
+  onProgress(`Starte Recherche zu „${input}“…`);
+  const dossier = await runResearch(anthropic, input, model, onProgress);
+  onProgress("📝 Dossier erstellt – extrahiere strukturierte Felder…");
   const fields = await extractFields(anthropic, input, dossier, model);
+  onProgress("✅ Recherche abgeschlossen.");
   return {
     ...fields,
     input,
