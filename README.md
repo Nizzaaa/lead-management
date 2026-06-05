@@ -29,22 +29,30 @@ docker compose up -d
 
 Dann im Browser öffnen: **http://localhost:3000**
 
-- Die Leads werden im benannten Volume `leadpilot-data` gespeichert und bleiben
-  über Neustarts und Rebuilds hinweg erhalten.
+Der Stack startet zwei Container: die **Web-App** und eine **PostgreSQL-Datenbank**.
+
+- Die Leads werden in der PostgreSQL-DB im benannten Volume `leadpilot-db`
+  gespeichert und bleiben über Neustarts und Rebuilds hinweg erhalten.
+- DB-Passwort über `POSTGRES_PASSWORD` in der `.env` setzen (Standard: `leadpilot`).
 - Port anpassen: `PORT=8080 docker compose up -d` (oder `PORT` in der `.env` setzen).
-- Stoppen: `docker compose down` · Logs: `docker compose logs -f` ·
-  Neu bauen: `docker compose up -d --build`
+- Stoppen: `docker compose down` · inkl. Daten löschen: `docker compose down -v` ·
+  Logs: `docker compose logs -f` · Neu bauen: `docker compose up -d --build`
 
 ## Schnellstart ohne Docker
+
+Hierfür wird eine erreichbare **PostgreSQL-Datenbank** benötigt:
 
 ```bash
 # 1. Abhängigkeiten installieren
 npm install
 
-# 2. KI aktivieren (optional, aber empfohlen)
+# 2. Datenbank-Verbindung setzen
+export DATABASE_URL=postgres://leadpilot:leadpilot@localhost:5432/leadpilot
+
+# 3. KI aktivieren (optional, aber empfohlen)
 export ANTHROPIC_API_KEY=sk-ant-...
 
-# 3. Starten
+# 4. Starten (Schema wird beim Start automatisch angelegt)
 npm start
 ```
 
@@ -55,7 +63,9 @@ Dann im Browser öffnen: **http://localhost:3000**
 
 ## Technik
 
-- **Backend:** Node.js + Express, JSON-Datei als Speicher (`data/leads.json`) – keine Datenbank nötig
+- **Backend:** Node.js + Express
+- **Datenbank:** PostgreSQL (Treiber [`pg`](https://www.npmjs.com/package/pg)); das Schema
+  wird beim Start automatisch angelegt
 - **Frontend:** Vanilla HTML/CSS/JS, kein Build-Schritt
 - **KI:** [@anthropic-ai/sdk](https://www.npmjs.com/package/@anthropic-ai/sdk) mit `claude-opus-4-8`
 
@@ -74,4 +84,6 @@ Dann im Browser öffnen: **http://localhost:3000**
 
 ## Daten
 
-Alle Leads werden lokal in `data/leads.json` gespeichert (per `.gitignore` ausgenommen).
+Alle Leads werden in einer **PostgreSQL-Datenbank** gespeichert. Im Docker-Compose-Setup
+liegt diese im Volume `leadpilot-db` und bleibt so dauerhaft erhalten. Die Tabelle `leads`
+wird beim ersten Start automatisch angelegt.

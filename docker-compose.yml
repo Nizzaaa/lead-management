@@ -1,4 +1,21 @@
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: leadpilot-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=leadpilot
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - POSTGRES_DB=leadpilot
+    volumes:
+      # Datenbank bleibt über Neustarts/Rebuilds hinweg erhalten
+      - leadpilot-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadpilot -d leadpilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   leadpilot:
     build: .
     image: leadpilot:latest
@@ -11,9 +28,10 @@ services:
       # (siehe .env.example). Ohne Key läuft die App ohne KI-Funktionen.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - PORT=3000
-    volumes:
-      # Leads bleiben über Neustarts/Rebuilds hinweg erhalten
-      - leadpilot-data:/app/data
+      - DATABASE_URL=postgres://leadpilot:${POSTGRES_PASSWORD:-leadpilot}@db:5432/leadpilot
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
-  leadpilot-data:
+  leadpilot-db:
