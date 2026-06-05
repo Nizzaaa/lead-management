@@ -1,0 +1,19 @@
+services:
+  leadpilot:
+    build: .
+    image: leadpilot:latest
+    container_name: leadpilot
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      # KI-Funktionen aktivieren: ANTHROPIC_API_KEY in einer .env-Datei setzen
+      # (siehe .env.example). Ohne Key läuft die App ohne KI-Funktionen.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PORT=3000
+    volumes:
+      # Leads bleiben über Neustarts/Rebuilds hinweg erhalten
+      - leadpilot-data:/app/data
+
+volumes:
+  leadpilot-data:
