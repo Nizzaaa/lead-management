@@ -3,6 +3,7 @@
 const express = require("express");
 const path = require("path");
 const db = require("./db");
+const { researchCompany } = require("./research");
 
 const PORT = process.env.PORT || 3000;
 
@@ -39,6 +40,29 @@ function sanitizeLead(body = {}) {
     status,
     value,
     notes: clean(body.notes),
+  };
+}
+
+// Behandelt "k.A."/leer als unbekannt – verhindert, dass Platzhalter in den
+// Stammdatenfeldern landen.
+function known(v) {
+  if (!v || typeof v !== "string") return "";
+  const t = v.trim();
+  if (!t || /^k\.?\s?a\.?$/i.test(t) || t === "—") return "";
+  return t;
+}
+
+// Leitet aus einem Recherche-Objekt die Lead-Stammdaten ab.
+function leadFromResearch(research, input) {
+  const f = research.fields || {};
+  return {
+    name: known(f.ansprechpartner && f.ansprechpartner.value),
+    company: known(research.unternehmensname) || known(input),
+    email: known(f.mail && f.mail.value),
+    phone:
+      known(f.telefonDurchwahl && f.telefonDurchwahl.value) ||
+      known(f.telefonAllgemein && f.telefonAllgemein.value),
+    source: known(f.web && f.web.value) || `Recherche: ${input}`,
   };
 }
 
@@ -79,6 +103,54 @@ app.post("/api/leads", wrap(async (req, res) => {
   res.status(201).json(lead);
 }));
 
+// Lead per Recherche anlegen: Eingabe = Firmenname ODER Website-URL.
+// Recherchiert automatisch alle Skill-Felder und speichert sie.
+app.post("/api/leads/research", wrap(async (req, res) => {
+  if (!requireAi(res)) return;
+  const input = typeof req.body.input === "string" ? req.body.input.trim() : "";
+  if (!input) {
+    return res.status(400).json({ error: "Firmenname oder Website-URL ist erforderlich." });
+  }
+  try {
+    const research = await researchCompany(anthropic, input);
+    const data = {
+      ...leadFromResearch(research, input),
+      status: "neu",
+      value: 0,
+      notes: "",
+    };
+    const lead = await db.createLead(data, research);
+    res.status(201).json(lead);
+  } catch (err) {
+    console.error("Recherche-Fehler:", err.message);
+    res.status(502).json({ error: "Recherche fehlgeschlagen. Bitte erneut versuchen." });
+  }
+}));
+
+// Bestehenden Lead neu recherchieren (Daten aktualisieren).
+app.post("/api/leads/:id/research", wrap(async (req, res) => {
+  if (!requireAi(res)) return;
+  const lead = await db.getLead(req.params.id);
+  if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
+  const input =
+    (typeof req.body.input === "string" && req.body.input.trim()) ||
+    (lead.research && lead.research.input) ||
+    lead.company ||
+    lead.source;
+  if (!input) {
+    return res.status(400).json({ error: "Kein Recherche-Input vorhanden." });
+  }
+  try {
+    const research = await researchCompany(anthropic, input);
+    const data = leadFromResearch(research, input);
+    const updated = await db.setLeadResearch(lead.id, research, data);
+    res.json(updated);
+  } catch (err) {
+    console.error("Recherche-Fehler:", err.message);
+    res.status(502).json({ error: "Recherche fehlgeschlagen. Bitte erneut versuchen." });
+  }
+}));
+
 // Lead aktualisieren
 app.put("/api/leads/:id", wrap(async (req, res) => {
   const existing = await db.getLead(req.params.id);
@@ -97,16 +169,43 @@ app.delete("/api/leads/:id", wrap(async (req, res) => {
 
 // --- KI-Endpunkte ----------------------------------------------------------
 function leadContext(lead) {
-  return [
-    `Name: ${lead.name || "—"}`,
+  const base = [
     `Firma: ${lead.company || "—"}`,
+    `Ansprechpartner: ${lead.name || "—"}`,
     `E-Mail: ${lead.email || "—"}`,
     `Telefon: ${lead.phone || "—"}`,
     `Quelle: ${lead.source || "—"}`,
     `Status: ${lead.status}`,
     `Geschätzter Wert: ${lead.value} €`,
     `Notizen: ${lead.notes || "—"}`,
-  ].join("\n");
+  ];
+
+  // Wenn ein Recherche-Dossier vorliegt, hängen wir es vollständig an – die
+  // KI-Funktionen (Scoring, E-Mail, Tipps) bauen dann darauf auf.
+  if (lead.research) {
+    const r = lead.research;
+    const f = r.fields || {};
+    const fv = (x) => (x && x.value) || "—";
+    base.push(
+      "",
+      "── Recherche-Dossier (FU/GE Cold-Call-Vorbereitung) ──",
+      `Branche: ${fv(f.branche)}`,
+      `Adresse: ${fv(f.adresse)}`,
+      `Öffnungszeiten: ${fv(f.oeffnungszeiten)}`,
+      `Kundenbewertung: ${fv(f.kundenbewertung)}`,
+      `Negative Bewertungen: ${r.negativeBewertungen || "—"}`,
+      `Einordnung/Selbstdarstellung: ${r.einordnung || "—"}`,
+      `Sichtbare Schwachstellen: ${r.schwachstellen || "—"}`,
+      "Potenziale für FU/GE:",
+      ...(Array.isArray(r.potenziale) && r.potenziale.length
+        ? r.potenziale.map((p) => `  • ${p.titel}: ${p.beschreibung} (Signal: ${p.signal})`)
+        : ["  —"]),
+      `Cold-Call-Strategie: ${r.coldCallStrategie || "—"}`,
+      `Risiken / Ablehnungsgründe: ${r.risiken || "—"}`,
+    );
+  }
+
+  return base.join("\n");
 }
 
 async function callClaude(system, userText, { json = false } = {}) {
@@ -186,10 +285,12 @@ app.post("/api/leads/:id/email", wrap(async (req, res) => {
       : "Erstkontakt herstellen und ein kurzes Kennenlerngespräch vorschlagen";
   try {
     const text = await callClaude(
-      "Du bist ein professioneller Vertriebstexter. Schreibe eine personalisierte, freundliche und prägnante " +
-        "Akquise-E-Mail auf Deutsch. Verwende eine klare Betreffzeile (Format: 'Betreff: ...'), eine persönliche Ansprache " +
-        "und einen klaren Call-to-Action. Keine Floskeln, kein Spam-Ton, maximal 150 Wörter.",
-      `Ziel der E-Mail: ${goal}\n\nKontaktdaten des Leads:\n${leadContext(lead)}`
+      "Du bist Vertriebstexter für FU/GE Solutions (Integration & Entwicklung individueller KI-Systeme im Mittelstand/Handwerk). " +
+        "Schreibe eine personalisierte, freundliche und prägnante Akquise-E-Mail auf Deutsch. Knüpfe an einen konkreten, " +
+        "belegten Ansatzpunkt aus dem Recherche-Dossier an (z. B. eine Schwachstelle oder ein Potenzial). " +
+        "Verwende eine klare Betreffzeile (Format: 'Betreff: ...'), eine persönliche Ansprache und einen klaren Call-to-Action. " +
+        "Keine Floskeln, kein Spam-Ton, maximal 150 Wörter.",
+      `Ziel der E-Mail: ${goal}\n\nLead:\n${leadContext(lead)}`
     );
     res.json({ email: text });
   } catch (err) {
@@ -205,8 +306,9 @@ app.post("/api/leads/:id/insights", wrap(async (req, res) => {
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
   try {
     const text = await callClaude(
-      "Du bist ein Vertriebs-Coach. Gib eine kurze, konkrete Handlungsempfehlung auf Deutsch: " +
-        "2–4 priorisierte nächste Schritte als Aufzählung. Pragmatisch und umsetzbar.",
+      "Du bist Vertriebs-Coach für FU/GE Solutions und bereitest Cold Calls vor. Gib eine kurze, konkrete " +
+        "Handlungsempfehlung auf Deutsch: 2–4 priorisierte nächste Schritte als Aufzählung, abgeleitet aus den " +
+        "belegten Ansatzpunkten und Potenzialen des Recherche-Dossiers. Pragmatisch und umsetzbar.",
       `Was sind die besten nächsten Schritte für diesen Lead?\n\n${leadContext(lead)}`
     );
     res.json({ insights: text });

@@ -5,16 +5,27 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 
 ## Funktionen
 
+**Lead-Recherche statt Handeingabe** (🔎 nach dem `lead-research`-Skill von FU/GE Solutions)
+- Lead anlegen durch Eingabe von **nur einer Website-URL oder einem Firmennamen**
+- Die KI recherchiert automatisch per Web-Suche ein vollständiges Cold-Call-Dossier:
+  - **Allgemeine Infos** (Branche, Adresse, Telefon, Entscheider/Durchwahl, Öffnungszeiten, Mail, Web, Kundenbewertung) – jede Angabe mit Quelle
+  - **Negative Bewertungen → Potenzial**, **Selbstdarstellung**, **sichtbare Schwachstellen**
+  - **mind. 5 konkrete FU/GE-Potenziale**, **Cold-Call-Strategie** und **Risiken/Ablehnungsgründe**
+- Striktes „Keine-Halluzination"-Prinzip: nur belegte Fakten, sonst `k.A.`
+- Vollständiges Dossier pro Lead einsehbar (📋) und als Markdown kopierbar; jederzeit neu recherchierbar (🔄)
+
 **Lead-Verwaltung**
-- Leads anlegen, bearbeiten und löschen (Name, Firma, Kontakt, Quelle, Wert, Notizen)
 - Pipeline-Status: `neu → kontaktiert → qualifiziert → angebot → gewonnen / verloren`
-- Live-Suche und Status-Filter
+- Manuelles Bearbeiten (Status, Wert, Notizen, Stammdaten), Live-Suche und Status-Filter
 - Dashboard mit Kennzahlen: Anzahl Leads, Pipeline-Wert, gewonnener Umsatz, Abschlussquote
 
-**KI-Funktionen** (🤖 über das Anthropic-Modell `claude-opus-4-8`)
+**KI-Funktionen** (🤖 über das Anthropic-Modell `claude-opus-4-8`) – nutzen das Recherche-Dossier als Grundlage
 - **⚡ KI-Score** – bewertet das Abschlusspotenzial eines Leads von 0–100 inkl. Schulnote und Begründung
-- **✉️ E-Mail-Entwurf** – generiert eine personalisierte Akquise-E-Mail (Ziel frei wählbar)
-- **💡 Empfehlungen** – schlägt die nächsten besten Schritte ("Next Best Action") vor
+- **✉️ E-Mail-Entwurf** – generiert eine personalisierte Akquise-E-Mail, die an einen belegten Ansatzpunkt anknüpft
+- **💡 Empfehlungen** – schlägt die nächsten besten Schritte ("Next Best Action") für den Cold Call vor
+
+> Die Web-Recherche läuft über die serverseitigen Anthropic-Tools `web_search` und `web_fetch`
+> und benötigt daher einen gesetzten `ANTHROPIC_API_KEY`.
 
 ## Schnellstart mit Docker Compose (empfohlen)
 
@@ -105,7 +116,9 @@ Dann im Browser öffnen: **http://localhost:3000**
 | Methode | Pfad | Beschreibung |
 |--------|------|--------------|
 | `GET` | `/api/leads` | Alle Leads |
-| `POST` | `/api/leads` | Lead anlegen |
+| `POST` | `/api/leads/research` | Lead per Recherche anlegen (Body: `{ "input": "website-oder-name" }`) |
+| `POST` | `/api/leads/:id/research` | Bestehenden Lead neu recherchieren |
+| `POST` | `/api/leads` | Lead manuell anlegen |
 | `PUT` | `/api/leads/:id` | Lead aktualisieren |
 | `DELETE` | `/api/leads/:id` | Lead löschen |
 | `GET` | `/api/stats` | Dashboard-Kennzahlen |

@@ -18,7 +18,7 @@
     </div>
     <div class="topbar-actions">
       <span id="aiBadge" class="badge badge-off" title="KI-Status">KI: …</span>
-      <button id="addLeadBtn" class="btn btn-primary">+ Neuer Lead</button>
+      <button id="addLeadBtn" class="btn btn-primary">🔎 Lead recherchieren</button>
     </div>
   </header>
 
@@ -41,9 +41,45 @@
     <section id="leadList" class="lead-grid" aria-live="polite"></section>
     <div id="emptyState" class="empty hidden">
       <p>Noch keine Leads vorhanden.</p>
-      <button class="btn btn-primary" onclick="document.getElementById('addLeadBtn').click()">Ersten Lead anlegen</button>
+      <button class="btn btn-primary" onclick="document.getElementById('addLeadBtn').click()">Ersten Lead recherchieren</button>
     </div>
   </main>
+
+  <!-- Recherche-Modal: Lead per Website/Name automatisch recherchieren -->
+  <div class="modal-overlay hidden" id="researchModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>🔎 Lead recherchieren</h2>
+        <button class="icon-btn" id="closeResearchModal" aria-label="Schließen">✕</button>
+      </div>
+      <form id="researchForm" class="form">
+        <label>Unternehmens-Website oder Name
+          <input type="text" id="researchInput" placeholder="z. B. muster-gmbh.de oder Muster GmbH" autocomplete="off" />
+        </label>
+        <p class="hint">Die KI recherchiert automatisch Stammdaten, Bewertungen, Schwachstellen und FU/GE-Potenziale und legt den Lead an. Das dauert i. d. R. 30–90 Sekunden.</p>
+        <div id="researchLoading" class="ai-loading hidden"><span class="spinner"></span> Recherchiere… bitte das Fenster offen lassen.</div>
+        <div class="form-actions">
+          <button type="button" class="btn" id="cancelResearchBtn">Abbrechen</button>
+          <button type="submit" class="btn btn-primary" id="startResearchBtn">Recherchieren &amp; anlegen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Recherche-Detail: zeigt das vollständige Cold-Call-Dossier -->
+  <div class="modal-overlay hidden" id="detailModal">
+    <div class="modal modal-wide" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2 id="detailTitle">Recherche-Dossier</h2>
+        <button class="icon-btn" id="closeDetailModal" aria-label="Schließen">✕</button>
+      </div>
+      <div id="detailBody" class="detail-body"></div>
+      <div class="form-actions">
+        <button type="button" class="btn" id="copyDetailBtn">📋 Markdown kopieren</button>
+        <button type="button" class="btn btn-primary" id="closeDetailBtn">Schließen</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Lead-Formular Modal -->
   <div class="modal-overlay hidden" id="leadModal">
