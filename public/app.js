@@ -6,6 +6,9 @@ let statuses = [];
 let aiEnabled = false;
 let activeFilter = "alle";
 let searchTerm = "";
+let models = [];
+let currentModel = "";
+let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
 const $ = (sel) => document.querySelector(sel);
 const fmtEuro = (n) => (Number(n) || 0).toLocaleString("de-DE") + " €";
@@ -32,8 +35,11 @@ async function init() {
     const cfg = await api("/api/config");
     statuses = cfg.statuses;
     aiEnabled = cfg.aiEnabled;
+    models = cfg.models || [];
+    currentModel = cfg.model || "";
     renderAiBadge(cfg);
     renderStatusFilters();
+    renderViewToggle();
     populateStatusSelect();
     await refresh();
   } catch (err) {
@@ -45,7 +51,8 @@ async function init() {
 function renderAiBadge(cfg) {
   const badge = $("#aiBadge");
   if (cfg.aiEnabled) {
-    badge.textContent = "🤖 KI aktiv";
+    const short = (cfg.model || "").replace("claude-", "");
+    badge.textContent = "🤖 " + (short || "KI aktiv");
     badge.className = "badge badge-on";
     badge.title = "Modell: " + cfg.model;
   } else {
@@ -104,11 +111,125 @@ function scoreColor(score) {
   return "var(--red)";
 }
 
+// Nur Suchbegriff anwenden (für das Kanban-Board, das nach Status spaltet).
+function searchFiltered() {
+  return leads.filter((l) => {
+    if (!searchTerm) return true;
+    const hay = `${l.name} ${l.company} ${l.email} ${l.source}`.toLowerCase();
+    return hay.includes(searchTerm);
+  });
+}
+
+function renderViewToggle() {
+  document.querySelectorAll("#viewToggle .chip").forEach((b) => {
+    b.classList.toggle("active", b.dataset.view === view);
+  });
+}
+
 function renderLeads() {
-  const list = $("#leadList");
-  const items = filteredLeads();
   $("#emptyState").classList.toggle("hidden", leads.length !== 0);
-  list.innerHTML = items.map(leadCard).join("");
+  const isKanban = view === "kanban";
+  $("#leadList").classList.toggle("hidden", isKanban);
+  $("#kanban").classList.toggle("hidden", !isKanban);
+  if (isKanban) renderKanban();
+  else renderList();
+}
+
+function renderList() {
+  $("#leadList").innerHTML = filteredLeads().map(leadCard).join("");
+}
+
+function renderKanban() {
+  const items = searchFiltered();
+  const board = $("#kanban");
+  board.innerHTML = statuses
+    .map((status) => {
+      const colItems = items.filter((l) => l.status === status);
+      const cards = colItems.map(kanbanCard).join("") ||
+        `<div class="kanban-empty">—</div>`;
+      return `<div class="kanban-col" data-status="${status}">
+        <div class="kanban-col-head">
+          <span class="status-pill s-${status}">${status}</span>
+          <span class="kanban-count">${colItems.length}</span>
+        </div>
+        <div class="kanban-cards" data-status="${status}">${cards}</div>
+      </div>`;
+    })
+    .join("");
+}
+
+// --- Kanban Drag & Drop ----------------------------------------------------
+let dragId = null;
+function bindKanbanDnd() {
+  const board = $("#kanban");
+  board.addEventListener("dragstart", (e) => {
+    const card = e.target.closest(".kanban-card");
+    if (!card) return;
+    dragId = card.dataset.id;
+    e.dataTransfer.effectAllowed = "move";
+    card.classList.add("dragging");
+  });
+  board.addEventListener("dragend", (e) => {
+    const card = e.target.closest(".kanban-card");
+    if (card) card.classList.remove("dragging");
+    document.querySelectorAll(".kanban-col.drop").forEach((c) => c.classList.remove("drop"));
+    dragId = null;
+  });
+  board.addEventListener("dragover", (e) => {
+    const zone = e.target.closest(".kanban-cards");
+    if (!zone) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    document.querySelectorAll(".kanban-col.drop").forEach((c) => c.classList.remove("drop"));
+    zone.closest(".kanban-col").classList.add("drop");
+  });
+  board.addEventListener("drop", (e) => {
+    const zone = e.target.closest(".kanban-cards");
+    if (!zone || !dragId) return;
+    e.preventDefault();
+    changeStatus(dragId, zone.dataset.status);
+  });
+}
+
+async function changeStatus(id, status) {
+  const l = leads.find((x) => x.id === id);
+  if (!l || l.status === status) {
+    renderLeads();
+    return;
+  }
+  try {
+    await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ status }) });
+    await refresh();
+    toast(`Status → ${status}`, "success");
+  } catch (err) {
+    toast(err.message, "error");
+    renderLeads();
+  }
+}
+
+function kanbanCard(l) {
+  const score = l.ai
+    ? `<span class="kanban-score" style="color:${scoreColor(l.ai.score)}">★ ${l.ai.score}</span>`
+    : "";
+  const researchBtn = aiEnabled
+    ? (l.research
+        ? `<button class="icon-btn" data-action="detail" data-id="${l.id}" title="Dossier">📋</button>`
+        : `<button class="icon-btn" data-action="research" data-id="${l.id}" title="Jetzt recherchieren">🔎</button>`)
+    : "";
+  return `<article class="kanban-card" draggable="true" data-id="${l.id}">
+    <div class="kanban-card-top">
+      <div class="kanban-card-title">${esc(l.company) || esc(l.name) || "—"}</div>
+      ${score}
+    </div>
+    ${l.name && l.company ? `<div class="kanban-card-sub">${esc(l.name)}</div>` : ""}
+    <div class="kanban-card-foot">
+      <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
+      <span class="kanban-card-actions">
+        ${researchBtn}
+        <button class="icon-btn" data-action="edit" data-id="${l.id}" title="Bearbeiten">✏️</button>
+      </span>
+    </div>
+  </article>`;
 }
 
 function fieldVal(f) {
@@ -151,8 +272,10 @@ function leadCard(l) {
     : "";
 
   const researchBtns = aiEnabled
-    ? `${r ? `<button class="btn btn-sm" data-action="detail" data-id="${l.id}">📋 Dossier</button>` : ""}
-       <button class="btn btn-sm" data-action="reresearch" data-id="${l.id}">🔄 Recherche</button>`
+    ? (r
+        ? `<button class="btn btn-sm" data-action="detail" data-id="${l.id}">📋 Dossier</button>
+           <button class="btn btn-sm" data-action="research" data-id="${l.id}">🔄 Neu recherchieren</button>`
+        : `<button class="btn btn-ai btn-sm" data-action="research" data-id="${l.id}">🔎 Jetzt recherchieren</button>`)
     : "";
 
   return `<article class="lead-card">
@@ -184,6 +307,7 @@ function leadCard(l) {
 // --- Events ----------------------------------------------------------------
 function bindEvents() {
   $("#addLeadBtn").addEventListener("click", openResearchModal);
+  $("#manualLeadBtn").addEventListener("click", () => openLeadModal());
   $("#closeModal").addEventListener("click", closeLeadModal);
   $("#cancelBtn").addEventListener("click", closeLeadModal);
   $("#leadForm").addEventListener("submit", saveLead);
@@ -191,6 +315,11 @@ function bindEvents() {
   $("#closeResearchModal").addEventListener("click", closeResearchModal);
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
   $("#researchForm").addEventListener("submit", submitResearch);
+
+  $("#settingsBtn").addEventListener("click", openSettingsModal);
+  $("#closeSettingsModal").addEventListener("click", closeSettingsModal);
+  $("#cancelSettingsBtn").addEventListener("click", closeSettingsModal);
+  $("#settingsForm").addEventListener("submit", saveSettings);
 
   $("#closeDetailModal").addEventListener("click", closeDetailModal);
   $("#closeDetailBtn").addEventListener("click", closeDetailModal);
@@ -213,16 +342,29 @@ function bindEvents() {
     renderLeads();
   });
 
-  $("#leadList").addEventListener("click", (e) => {
+  $("#viewToggle").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-view]");
+    if (!btn) return;
+    view = btn.dataset.view;
+    localStorage.setItem("leadpilot_view", view);
+    renderViewToggle();
+    renderLeads();
+  });
+
+  // Aktionen funktionieren in Listen- und Kanban-Ansicht.
+  const onAction = (e) => {
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
     const { action, id } = btn.dataset;
     if (action === "edit") openLeadModal(id);
     else if (action === "delete") deleteLead(id);
     else if (action === "detail") openDetailModal(id);
-    else if (action === "reresearch") reResearch(id, btn);
+    else if (action === "research") researchLead(id, btn);
     else if (["score", "email", "insights"].includes(action)) runAi(action, id, btn);
-  });
+  };
+  $("#leadList").addEventListener("click", onAction);
+  $("#kanban").addEventListener("click", onAction);
+  bindKanbanDnd();
 
   // Schließen per Klick auf Overlay
   document.querySelectorAll(".modal-overlay").forEach((ov) => {
@@ -302,6 +444,41 @@ async function deleteLead(id) {
   }
 }
 
+// --- Einstellungen ---------------------------------------------------------
+function openSettingsModal() {
+  const sel = $("#settingsModel");
+  if (!models.length) {
+    toast("Keine Modelle verfügbar (KI nicht konfiguriert)", "error");
+    return;
+  }
+  sel.innerHTML = models
+    .map((m) => `<option value="${esc(m.id)}">${esc(m.label || m.id)}</option>`)
+    .join("");
+  sel.value = currentModel;
+  $("#settingsModal").classList.remove("hidden");
+}
+
+function closeSettingsModal() {
+  $("#settingsModal").classList.add("hidden");
+}
+
+async function saveSettings(e) {
+  e.preventDefault();
+  const model = $("#settingsModel").value;
+  try {
+    const cfg = await api("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    });
+    currentModel = cfg.model;
+    renderAiBadge({ aiEnabled, model: currentModel });
+    toast("Modell gespeichert: " + currentModel.replace("claude-", ""), "success");
+    closeSettingsModal();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
 // --- Lead-Recherche --------------------------------------------------------
 function openResearchModal() {
   $("#researchForm").reset();
@@ -345,26 +522,39 @@ async function submitResearch(e) {
   }
 }
 
-async function reResearch(id, btn) {
+// Recherchiert einen bestehenden Lead. Hat er bereits eine Recherche, fragen
+// wir den Input ab (Korrektur möglich). Ein manuell angelegter Lead ohne
+// Recherche wird direkt anhand seiner Firma/Quelle recherchiert.
+async function researchLead(id, btn) {
   const l = leads.find((x) => x.id === id);
-  const suggested = (l && l.research && l.research.input) || (l && l.company) || "";
-  const input = prompt("Was soll recherchiert werden? (Website oder Firmenname)", suggested);
-  if (input === null) return;
-  const trimmed = input.trim();
-  if (!trimmed) return;
+  let body = {};
+  if (l && l.research) {
+    const suggested = l.research.input || l.company || "";
+    const input = prompt("Was soll recherchiert werden? (Website oder Firmenname)", suggested);
+    if (input === null) return;
+    const t = input.trim();
+    if (!t) return;
+    body = { input: t };
+  } else if (!(l && (l.company || l.source))) {
+    const input = prompt("Website oder Firmenname für die Recherche:", "");
+    if (input === null) return;
+    const t = input.trim();
+    if (!t) return;
+    body = { input: t };
+  }
+  // sonst: kein Input → Server recherchiert anhand Firma/Quelle des Leads.
+  const original = btn.textContent;
   btn.disabled = true;
   btn.textContent = "⏳…";
+  toast("Recherche läuft… das dauert einen Moment.");
   try {
-    await api(`/api/leads/${id}/research`, {
-      method: "POST",
-      body: JSON.stringify({ input: trimmed }),
-    });
-    toast("Recherche aktualisiert", "success");
+    await api(`/api/leads/${id}/research`, { method: "POST", body: JSON.stringify(body) });
+    toast("Recherche abgeschlossen", "success");
     await refresh();
   } catch (err) {
     toast(err.message, "error");
     btn.disabled = false;
-    btn.textContent = "🔄 Recherche";
+    btn.textContent = original;
   }
 }
 
