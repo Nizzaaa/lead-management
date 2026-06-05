@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LeadPilot · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=4" />
+  <link rel="stylesheet" href="styles.css?v=5" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
 </head>
 <body>
@@ -67,7 +67,8 @@
           <input type="text" id="researchInput" placeholder="z. B. muster-gmbh.de oder Muster GmbH" autocomplete="off" />
         </label>
         <p class="hint">Die KI recherchiert automatisch Stammdaten, Bewertungen, Schwachstellen und FU/GE-Potenziale und legt den Lead an. Das dauert i. d. R. 30–90 Sekunden.</p>
-        <div id="researchLoading" class="ai-loading hidden"><span class="spinner"></span> Recherchiere… bitte das Fenster offen lassen.</div>
+        <div id="researchLoading" class="ai-loading hidden"><span class="spinner"></span> Recherchiere… das kann 1–2 Minuten dauern.</div>
+        <ul id="researchSteps" class="research-steps hidden"></ul>
         <div class="form-actions">
           <button type="button" class="btn" id="cancelResearchBtn">Abbrechen</button>
           <button type="submit" class="btn btn-primary" id="startResearchBtn">Recherchieren &amp; anlegen</button>
@@ -164,6 +165,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>
