@@ -28,7 +28,13 @@ services:
       # (siehe .env.example). Ohne Key läuft die App ohne KI-Funktionen.
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - PORT=3000
-      - DATABASE_URL=postgres://leadpilot:${POSTGRES_PASSWORD:-leadpilot}@db:5432/leadpilot
+      # Verbindung über einzelne PG*-Variablen (statt DATABASE_URL),
+      # damit Sonderzeichen im Passwort keine Probleme machen.
+      - PGHOST=db
+      - PGPORT=5432
+      - PGUSER=leadpilot
+      - PGPASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - PGDATABASE=leadpilot
     depends_on:
       db:
         condition: service_healthy
