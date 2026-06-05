@@ -6,6 +6,8 @@ let statuses = [];
 let aiEnabled = false;
 let activeFilter = "alle";
 let searchTerm = "";
+let models = [];
+let currentModel = "";
 
 const $ = (sel) => document.querySelector(sel);
 const fmtEuro = (n) => (Number(n) || 0).toLocaleString("de-DE") + " €";
@@ -32,6 +34,8 @@ async function init() {
     const cfg = await api("/api/config");
     statuses = cfg.statuses;
     aiEnabled = cfg.aiEnabled;
+    models = cfg.models || [];
+    currentModel = cfg.model || "";
     renderAiBadge(cfg);
     renderStatusFilters();
     populateStatusSelect();
@@ -45,7 +49,8 @@ async function init() {
 function renderAiBadge(cfg) {
   const badge = $("#aiBadge");
   if (cfg.aiEnabled) {
-    badge.textContent = "🤖 KI aktiv";
+    const short = (cfg.model || "").replace("claude-", "");
+    badge.textContent = "🤖 " + (short || "KI aktiv");
     badge.className = "badge badge-on";
     badge.title = "Modell: " + cfg.model;
   } else {
@@ -192,6 +197,11 @@ function bindEvents() {
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
   $("#researchForm").addEventListener("submit", submitResearch);
 
+  $("#settingsBtn").addEventListener("click", openSettingsModal);
+  $("#closeSettingsModal").addEventListener("click", closeSettingsModal);
+  $("#cancelSettingsBtn").addEventListener("click", closeSettingsModal);
+  $("#settingsForm").addEventListener("submit", saveSettings);
+
   $("#closeDetailModal").addEventListener("click", closeDetailModal);
   $("#closeDetailBtn").addEventListener("click", closeDetailModal);
   $("#copyDetailBtn").addEventListener("click", copyDetailMarkdown);
@@ -297,6 +307,41 @@ async function deleteLead(id) {
     await api(`/api/leads/${id}`, { method: "DELETE" });
     toast("Lead gelöscht", "success");
     await refresh();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// --- Einstellungen ---------------------------------------------------------
+function openSettingsModal() {
+  const sel = $("#settingsModel");
+  if (!models.length) {
+    toast("Keine Modelle verfügbar (KI nicht konfiguriert)", "error");
+    return;
+  }
+  sel.innerHTML = models
+    .map((m) => `<option value="${esc(m.id)}">${esc(m.label || m.id)}</option>`)
+    .join("");
+  sel.value = currentModel;
+  $("#settingsModal").classList.remove("hidden");
+}
+
+function closeSettingsModal() {
+  $("#settingsModal").classList.add("hidden");
+}
+
+async function saveSettings(e) {
+  e.preventDefault();
+  const model = $("#settingsModel").value;
+  try {
+    const cfg = await api("/api/settings", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    });
+    currentModel = cfg.model;
+    renderAiBadge({ aiEnabled, model: currentModel });
+    toast("Modell gespeichert: " + currentModel.replace("claude-", ""), "success");
+    closeSettingsModal();
   } catch (err) {
     toast(err.message, "error");
   }

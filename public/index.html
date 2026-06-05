@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LeadPilot · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=3" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
 </head>
 <body>
@@ -18,6 +18,7 @@
     </div>
     <div class="topbar-actions">
       <span id="aiBadge" class="badge badge-off" title="KI-Status">KI: …</span>
+      <button id="settingsBtn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">⚙️</button>
       <button id="addLeadBtn" class="btn btn-primary">🔎 Lead recherchieren</button>
     </div>
   </header>
@@ -61,6 +62,26 @@
         <div class="form-actions">
           <button type="button" class="btn" id="cancelResearchBtn">Abbrechen</button>
           <button type="submit" class="btn btn-primary" id="startResearchBtn">Recherchieren &amp; anlegen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Einstellungen: KI-Modell auswählen -->
+  <div class="modal-overlay hidden" id="settingsModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>⚙️ Einstellungen</h2>
+        <button class="icon-btn" id="closeSettingsModal" aria-label="Schließen">✕</button>
+      </div>
+      <form id="settingsForm" class="form">
+        <label>KI-Modell (für Recherche und alle KI-Funktionen)
+          <select id="settingsModel"></select>
+        </label>
+        <p class="hint">Das gewählte Modell wird für die Web-Recherche sowie für KI-Score, E-Mail-Entwurf und Empfehlungen verwendet. Stärkere Modelle liefern bessere Ergebnisse, günstigere sind schneller und kostengünstiger.</p>
+        <div class="form-actions">
+          <button type="button" class="btn" id="cancelSettingsBtn">Abbrechen</button>
+          <button type="submit" class="btn btn-primary">Speichern</button>
         </div>
       </form>
     </div>
@@ -134,6 +155,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

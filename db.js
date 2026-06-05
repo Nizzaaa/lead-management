@@ -58,6 +58,13 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
       // Spalte für bestehende Datenbanken nachrüsten (idempotent).
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS research JSONB;");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);");
+      // Schlüssel/Wert-Tabelle für App-Einstellungen (z. B. gewähltes KI-Modell).
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key   TEXT PRIMARY KEY,
+          value TEXT NOT NULL
+        );
+      `);
       console.log("Datenbank verbunden, Schema bereit.");
       return;
     } catch (err) {
@@ -130,6 +137,19 @@ async function deleteLead(id) {
   return rowCount > 0;
 }
 
+async function getSetting(key) {
+  const { rows } = await pool.query("SELECT value FROM app_settings WHERE key = $1", [key]);
+  return rows[0] ? rows[0].value : null;
+}
+
+async function setSetting(key, value) {
+  await pool.query(
+    `INSERT INTO app_settings (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+    [key, value]
+  );
+}
+
 async function getStats(statuses) {
   const { rows } = await pool.query(
     "SELECT status, COUNT(*)::int AS count, COALESCE(SUM(value), 0)::float AS sum FROM leads GROUP BY status"
@@ -159,5 +179,7 @@ module.exports = {
   setLeadAi,
   setLeadResearch,
   deleteLead,
+  getSetting,
+  setSetting,
   getStats,
 };

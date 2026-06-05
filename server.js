@@ -10,7 +10,22 @@ const PORT = process.env.PORT || 3000;
 // --- Anthropic / KI-Setup --------------------------------------------------
 // Das SDK wird nur geladen, wenn ein API-Key vorhanden ist. So läuft die App
 // auch ohne KI-Konfiguration vollständig (nur die KI-Buttons sind dann inaktiv).
-const MODEL = "claude-opus-4-8";
+
+// Auswählbare Modelle. Bewusst auf Modelle beschränkt, die sowohl die Web-Tools
+// (web_search/web_fetch) als auch strukturierte Outputs (output_config.format)
+// unterstützen – beides wird für die Recherche benötigt.
+const AVAILABLE_MODELS = [
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8 – stärkste Recherche (empfohlen)" },
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 – schnell & ausgewogen" },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 – am günstigsten/schnellsten" },
+];
+const DEFAULT_MODEL = "claude-opus-4-8";
+const MODEL_SETTING_KEY = "ai_model";
+
+// Aktuell gewähltes Modell (wird beim Start aus der DB geladen).
+let currentModel = DEFAULT_MODEL;
+const isValidModel = (m) => AVAILABLE_MODELS.some((x) => x.id === m);
+
 let anthropic = null;
 try {
   if (process.env.ANTHROPIC_API_KEY) {
@@ -80,8 +95,29 @@ app.use(express.static(path.join(__dirname, "public")));
 
 // Health / Konfiguration
 app.get("/api/config", (req, res) => {
-  res.json({ aiEnabled: aiEnabled(), model: MODEL, statuses: STATUSES });
+  res.json({
+    aiEnabled: aiEnabled(),
+    model: currentModel,
+    models: AVAILABLE_MODELS,
+    statuses: STATUSES,
+  });
 });
+
+// Einstellungen lesen
+app.get("/api/settings", (req, res) => {
+  res.json({ model: currentModel, models: AVAILABLE_MODELS });
+});
+
+// Einstellungen speichern (aktuell: KI-Modell)
+app.put("/api/settings", wrap(async (req, res) => {
+  const model = typeof req.body.model === "string" ? req.body.model.trim() : "";
+  if (!isValidModel(model)) {
+    return res.status(400).json({ error: "Unbekanntes Modell." });
+  }
+  await db.setSetting(MODEL_SETTING_KEY, model);
+  currentModel = model;
+  res.json({ model: currentModel, models: AVAILABLE_MODELS });
+}));
 
 // Liste aller Leads
 app.get("/api/leads", wrap(async (req, res) => {
@@ -112,7 +148,7 @@ app.post("/api/leads/research", wrap(async (req, res) => {
     return res.status(400).json({ error: "Firmenname oder Website-URL ist erforderlich." });
   }
   try {
-    const research = await researchCompany(anthropic, input);
+    const research = await researchCompany(anthropic, input, currentModel);
     const data = {
       ...leadFromResearch(research, input),
       status: "neu",
@@ -141,7 +177,7 @@ app.post("/api/leads/:id/research", wrap(async (req, res) => {
     return res.status(400).json({ error: "Kein Recherche-Input vorhanden." });
   }
   try {
-    const research = await researchCompany(anthropic, input);
+    const research = await researchCompany(anthropic, input, currentModel);
     const data = leadFromResearch(research, input);
     const updated = await db.setLeadResearch(lead.id, research, data);
     res.json(updated);
@@ -210,7 +246,7 @@ function leadContext(lead) {
 
 async function callClaude(system, userText, { json = false } = {}) {
   const params = {
-    model: MODEL,
+    model: currentModel,
     max_tokens: 1500,
     system,
     messages: [{ role: "user", content: userText }],
@@ -320,10 +356,17 @@ app.post("/api/leads/:id/insights", wrap(async (req, res) => {
 
 // --- Start -----------------------------------------------------------------
 db.init()
-  .then(() => {
+  .then(async () => {
+    // Gespeichertes Modell laden (falls vorhanden und gültig).
+    try {
+      const saved = await db.getSetting(MODEL_SETTING_KEY);
+      if (saved && isValidModel(saved)) currentModel = saved;
+    } catch (err) {
+      console.warn("Modell-Einstellung konnte nicht geladen werden:", err.message);
+    }
     app.listen(PORT, () => {
       console.log(`Lead-Management läuft auf http://localhost:${PORT}`);
-      console.log(`KI-Funktionen: ${aiEnabled() ? "aktiv (" + MODEL + ")" : "inaktiv (ANTHROPIC_API_KEY setzen)"}`);
+      console.log(`KI-Funktionen: ${aiEnabled() ? "aktiv (" + currentModel + ")" : "inaktiv (ANTHROPIC_API_KEY setzen)"}`);
     });
   })
   .catch((err) => {

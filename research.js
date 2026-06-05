@@ -9,7 +9,12 @@
 //   2) Extraktion der Felder aus dem Dossier in ein striktes JSON-Schema,
 //      damit das Frontend und die KI-Funktionen damit arbeiten können.
 
-const MODEL = "claude-opus-4-8";
+const DEFAULT_MODEL = "claude-opus-4-8";
+
+// Adaptive Thinking nur für Modelle, die es unterstützen (Opus/Sonnet 4.x).
+function thinkingFor(model) {
+  return /^claude-(opus|sonnet)/.test(model) ? { type: "adaptive" } : undefined;
+}
 
 // Serverseitige Tools – laufen vollständig auf Anthropic-Infrastruktur.
 const WEB_TOOLS = [
@@ -148,7 +153,7 @@ const RESEARCH_SCHEMA = {
 // Phase 1: agentische Web-Recherche → Markdown-Dossier.
 // Server-Tools laufen in einer serverseitigen Schleife; bei Erreichen des
 // Iterationslimits liefert die API stop_reason "pause_turn" und wir setzen fort.
-async function runResearch(anthropic, input) {
+async function runResearch(anthropic, input, model) {
   const messages = [
     {
       role: "user",
@@ -158,16 +163,18 @@ async function runResearch(anthropic, input) {
     },
   ];
 
+  const thinking = thinkingFor(model);
   let dossier = "";
   for (let i = 0; i < 16; i++) {
-    const stream = anthropic.messages.stream({
-      model: MODEL,
+    const params = {
+      model,
       max_tokens: 16000,
-      thinking: { type: "adaptive" },
       system: RESEARCH_SYSTEM,
       tools: WEB_TOOLS,
       messages,
-    });
+    };
+    if (thinking) params.thinking = thinking;
+    const stream = anthropic.messages.stream(params);
     const msg = await stream.finalMessage();
 
     if (msg.stop_reason === "pause_turn") {
@@ -190,9 +197,9 @@ async function runResearch(anthropic, input) {
 }
 
 // Phase 2: Felder aus dem Dossier in striktes JSON extrahieren.
-async function extractFields(anthropic, input, dossier) {
+async function extractFields(anthropic, input, dossier, model) {
   const msg = await anthropic.messages.create({
-    model: MODEL,
+    model,
     max_tokens: 8000,
     system:
       "Du extrahierst Felder aus einem bereits erstellten Cold-Call-Dossier in das " +
@@ -211,10 +218,16 @@ async function extractFields(anthropic, input, dossier) {
 }
 
 // Öffentliche API: vollständige Recherche → strukturiertes Objekt inkl. Markdown.
-async function researchCompany(anthropic, input) {
-  const dossier = await runResearch(anthropic, input);
-  const fields = await extractFields(anthropic, input, dossier);
-  return { ...fields, input, markdown: dossier, recherchiertAm: new Date().toISOString() };
+async function researchCompany(anthropic, input, model = DEFAULT_MODEL) {
+  const dossier = await runResearch(anthropic, input, model);
+  const fields = await extractFields(anthropic, input, dossier, model);
+  return {
+    ...fields,
+    input,
+    markdown: dossier,
+    model,
+    recherchiertAm: new Date().toISOString(),
+  };
 }
 
-module.exports = { researchCompany };
+module.exports = { researchCompany, DEFAULT_MODEL };
