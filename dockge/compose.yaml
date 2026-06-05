@@ -1,0 +1,52 @@
+# LeadPilot – Dockge-/GHCR-Variante
+#
+# Diese Compose-Datei nutzt das vorgebaute Image aus der GitHub Container Registry
+# (GHCR) statt lokal zu bauen – ideal für Dockge.
+#
+# So einrichten:
+#   1. In Dockge auf "+ Compose" klicken, Stack-Namen z. B. "leadpilot" vergeben.
+#   2. Den gesamten Inhalt dieser Datei in den Compose-Editor einfügen.
+#   3. Im ".env"-Editor die Variablen setzen (siehe unten).
+#   4. Deploy/Start klicken.
+#
+# Beispiel-.env:
+#   ANTHROPIC_API_KEY=sk-ant-...      # optional, aktiviert die KI-Funktionen
+#   POSTGRES_PASSWORD=einsicheres     # Passwort der Datenbank
+#   PORT=3000                          # Host-Port der Web-App (optional)
+#
+# Hinweis: Ist das GHCR-Paket privat, muss der Docker-Host vorher per
+#   `docker login ghcr.io` angemeldet sein – oder das Paket auf "public" stellen.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: leadpilot-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=leadpilot
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - POSTGRES_DB=leadpilot
+    volumes:
+      - leadpilot-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadpilot -d leadpilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  leadpilot:
+    image: ghcr.io/nizzaaa/leadpilot:latest
+    container_name: leadpilot
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PORT=3000
+      - DATABASE_URL=postgres://leadpilot:${POSTGRES_PASSWORD:-leadpilot}@db:5432/leadpilot
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  leadpilot-db:
