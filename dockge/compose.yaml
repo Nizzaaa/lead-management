@@ -1,18 +1,20 @@
-# LeadPilot – Dockge-/GHCR-Variante
+# LeadPilot – Dockge-/GHCR-Variante mit Traefik
 #
 # Diese Compose-Datei nutzt das vorgebaute Image aus der GitHub Container Registry
-# (GHCR) statt lokal zu bauen – ideal für Dockge.
+# (GHCR) und stellt die App über Traefik bereit.
 #
-# So einrichten:
-#   1. In Dockge auf "+ Compose" klicken, Stack-Namen z. B. "leadpilot" vergeben.
-#   2. Den gesamten Inhalt dieser Datei in den Compose-Editor einfügen.
-#   3. Im ".env"-Editor die Variablen setzen (siehe unten).
+# Voraussetzungen:
+#   - Traefik läuft bereits und nutzt ein Docker-Netzwerk (hier: "traefik").
+#     Passe den Netzwerknamen unten an deinen Traefik an (oft auch "proxy" o. ä.).
+#   - Ein Traefik-Entrypoint "web" ist konfiguriert.
+#
+# So einrichten (Dockge):
+#   1. "+ Compose" → Stack-Name z. B. "leadpilot".
+#   2. Diesen Inhalt einfügen.
+#   3. Im ".env"-Editor die Variablen setzen:
+#        ANTHROPIC_API_KEY=sk-ant-...     # optional, aktiviert die KI-Funktionen
+#        POSTGRES_PASSWORD=einsicheres    # Passwort der Datenbank
 #   4. Deploy/Start klicken.
-#
-# Beispiel-.env:
-#   ANTHROPIC_API_KEY=sk-ant-...      # optional, aktiviert die KI-Funktionen
-#   POSTGRES_PASSWORD=einsicheres     # Passwort der Datenbank
-#   PORT=3000                          # Host-Port der Web-App (optional)
 #
 # Hinweis: Ist das GHCR-Paket privat, muss der Docker-Host vorher per
 #   `docker login ghcr.io` angemeldet sein – oder das Paket auf "public" stellen.
@@ -28,6 +30,8 @@ services:
       - POSTGRES_DB=leadpilot
     volumes:
       - leadpilot-db:/var/lib/postgresql/data
+    networks:
+      - internal
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U leadpilot -d leadpilot"]
       interval: 10s
@@ -38,8 +42,6 @@ services:
     image: ghcr.io/nizzaaa/leadpilot:latest
     container_name: leadpilot
     restart: unless-stopped
-    ports:
-      - "${PORT:-3000}:3000"
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - PORT=3000
@@ -50,9 +52,27 @@ services:
       - PGUSER=leadpilot
       - PGPASSWORD=${POSTGRES_PASSWORD:-leadpilot}
       - PGDATABASE=leadpilot
+    networks:
+      - internal   # Verbindung zur Datenbank
+      - traefik     # Ingress über Traefik
     depends_on:
       db:
         condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.leadpilot.rule=Host(`leads.lennartg.de`)
+      - traefik.http.routers.leadpilot.entrypoints=web
+      - traefik.http.services.leadpilot.loadbalancer.server.port=3000
+      # Bei mehreren Netzwerken muss Traefik wissen, welches es nutzen soll:
+      - traefik.docker.network=traefik
+
+networks:
+  # Externes Traefik-Netzwerk (von der Traefik-Instanz bereitgestellt).
+  # Den Namen ggf. an dein Setup anpassen (z. B. "proxy").
+  traefik:
+    external: true
+  # Internes Netz nur für App <-> Datenbank (nicht von außen erreichbar).
+  internal:
 
 volumes:
   leadpilot-db:
