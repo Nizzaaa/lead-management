@@ -25,6 +25,7 @@ function rowToLead(row) {
     value: Number(row.value),
     notes: row.notes,
     ai: row.ai, // JSONB → bereits als Objekt/null geparst
+    research: row.research, // JSONB → strukturierte Lead-Recherche (oder null)
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
   };
@@ -49,10 +50,13 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
           value       NUMERIC     NOT NULL DEFAULT 0,
           notes       TEXT        NOT NULL DEFAULT '',
           ai          JSONB,
+          research    JSONB,
           created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
           updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
         );
       `);
+      // Spalte für bestehende Datenbanken nachrüsten (idempotent).
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS research JSONB;");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);");
       console.log("Datenbank verbunden, Schema bereit.");
       return;
@@ -77,12 +81,12 @@ async function getLead(id) {
   return rows[0] ? rowToLead(rows[0]) : null;
 }
 
-async function createLead(data) {
+async function createLead(data, research = null) {
   const { rows } = await pool.query(
-    `INSERT INTO leads (id, name, company, email, phone, source, status, value, notes)
-     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO leads (id, name, company, email, phone, source, status, value, notes, research)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
      RETURNING *`,
-    [data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes]
+    [data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes, research]
   );
   return rowToLead(rows[0]);
 }
@@ -103,6 +107,20 @@ async function setLeadAi(id, ai) {
   const { rows } = await pool.query(
     "UPDATE leads SET ai = $2, updated_at = now() WHERE id = $1 RETURNING *",
     [id, ai]
+  );
+  return rows[0] ? rowToLead(rows[0]) : null;
+}
+
+// Aktualisiert die Recherchedaten eines Leads und übernimmt die abgeleiteten
+// Stammdaten (Firma, Ansprechpartner, Kontakt) gleich mit.
+async function setLeadResearch(id, research, data) {
+  const { rows } = await pool.query(
+    `UPDATE leads
+     SET research = $2, name = $3, company = $4, email = $5, phone = $6, source = $7,
+         updated_at = now()
+     WHERE id = $1
+     RETURNING *`,
+    [id, research, data.name, data.company, data.email, data.phone, data.source]
   );
   return rows[0] ? rowToLead(rows[0]) : null;
 }
@@ -139,6 +157,7 @@ module.exports = {
   createLead,
   updateLead,
   setLeadAi,
+  setLeadResearch,
   deleteLead,
   getStats,
 };

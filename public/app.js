@@ -111,6 +111,10 @@ function renderLeads() {
   list.innerHTML = items.map(leadCard).join("");
 }
 
+function fieldVal(f) {
+  return f && f.value ? f.value : "";
+}
+
 function leadCard(l) {
   const ai = l.ai
     ? `<div class="ai-score">
@@ -124,31 +128,54 @@ function leadCard(l) {
        </div>`
     : "";
 
+  // Recherche-Highlights (Branche, Bewertung, stärkstes Potenzial).
+  const r = l.research;
+  const branche = r ? fieldVal(r.fields && r.fields.branche) : "";
+  const bewertung = r ? fieldVal(r.fields && r.fields.kundenbewertung) : "";
+  const topPot = r && Array.isArray(r.potenziale) && r.potenziale[0];
+  const research = r
+    ? `<div class="lead-research">
+         <div class="research-tags">
+           ${branche ? `<span class="tag">🏷️ ${esc(branche)}</span>` : ""}
+           ${bewertung ? `<span class="tag">⭐ ${esc(bewertung)}</span>` : ""}
+           ${Array.isArray(r.potenziale) ? `<span class="tag">🎯 ${r.potenziale.length} Potenziale</span>` : ""}
+         </div>
+         ${topPot ? `<div class="research-top"><strong>Top-Potenzial:</strong> ${esc(topPot.titel)}</div>` : ""}
+       </div>`
+    : `<div class="lead-research lead-research-empty">Keine Recherchedaten – neu recherchieren.</div>`;
+
   const aiButtons = aiEnabled
     ? `<button class="btn btn-ai btn-sm" data-action="score" data-id="${l.id}">⚡ KI-Score</button>
        <button class="btn btn-ai btn-sm" data-action="email" data-id="${l.id}">✉️ E-Mail</button>
        <button class="btn btn-ai btn-sm" data-action="insights" data-id="${l.id}">💡 Tipps</button>`
     : "";
 
+  const researchBtns = aiEnabled
+    ? `${r ? `<button class="btn btn-sm" data-action="detail" data-id="${l.id}">📋 Dossier</button>` : ""}
+       <button class="btn btn-sm" data-action="reresearch" data-id="${l.id}">🔄 Recherche</button>`
+    : "";
+
   return `<article class="lead-card">
     <div class="lead-top">
       <div>
-        <div class="lead-name">${esc(l.name) || "—"}</div>
-        <div class="lead-company">${esc(l.company) || ""}</div>
+        <div class="lead-name">${esc(l.company) || esc(l.name) || "—"}</div>
+        <div class="lead-company">${l.company && l.name ? esc(l.name) : ""}</div>
       </div>
       <span class="status-pill s-${l.status}">${l.status}</span>
     </div>
     <div class="lead-meta">
       ${l.email ? `<span>✉️ <a href="mailto:${esc(l.email)}">${esc(l.email)}</a></span>` : ""}
       ${l.phone ? `<span>📞 ${esc(l.phone)}</span>` : ""}
-      ${l.source ? `<span>📍 ${esc(l.source)}</span>` : ""}
+      ${l.source ? `<span>🌐 ${esc(l.source)}</span>` : ""}
       <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
     </div>
+    ${research}
     ${l.notes ? `<div class="lead-notes">${esc(l.notes)}</div>` : ""}
     ${ai}
     <div class="lead-actions">
       ${aiButtons}
-      <button class="btn btn-sm" data-action="edit" data-id="${l.id}">✏️ Bearbeiten</button>
+      ${researchBtns}
+      <button class="btn btn-sm" data-action="edit" data-id="${l.id}">✏️</button>
       <button class="btn btn-sm" data-action="delete" data-id="${l.id}">🗑️</button>
     </div>
   </article>`;
@@ -156,10 +183,18 @@ function leadCard(l) {
 
 // --- Events ----------------------------------------------------------------
 function bindEvents() {
-  $("#addLeadBtn").addEventListener("click", () => openLeadModal());
+  $("#addLeadBtn").addEventListener("click", openResearchModal);
   $("#closeModal").addEventListener("click", closeLeadModal);
   $("#cancelBtn").addEventListener("click", closeLeadModal);
   $("#leadForm").addEventListener("submit", saveLead);
+
+  $("#closeResearchModal").addEventListener("click", closeResearchModal);
+  $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
+  $("#researchForm").addEventListener("submit", submitResearch);
+
+  $("#closeDetailModal").addEventListener("click", closeDetailModal);
+  $("#closeDetailBtn").addEventListener("click", closeDetailModal);
+  $("#copyDetailBtn").addEventListener("click", copyDetailMarkdown);
 
   $("#closeAiModal").addEventListener("click", closeAiModal);
   $("#closeAiBtn").addEventListener("click", closeAiModal);
@@ -184,6 +219,8 @@ function bindEvents() {
     const { action, id } = btn.dataset;
     if (action === "edit") openLeadModal(id);
     else if (action === "delete") deleteLead(id);
+    else if (action === "detail") openDetailModal(id);
+    else if (action === "reresearch") reResearch(id, btn);
     else if (["score", "email", "insights"].includes(action)) runAi(action, id, btn);
   });
 
@@ -262,6 +299,166 @@ async function deleteLead(id) {
     await refresh();
   } catch (err) {
     toast(err.message, "error");
+  }
+}
+
+// --- Lead-Recherche --------------------------------------------------------
+function openResearchModal() {
+  $("#researchForm").reset();
+  $("#researchLoading").classList.add("hidden");
+  setResearchBusy(false);
+  $("#researchModal").classList.remove("hidden");
+  $("#researchInput").focus();
+}
+
+function closeResearchModal() {
+  $("#researchModal").classList.add("hidden");
+}
+
+function setResearchBusy(busy) {
+  $("#startResearchBtn").disabled = busy;
+  $("#cancelResearchBtn").disabled = busy;
+  $("#researchInput").disabled = busy;
+  $("#researchLoading").classList.toggle("hidden", !busy);
+}
+
+async function submitResearch(e) {
+  e.preventDefault();
+  const input = $("#researchInput").value.trim();
+  if (!input) {
+    toast("Bitte Website oder Firmennamen eingeben", "error");
+    return;
+  }
+  setResearchBusy(true);
+  try {
+    const lead = await api("/api/leads/research", {
+      method: "POST",
+      body: JSON.stringify({ input }),
+    });
+    toast("Lead recherchiert und angelegt", "success");
+    closeResearchModal();
+    await refresh();
+    if (lead && lead.research) openDetailModal(lead.id);
+  } catch (err) {
+    toast(err.message, "error");
+    setResearchBusy(false);
+  }
+}
+
+async function reResearch(id, btn) {
+  const l = leads.find((x) => x.id === id);
+  const suggested = (l && l.research && l.research.input) || (l && l.company) || "";
+  const input = prompt("Was soll recherchiert werden? (Website oder Firmenname)", suggested);
+  if (input === null) return;
+  const trimmed = input.trim();
+  if (!trimmed) return;
+  btn.disabled = true;
+  btn.textContent = "⏳…";
+  try {
+    await api(`/api/leads/${id}/research`, {
+      method: "POST",
+      body: JSON.stringify({ input: trimmed }),
+    });
+    toast("Recherche aktualisiert", "success");
+    await refresh();
+  } catch (err) {
+    toast(err.message, "error");
+    btn.disabled = false;
+    btn.textContent = "🔄 Recherche";
+  }
+}
+
+// --- Recherche-Detail (Dossier) --------------------------------------------
+let detailMarkdown = "";
+
+function detailRow(label, field) {
+  const v = field && field.value ? field.value : "—";
+  const src = field && field.source ? field.source : "";
+  const srcHtml = src
+    ? ` <a class="src" href="${esc(src)}" target="_blank" rel="noopener">↗ Quelle</a>`
+    : "";
+  return `<tr><th>${esc(label)}</th><td>${esc(v)}${srcHtml}</td></tr>`;
+}
+
+function openDetailModal(id) {
+  const l = leads.find((x) => x.id === id);
+  if (!l || !l.research) {
+    toast("Keine Recherchedaten vorhanden", "error");
+    return;
+  }
+  const r = l.research;
+  const f = r.fields || {};
+  detailMarkdown = r.markdown || "";
+
+  $("#detailTitle").textContent = r.unternehmensname || l.company || "Recherche-Dossier";
+
+  const pots =
+    Array.isArray(r.potenziale) && r.potenziale.length
+      ? r.potenziale
+          .map(
+            (p) =>
+              `<li><strong>${esc(p.titel)}</strong> — ${esc(p.beschreibung)}<br><em class="signal">Signal: ${esc(p.signal)}</em></li>`
+          )
+          .join("")
+      : "<li>—</li>";
+
+  const meta = [
+    r.rechercheStand ? `Recherche-Stand: ${esc(r.rechercheStand)}` : "",
+    r.input ? `Input: ${esc(r.input)}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  $("#detailBody").innerHTML = `
+    <p class="detail-meta">${meta}</p>
+    ${r.ambiguityWarning ? `<p class="warn">⚠️ ${esc(r.ambiguityWarning)}</p>` : ""}
+
+    <h3>1. Allgemeine Infos</h3>
+    <table class="detail-table">
+      ${detailRow("Branche", f.branche)}
+      ${detailRow("Adresse", f.adresse)}
+      ${detailRow("Telefon (allgemein)", f.telefonAllgemein)}
+      ${detailRow("Ansprechpartner / Entscheider", f.ansprechpartner)}
+      ${detailRow("Telefon (Durchwahl)", f.telefonDurchwahl)}
+      ${detailRow("Öffnungszeiten", f.oeffnungszeiten)}
+      ${detailRow("Mail", f.mail)}
+      ${detailRow("Web", f.web)}
+      ${detailRow("Kundenbewertung", f.kundenbewertung)}
+    </table>
+
+    <h3>Negative Bewertungen → Potenzial</h3>
+    <p>${esc(r.negativeBewertungen) || "—"}</p>
+
+    <h3>2. Einordnung / Selbstdarstellung</h3>
+    <p>${esc(r.einordnung) || "—"}</p>
+
+    <h3>3. Sichtbare Schwachstellen / Ansatzpunkte</h3>
+    <p>${esc(r.schwachstellen) || "—"}</p>
+
+    <h3>4. Potenziale für FU/GE</h3>
+    <ul class="detail-pots">${pots}</ul>
+
+    <h3>5. Strategie für Cold Call</h3>
+    <p>${esc(r.coldCallStrategie) || "—"}</p>
+
+    <h3>6. Risiken / Denkbare Ablehnungsgründe</h3>
+    <p>${esc(r.risiken) || "—"}</p>
+  `;
+
+  $("#copyDetailBtn").classList.toggle("hidden", !detailMarkdown);
+  $("#detailModal").classList.remove("hidden");
+}
+
+function closeDetailModal() {
+  $("#detailModal").classList.add("hidden");
+}
+
+async function copyDetailMarkdown() {
+  try {
+    await navigator.clipboard.writeText(detailMarkdown);
+    toast("Dossier in Zwischenablage kopiert", "success");
+  } catch {
+    toast("Kopieren nicht möglich", "error");
   }
 }
 
