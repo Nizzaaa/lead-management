@@ -11,11 +11,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # Anwendungscode kopieren
-COPY server.js ./
+COPY server.js db.js ./
 COPY public ./public
-
-# Datenverzeichnis anlegen (wird per Volume persistiert)
-RUN mkdir -p /app/data
 
 # Als unprivilegierter Node-Benutzer laufen
 RUN chown -R node:node /app
