@@ -1,0 +1,18 @@
+{
+  "name": "lead-management",
+  "version": "1.0.0",
+  "description": "Einfaches, benutzerfreundliches Online-Tool zur Lead-Verwaltung mit integrierten KI-Funktionen",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.69.0",
+    "express": "^4.21.2"
+  }
+}

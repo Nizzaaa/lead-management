@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LeadPilot · Lead-Verwaltung mit KI</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">🎯</span>
+      <div>
+        <h1>LeadPilot</h1>
+        <p class="tagline">Lead-Verwaltung mit KI-Unterstützung</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <span id="aiBadge" class="badge badge-off" title="KI-Status">KI: …</span>
+      <button id="addLeadBtn" class="btn btn-primary">+ Neuer Lead</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Dashboard -->
+    <section class="stats" id="stats" aria-label="Kennzahlen">
+      <div class="stat-card"><span class="stat-value" id="statTotal">0</span><span class="stat-label">Leads gesamt</span></div>
+      <div class="stat-card"><span class="stat-value" id="statPipeline">0 €</span><span class="stat-label">Pipeline-Wert</span></div>
+      <div class="stat-card"><span class="stat-value" id="statWon">0 €</span><span class="stat-label">Gewonnen</span></div>
+      <div class="stat-card"><span class="stat-value" id="statConversion">0 %</span><span class="stat-label">Abschlussquote</span></div>
+    </section>
+
+    <!-- Filter -->
+    <section class="toolbar">
+      <input type="search" id="search" class="search" placeholder="🔍 Suche nach Name, Firma, E-Mail…" />
+      <div class="filters" id="statusFilters"></div>
+    </section>
+
+    <!-- Lead-Liste -->
+    <section id="leadList" class="lead-grid" aria-live="polite"></section>
+    <div id="emptyState" class="empty hidden">
+      <p>Noch keine Leads vorhanden.</p>
+      <button class="btn btn-primary" onclick="document.getElementById('addLeadBtn').click()">Ersten Lead anlegen</button>
+    </div>
+  </main>
+
+  <!-- Lead-Formular Modal -->
+  <div class="modal-overlay hidden" id="leadModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2 id="modalTitle">Neuer Lead</h2>
+        <button class="icon-btn" id="closeModal" aria-label="Schließen">✕</button>
+      </div>
+      <form id="leadForm" class="form">
+        <input type="hidden" id="leadId" />
+        <div class="form-row">
+          <label>Name<input type="text" id="f_name" placeholder="Max Mustermann" /></label>
+          <label>Firma<input type="text" id="f_company" placeholder="Muster GmbH" /></label>
+        </div>
+        <div class="form-row">
+          <label>E-Mail<input type="email" id="f_email" placeholder="max@muster.de" /></label>
+          <label>Telefon<input type="text" id="f_phone" placeholder="+49 …" /></label>
+        </div>
+        <div class="form-row">
+          <label>Quelle<input type="text" id="f_source" placeholder="Website, Messe, Empfehlung…" /></label>
+          <label>Geschätzter Wert (€)<input type="number" id="f_value" min="0" step="100" placeholder="5000" /></label>
+        </div>
+        <label>Status
+          <select id="f_status"></select>
+        </label>
+        <label>Notizen<textarea id="f_notes" rows="3" placeholder="Bedarf, Gesprächsnotizen, nächste Schritte…"></textarea></label>
+        <div class="form-actions">
+          <button type="button" class="btn" id="cancelBtn">Abbrechen</button>
+          <button type="submit" class="btn btn-primary">Speichern</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- KI-Ergebnis Modal -->
+  <div class="modal-overlay hidden" id="aiModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2 id="aiModalTitle">KI-Ergebnis</h2>
+        <button class="icon-btn" id="closeAiModal" aria-label="Schließen">✕</button>
+      </div>
+      <div class="ai-body">
+        <div id="aiLoading" class="ai-loading hidden"><span class="spinner"></span> KI arbeitet…</div>
+        <pre id="aiResult" class="ai-result"></pre>
+      </div>
+      <div class="form-actions">
+        <button type="button" class="btn" id="copyAiBtn">📋 Kopieren</button>
+        <button type="button" class="btn btn-primary" id="closeAiBtn">Schließen</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
