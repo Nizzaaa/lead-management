@@ -16,7 +16,26 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 - **✉️ E-Mail-Entwurf** – generiert eine personalisierte Akquise-E-Mail (Ziel frei wählbar)
 - **💡 Empfehlungen** – schlägt die nächsten besten Schritte ("Next Best Action") vor
 
-## Schnellstart
+## Schnellstart mit Docker Compose (empfohlen)
+
+```bash
+# 1. API-Key hinterlegen (optional, aktiviert die KI-Funktionen)
+cp .env.example .env
+#   → ANTHROPIC_API_KEY in der .env eintragen
+
+# 2. Bauen und starten
+docker compose up -d
+```
+
+Dann im Browser öffnen: **http://localhost:3000**
+
+- Die Leads werden im benannten Volume `leadpilot-data` gespeichert und bleiben
+  über Neustarts und Rebuilds hinweg erhalten.
+- Port anpassen: `PORT=8080 docker compose up -d` (oder `PORT` in der `.env` setzen).
+- Stoppen: `docker compose down` · Logs: `docker compose logs -f` ·
+  Neu bauen: `docker compose up -d --build`
+
+## Schnellstart ohne Docker
 
 ```bash
 # 1. Abhängigkeiten installieren
