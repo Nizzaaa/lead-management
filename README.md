@@ -172,6 +172,12 @@ Version zurück, statt blind `:latest` zu ziehen.
 | `POST` | `/api/leads/:id/email` | KI-E-Mail-Entwurf |
 | `POST` | `/api/leads/:id/insights` | KI-Empfehlung |
 
+## Lizenz
+
+**Proprietär – Alle Rechte vorbehalten.** Nutzung, Kopieren, Forken oder
+Weitergabe sind ohne ausdrückliche schriftliche Genehmigung untersagt.
+Siehe [`LICENSE`](LICENSE). Anfragen: lennart.gericke@fuge-solutions.de
+
 ## Daten
 
 Alle Leads werden in einer **PostgreSQL-Datenbank** gespeichert. Im Docker-Compose-Setup
