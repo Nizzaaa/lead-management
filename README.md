@@ -103,6 +103,52 @@ Dann im Browser öffnen: **http://localhost:3000**
 > Ohne `ANTHROPIC_API_KEY` läuft die App vollständig – die KI-Buttons sind dann
 > einfach inaktiv. Sobald der Key gesetzt ist, erscheinen die KI-Funktionen automatisch.
 
+## Entwicklungs-Workflow (empfohlen)
+
+Nicht in Produktion testen. Der professionelle Ablauf in drei Stufen:
+
+### 1. Lokal entwickeln (Live-Reload, kein Deploy)
+
+```bash
+# Startet App + Postgres lokal, Quellcode wird live gemountet.
+# Backend-Änderungen → Server startet automatisch neu (nodemon);
+# Frontend-Änderungen (public/) → einfach Browser neu laden.
+docker compose -f docker-compose.dev.yml up
+```
+
+Browser: **http://localhost:3000** · KI optional: `ANTHROPIC_API_KEY` vorab setzen
+oder in `.env` hinterlegen. So siehst du Änderungen sofort, ganz ohne Image-Build.
+
+### 2. Feature-Branch → Pull Request → CI
+
+- Auf einem **Branch** arbeiten, nicht direkt auf `main`.
+- Pull Request öffnen. Der **CI-Workflow**
+  ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) läuft automatisch:
+  Abhängigkeiten installieren, Syntax-Check, und ein **Smoke-Test** (App gegen
+  eine Wegwerf-Postgres starten und `/api/config` prüfen).
+- Erst wenn CI **grün** ist → mergen. So erreicht kein kaputter Stand `main`.
+
+### 3. Staging → Release auf Produktion
+
+Jeder Merge auf `main` baut automatisch `:latest` (GHCR). Daraus:
+
+1. **Staging** ([`dockge/compose.staging.yaml`](dockge/compose.staging.yaml)) fährt
+   `:latest` auf einem eigenen Host/Volume → dort testen.
+2. Zufrieden? **Release per Git-Tag** setzen:
+   ```bash
+   git tag v1.4.0 && git push origin v1.4.0
+   ```
+   Die Action baut daraufhin `:1.4.0` (+ `:1.4`, `:1`).
+3. **Produktion** ([`dockge/compose.yaml`](dockge/compose.yaml)) auf diese Version
+   pinnen — im `.env`-Editor von Dockge: `LEADPILOT_TAG=1.4.0` → Stack neu deployen.
+
+So aktualisierst du Prod **bewusst** und kannst jederzeit auf eine bekannte
+Version zurück, statt blind `:latest` zu ziehen.
+
+> Optional noch komfortabler: ein **Watchtower**-Container auf dem Server zieht
+> neue Images automatisch und startet neu – dann entfällt auch der manuelle
+> Dockge-Schritt. (Bewusst nicht aktiviert, damit Prod nicht ungefragt rollt.)
+
 ## Technik
 
 - **Backend:** Node.js + Express
