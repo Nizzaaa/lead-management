@@ -59,6 +59,51 @@ function sanitizeLead(body = {}) {
   };
 }
 
+// Reihenfolge/Schlüssel der Felder aus Sektion 1 des Dossiers.
+const RESEARCH_FIELD_KEYS = [
+  "branche", "adresse", "telefonAllgemein", "ansprechpartner",
+  "telefonDurchwahl", "oeffnungszeiten", "mail", "web", "kundenbewertung",
+];
+
+// Bereinigt ein vom Frontend manuell bearbeitetes Recherche-Objekt und führt es
+// mit dem bestehenden zusammen (so bleiben Metadaten wie markdown/input/model
+// erhalten). Akzeptiert nur die bekannten Felder der Dossier-Struktur.
+function sanitizeResearch(body = {}, prev = {}) {
+  const s = (v) => (typeof v === "string" ? v.trim() : "");
+  const base = prev && typeof prev === "object" ? prev : {};
+  const baseFields = (base.fields && typeof base.fields === "object") ? base.fields : {};
+  const inFields = (body.fields && typeof body.fields === "object") ? body.fields : {};
+
+  const fields = {};
+  for (const k of RESEARCH_FIELD_KEYS) {
+    const src = inFields[k] !== undefined ? inFields[k] : baseFields[k];
+    fields[k] = { value: s(src && src.value), source: s(src && src.source) };
+  }
+
+  const potenziale = Array.isArray(body.potenziale)
+    ? body.potenziale
+        .map((p) => ({ titel: s(p && p.titel), beschreibung: s(p && p.beschreibung), signal: s(p && p.signal) }))
+        .filter((p) => p.titel || p.beschreibung || p.signal)
+    : (Array.isArray(base.potenziale) ? base.potenziale : []);
+
+  // Übernimmt einen String-Wert aus dem Body, fällt sonst auf den Bestand zurück.
+  const str = (key) => (body[key] !== undefined ? s(body[key]) : s(base[key]));
+
+  return {
+    ...base,
+    unternehmensname: str("unternehmensname"),
+    rechercheStand: str("rechercheStand"),
+    ambiguityWarning: str("ambiguityWarning"),
+    fields,
+    negativeBewertungen: str("negativeBewertungen"),
+    einordnung: str("einordnung"),
+    schwachstellen: str("schwachstellen"),
+    potenziale,
+    coldCallStrategie: str("coldCallStrategie"),
+    risiken: str("risiken"),
+  };
+}
+
 // Behandelt "k.A."/leer als unbekannt – verhindert, dass Platzhalter in den
 // Stammdatenfeldern landen.
 function known(v) {
@@ -221,6 +266,15 @@ app.get("/api/research/:jobId", (req, res) => {
   if (!job) return res.status(404).json({ error: "Recherche-Job nicht gefunden." });
   res.json({ status: job.status, steps: job.steps, lead: job.lead, error: job.error });
 });
+
+// Recherche-Dossier manuell bearbeiten (ohne KI neu zu starten).
+app.put("/api/leads/:id/research", wrap(async (req, res) => {
+  const existing = await db.getLead(req.params.id);
+  if (!existing) return res.status(404).json({ error: "Lead nicht gefunden." });
+  const research = sanitizeResearch(req.body, existing.research || {});
+  const lead = await db.updateLeadResearch(req.params.id, research);
+  res.json(lead);
+}));
 
 // Lead aktualisieren
 app.put("/api/leads/:id", wrap(async (req, res) => {

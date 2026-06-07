@@ -132,6 +132,17 @@ async function setLeadResearch(id, research, data) {
   return rows[0] ? rowToLead(rows[0]) : null;
 }
 
+// Aktualisiert ausschließlich die Recherchedaten (JSONB) eines Leads – ohne
+// die Stammdaten anzufassen. Wird für die manuelle Bearbeitung des Dossiers
+// auf der Detailseite verwendet (kein erneuter KI-Lauf).
+async function updateLeadResearch(id, research) {
+  const { rows } = await pool.query(
+    "UPDATE leads SET research = $2, updated_at = now() WHERE id = $1 RETURNING *",
+    [id, research]
+  );
+  return rows[0] ? rowToLead(rows[0]) : null;
+}
+
 async function deleteLead(id) {
   const { rowCount } = await pool.query("DELETE FROM leads WHERE id = $1", [id]);
   return rowCount > 0;
@@ -178,6 +189,7 @@ module.exports = {
   updateLead,
   setLeadAi,
   setLeadResearch,
+  updateLeadResearch,
   deleteLead,
   getSetting,
   setSetting,

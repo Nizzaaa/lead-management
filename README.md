@@ -12,9 +12,11 @@ mit integrierten KI-Funktionen auf Basis von Claude.
   - **Negative Bewertungen → Potenzial**, **Selbstdarstellung**, **sichtbare Schwachstellen**
   - **mind. 5 konkrete FU/GE-Potenziale**, **Cold-Call-Strategie** und **Risiken/Ablehnungsgründe**
 - Striktes „Keine-Halluzination"-Prinzip: nur belegte Fakten, sonst `k.A.`
-- Vollständiges Dossier pro Lead einsehbar (📋) und als Markdown kopierbar; jederzeit neu recherchierbar (🔄)
+- Jeder Lead hat eine **eigene Detailseite**, die das vollständige Dossier sauber strukturiert und formatiert anzeigt (keine rohe Markdown-Ausgabe); jederzeit neu recherchierbar (🔄)
 
 **Lead-Verwaltung**
+- **Schlanke Lead-Karten** in der Übersicht zeigen nur das Wichtigste (Firma, Ansprechpartner, Status, Branche, Wert, KI-Score); ein Klick öffnet die Detailseite
+- **Detailseite pro Lead** mit Inline-Bearbeitung von **allem**: Stammdaten *und* sämtliche Recherche-Inhalte (Felder inkl. Quellen, Texte, Potenziale)
 - Pipeline-Status: `neu → kontaktiert → qualifiziert → angebot → gewonnen / verloren`
 - Manuelles Bearbeiten (Status, Wert, Notizen, Stammdaten), Live-Suche und Status-Filter
 - Dashboard mit Kennzahlen: Anzahl Leads, Pipeline-Wert, gewonnener Umsatz, Abschlussquote
