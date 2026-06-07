@@ -1,0 +1,61 @@
+# LeadPilot – Lokale Entwicklungsumgebung mit Live-Reload
+#
+# Zweck: Änderungen sofort sehen, OHNE Image zu bauen oder zu deployen.
+# Der Quellcode wird ins Container gemountet; nodemon startet den Server bei
+# Backend-Änderungen automatisch neu. Frontend-Änderungen (public/) brauchen
+# nur einen Browser-Refresh.
+#
+# Start:   docker compose -f docker-compose.dev.yml up
+#          (optional KI: ANTHROPIC_API_KEY=sk-ant-... davorsetzen oder in .env)
+# Browser: http://localhost:3000
+# Stoppen: docker compose -f docker-compose.dev.yml down
+#          (inkl. Daten:  ... down -v)
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: leadpilot-dev-db
+    environment:
+      - POSTGRES_USER=leadpilot
+      - POSTGRES_PASSWORD=leadpilot
+      - POSTGRES_DB=leadpilot
+    ports:
+      # Datenbank lokal erreichbar (z. B. für ein DB-Tool)
+      - "5432:5432"
+    volumes:
+      - leadpilot-db-dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadpilot -d leadpilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    image: node:20-alpine
+    container_name: leadpilot-dev
+    working_dir: /app
+    # Erst Abhängigkeiten (inkl. devDependencies wie nodemon), dann Live-Reload.
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PGHOST=db
+      - PGPORT=5432
+      - PGUSER=leadpilot
+      - PGPASSWORD=leadpilot
+      - PGDATABASE=leadpilot
+    volumes:
+      # Quellcode live ins Container spiegeln …
+      - .:/app
+      # … aber node_modules NICHT mit dem Host vermischen (eigene Volume).
+      - leadpilot-node-modules:/app/node_modules
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  leadpilot-db-dev:
+  leadpilot-node-modules:

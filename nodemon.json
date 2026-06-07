@@ -1,0 +1,6 @@
+{
+  "watch": ["server.js", "db.js", "research.js"],
+  "ext": "js",
+  "ignore": ["public/**"],
+  "delay": 300
+}

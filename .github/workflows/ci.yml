@@ -1,0 +1,80 @@
+name: CI
+
+# Prüft jeden Pull Request (und Pushes auf main), bevor etwas gemergt wird:
+#  - Abhängigkeiten installieren
+#  - Syntax-Check aller JS-Dateien
+#  - Smoke-Test: App gegen eine Wegwerf-Postgres starten und /api/config prüfen
+# So erreicht kein kaputter Stand main.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: leadpilot
+          POSTGRES_PASSWORD: leadpilot
+          POSTGRES_DB: leadpilot
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U leadpilot -d leadpilot"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax-Check
+        run: |
+          node --check server.js
+          node --check db.js
+          node --check research.js
+          node --check public/app.js
+
+      - name: Smoke-Test (App startet & /api/config antwortet)
+        env:
+          PGHOST: localhost
+          PGPORT: 5432
+          PGUSER: leadpilot
+          PGPASSWORD: leadpilot
+          PGDATABASE: leadpilot
+          PORT: 3000
+        run: |
+          node server.js &
+          SERVER_PID=$!
+          ok=
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:3000/api/config > /tmp/config.json; then ok=1; break; fi
+            sleep 1
+          done
+          kill "$SERVER_PID" 2>/dev/null || true
+          if [ "$ok" != "1" ]; then
+            echo "::error::Server ist nicht innerhalb von 30s gestartet."
+            exit 1
+          fi
+          echo "Antwort von /api/config:"
+          cat /tmp/config.json
+          grep -q '"statuses"' /tmp/config.json || {
+            echo "::error::Unerwartete Antwort von /api/config";
+            exit 1;
+          }
+          echo "Smoke-Test bestanden."

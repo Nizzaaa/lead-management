@@ -9,4 +9,8 @@ npm-debug.log*
 README.md
 Dockerfile
 docker-compose.yml
+docker-compose.dev.yml
+nodemon.json
+dockge
+.github
 .dockerignore
