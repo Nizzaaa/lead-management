@@ -11,9 +11,21 @@
 
 const DEFAULT_MODEL = "claude-opus-4-8";
 
+// Phase 2 (Extraktion in JSON) ist eine rein mechanische Aufgabe und läuft
+// daher immer auf dem günstigsten Modell – unabhängig vom Recherche-Modell.
+// Spart pro Lead spürbar Kosten ohne Qualitätsverlust.
+const EXTRACT_MODEL = "claude-haiku-4-5";
+
 // Adaptive Thinking nur für Modelle, die es unterstützen (Opus/Sonnet 4.x).
 function thinkingFor(model) {
   return /^claude-(opus|sonnet)/.test(model) ? { type: "adaptive" } : undefined;
+}
+
+// Effort-Stufe steuert Denk-Tiefe und damit Token-/Kostenaufwand. "medium" ist
+// der Sweet Spot aus Qualität und Effizienz. Wird nur von Opus 4.x und
+// Sonnet 4.6 unterstützt (Haiku/Sonnet 4.5 würden einen Fehler werfen).
+function effortFor(model) {
+  return /^claude-opus/.test(model) || model === "claude-sonnet-4-6" ? "medium" : undefined;
 }
 
 // Serverseitige Tools – laufen vollständig auf Anthropic-Infrastruktur.
@@ -207,6 +219,8 @@ async function runResearch(anthropic, input, model, onProgress) {
       messages,
     };
     if (thinking) params.thinking = thinking;
+    const effort = effortFor(model);
+    if (effort) params.output_config = { effort };
     const stream = anthropic.messages.stream(params);
 
     // Fortschritt melden, sobald die KI eine Web-Suche/Seitenabruf nutzt.
@@ -272,7 +286,8 @@ async function researchCompany(anthropic, input, model = DEFAULT_MODEL, onProgre
   onProgress(`Starte Recherche zu „${input}“…`);
   const dossier = await runResearch(anthropic, input, model, onProgress);
   onProgress("📝 Dossier erstellt – extrahiere strukturierte Felder…");
-  const fields = await extractFields(anthropic, input, dossier, model);
+  // Extraktion bewusst auf dem günstigen Modell (mechanische Aufgabe).
+  const fields = await extractFields(anthropic, input, dossier, EXTRACT_MODEL);
   onProgress("✅ Recherche abgeschlossen.");
   return {
     ...fields,
