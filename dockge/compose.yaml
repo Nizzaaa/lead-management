@@ -12,8 +12,9 @@
 #   1. "+ Compose" → Stack-Name z. B. "leadpilot".
 #   2. Diesen Inhalt einfügen.
 #   3. Im ".env"-Editor die Variablen setzen:
-#        ANTHROPIC_API_KEY=sk-ant-...     # optional, aktiviert die KI-Funktionen
-#        POSTGRES_PASSWORD=einsicheres    # Passwort der Datenbank
+#        ANTHROPIC_API_KEY=sk-ant-...                 # optional, aktiviert die KI-Funktionen
+#        POSTGRES_PASSWORD=einsicheres                # Passwort der Datenbank
+#        FRAME_ANCESTORS=https://cloud.lennartg.de    # Nextcloud-URL für die iframe-Einbettung
 #   4. Deploy/Start klicken.
 #
 # Hinweis: Ist das GHCR-Paket privat, muss der Docker-Host vorher per
@@ -56,6 +57,10 @@ services:
       - PGUSER=leadpilot
       - PGPASSWORD=${POSTGRES_PASSWORD:-leadpilot}
       - PGDATABASE=leadpilot
+      # Einbettung in Nextcloud (iframe) erlauben – im .env-Editor auf die
+      # Nextcloud-Origin setzen, z. B. FRAME_ANCESTORS=https://cloud.lennartg.de
+      # Leer = kein frame-ancestors-Header (Einbettung dann nicht abgesichert).
+      - FRAME_ANCESTORS=${FRAME_ANCESTORS:-}
     networks:
       - internal   # Verbindung zur Datenbank
       - traefik     # Ingress über Traefik

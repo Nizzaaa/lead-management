@@ -12,20 +12,40 @@ mit integrierten KI-Funktionen auf Basis von Claude.
   - **Negative Bewertungen → Potenzial**, **Selbstdarstellung**, **sichtbare Schwachstellen**
   - **mind. 5 konkrete FU/GE-Potenziale**, **Cold-Call-Strategie** und **Risiken/Ablehnungsgründe**
 - Striktes „Keine-Halluzination"-Prinzip: nur belegte Fakten, sonst `k.A.`
-- Vollständiges Dossier pro Lead einsehbar (📋) und als Markdown kopierbar; jederzeit neu recherchierbar (🔄)
+- Jeder Lead hat eine **eigene Detailseite**, die das vollständige Dossier sauber strukturiert und formatiert anzeigt (keine rohe Markdown-Ausgabe); jederzeit neu recherchierbar (🔄)
 
 **Lead-Verwaltung**
+- **Schlanke Lead-Karten** in der Übersicht zeigen nur das Wichtigste (Firma, Ansprechpartner, Status, Branche, Wert, KI-Score); ein Klick öffnet die Detailseite
+- **Detailseite pro Lead** mit Inline-Bearbeitung von **allem**: Stammdaten *und* sämtliche Recherche-Inhalte (Felder inkl. Quellen, Texte, Potenziale)
 - Pipeline-Status: `neu → kontaktiert → qualifiziert → angebot → gewonnen / verloren`
 - Manuelles Bearbeiten (Status, Wert, Notizen, Stammdaten), Live-Suche und Status-Filter
-- Dashboard mit Kennzahlen: Anzahl Leads, Pipeline-Wert, gewonnener Umsatz, Abschlussquote
+- Dashboard mit Kennzahlen: Anzahl Leads, **gewichteter Pipeline-Wert** (Erwartungswert = Σ Wert × Abschlusswahrscheinlichkeit je Status, in den Einstellungen anpassbar), gewonnener Umsatz, Abschlussquote
 
-**KI-Funktionen** (🤖 über das Anthropic-Modell `claude-opus-4-8`) – nutzen das Recherche-Dossier als Grundlage
-- **⚡ KI-Score** – bewertet das Abschlusspotenzial eines Leads von 0–100 inkl. Schulnote und Begründung
+**KI-Funktionen** – nutzen das Recherche-Dossier als Grundlage
+- **⚡ KI-Score** – wird automatisch nach der Recherche ermittelt; bewertet das Abschlusspotenzial von 0–100 inkl. Schulnote, Begründung **und einer Auftragswert-Schätzung** (befüllt den Wert, wenn noch keiner gepflegt ist)
 - **✉️ E-Mail-Entwurf** – generiert eine personalisierte Akquise-E-Mail, die an einen belegten Ansatzpunkt anknüpft
 - **💡 Empfehlungen** – schlägt die nächsten besten Schritte ("Next Best Action") für den Cold Call vor
 
 > Die Web-Recherche läuft über die serverseitigen Anthropic-Tools `web_search` und `web_fetch`
 > und benötigt daher einen gesetzten `ANTHROPIC_API_KEY`.
+
+**Aktivitäten-Timeline** (je Lead)
+- Jeder Touchpoint wird festgehalten: **Notiz, Anruf, E-Mail, Termin** (mit Ergebnis)
+- **Automatische Einträge** für Systemereignisse: Anlage, Recherche, KI-Score, Status­wechsel, KI-E-Mail/Empfehlung – chronologisch mit Zeit und Aktor
+
+**Aufgaben / Wiedervorlagen**
+- Aufgaben mit **Fälligkeit** anlegen – direkt am Lead oder in der globalen Ansicht
+- **Überfällige** Aufgaben sind hervorgehoben; ein **Zähler in der Navigation** zeigt offene/überfällige Aufgaben
+- Erledigen per Häkchen; erledigte Aufgaben optional einblendbar
+
+**Berichte** (📊)
+- KPIs (Leads, gewichtete Pipeline, gewonnen, Abschlussquote, Ø Auftragswert, offene Aufgaben)
+- **Pipeline-Trichter**, **neue Leads je Monat**, **gewonnener Umsatz je Monat** (abhängigkeitsfreie SVG-Charts)
+- **Quellen-Performance** (Leads/Gewonnen/Wert je Quelle)
+
+**Betrieb & Sicherheit**
+- **Strukturiertes Logging** (JSON-Lines) mit Request-ID, Dauer, Aktor und Redaction sensibler Felder; Level über `LOG_LEVEL`, lesbar mit `LOG_PRETTY=1`
+- **Einbettung in Nextcloud** als iframe mit SSO über **Cloudflare Access + Zitadel** (oder alternativ eigener `oauth2-proxy`) – siehe [`docs/nextcloud-deployment.md`](docs/nextcloud-deployment.md) und die fertigen Stacks unter [`deploy/`](deploy/). Der authentifizierte Benutzer (`Cf-Access-Authenticated-User-Email` bzw. Proxy-Header) wird als Aktor in Timeline und Aufgaben übernommen.
 
 ## Schnellstart mit Docker Compose (empfohlen)
 

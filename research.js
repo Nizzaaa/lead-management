@@ -9,17 +9,43 @@
 //   2) Extraktion der Felder aus dem Dossier in ein striktes JSON-Schema,
 //      damit das Frontend und die KI-Funktionen damit arbeiten können.
 
-const DEFAULT_MODEL = "claude-opus-4-8";
+const DEFAULT_MODEL = "claude-haiku-4-5";
+
+// Phase 2 (Extraktion in JSON) ist eine rein mechanische Aufgabe und läuft
+// daher immer auf dem günstigsten Modell – unabhängig vom Recherche-Modell.
+// Spart pro Lead spürbar Kosten ohne Qualitätsverlust.
+const EXTRACT_MODEL = "claude-haiku-4-5";
 
 // Adaptive Thinking nur für Modelle, die es unterstützen (Opus/Sonnet 4.x).
 function thinkingFor(model) {
   return /^claude-(opus|sonnet)/.test(model) ? { type: "adaptive" } : undefined;
 }
 
+// Effort-Stufe steuert Denk-Tiefe und damit Token-/Kostenaufwand. "medium" ist
+// der Sweet Spot aus Qualität und Effizienz. Wird nur von Opus 4.x und
+// Sonnet 4.6 unterstützt (Haiku/Sonnet 4.5 würden einen Fehler werfen).
+function effortFor(model) {
+  return /^claude-opus/.test(model) || model === "claude-sonnet-4-6" ? "medium" : undefined;
+}
+
 // Serverseitige Tools – laufen vollständig auf Anthropic-Infrastruktur.
+// Wichtig für niedrige Nutzungs-Tiers (z. B. Tier 1: nur 30.000 Input-Tokens/min
+// bei Sonnet): Wir begrenzen Anzahl und Größe der Web-Zugriffe, damit eine
+// einzelne Recherche das Minuten-Limit (ITPM) nicht sprengt.
+// Stabile GA-Tool-Versionen (ohne „dynamic filtering"). Die neueren
+// _20260209-Versionen filtern Inhalte per Code-Execution vor – ist diese
+// Umgebung nicht aktiviert, schlagen die Abrufe fehl ("Tools nicht verfügbar").
 const WEB_TOOLS = [
-  { type: "web_search_20260209", name: "web_search" },
-  { type: "web_fetch_20260209", name: "web_fetch" },
+  { type: "web_search_20250305", name: "web_search", max_uses: 5 },
+  {
+    type: "web_fetch_20250910",
+    name: "web_fetch",
+    max_uses: 5,
+    // Deckelt die pro Seite/PDF in den Kontext geladenen Tokens. Ohne Limit
+    // kostet eine große Seite schnell ~25.000 und ein PDF ~125.000 Tokens –
+    // das allein überschreitet das Tier-1-Limit.
+    max_content_tokens: 5000,
+  },
 ];
 
 // System-Prompt = der "lead-research"-Skill (Regeln, Quellen-Vorgehen, Struktur).
@@ -150,10 +176,28 @@ const RESEARCH_SCHEMA = {
   additionalProperties: false,
 };
 
+// Setzt genau EINEN rollenden Cache-Breakpoint auf den letzten Content-Block des
+// letzten Messages. Vorherige Breakpoints werden entfernt, damit wir das Limit
+// von 4 Breakpoints pro Anfrage nicht überschreiten (System-Prompt = 1, hier = 1).
+function setRollingCache(messages) {
+  for (const m of messages) {
+    if (Array.isArray(m.content)) {
+      for (const b of m.content) {
+        if (b && typeof b === "object" && b.cache_control) delete b.cache_control;
+      }
+    }
+  }
+  const last = messages[messages.length - 1];
+  if (last && Array.isArray(last.content) && last.content.length) {
+    const block = last.content[last.content.length - 1];
+    if (block && typeof block === "object") block.cache_control = { type: "ephemeral" };
+  }
+}
+
 // Phase 1: agentische Web-Recherche → Markdown-Dossier.
 // Server-Tools laufen in einer serverseitigen Schleife; bei Erreichen des
 // Iterationslimits liefert die API stop_reason "pause_turn" und wir setzen fort.
-async function runResearch(anthropic, input, model, onProgress) {
+async function runResearch(anthropic, input, model, onProgress, signal) {
   const messages = [
     {
       role: "user",
@@ -165,25 +209,46 @@ async function runResearch(anthropic, input, model, onProgress) {
 
   const thinking = thinkingFor(model);
   let dossier = "";
+  let toolOk = 0; // erfolgreiche Web-Tool-Ergebnisse (Such-Treffer/Seitenabrufe)
   for (let i = 0; i < 16; i++) {
     const params = {
       model,
-      max_tokens: 16000,
-      system: RESEARCH_SYSTEM,
+      max_tokens: 8000,
+      // System-Prompt als cachebarer Block: Tools + System werden über die
+      // pause_turn-Fortsetzungen hinweg aus dem Cache gelesen. Cache-Reads
+      // zählen NICHT gegen das ITPM-Limit – das senkt die Last bei jeder
+      // Fortsetzung erheblich.
+      system: [{ type: "text", text: RESEARCH_SYSTEM, cache_control: { type: "ephemeral" } }],
       tools: WEB_TOOLS,
       messages,
     };
     if (thinking) params.thinking = thinking;
-    const stream = anthropic.messages.stream(params);
+    const effort = effortFor(model);
+    if (effort) params.output_config = { effort };
+    const stream = anthropic.messages.stream(params, { signal });
 
-    // Fortschritt melden, sobald die KI eine Web-Suche/Seitenabruf nutzt.
+    // Fortschritt melden: Tool-Aufrufe UND deren Ergebnisse/Fehler.
     stream.on("contentBlock", (block) => {
-      if (!block || block.type !== "server_tool_use") return;
-      const inp = block.input || {};
-      if (block.name === "web_search" && inp.query) {
-        onProgress(`🔍 Suche: ${inp.query}`);
-      } else if (block.name === "web_fetch" && inp.url) {
-        onProgress(`🌐 Öffne: ${inp.url}`);
+      if (!block) return;
+      if (block.type === "server_tool_use") {
+        const inp = block.input || {};
+        if (block.name === "web_search" && inp.query) onProgress(`🔍 Suche: ${inp.query}`);
+        else if (block.name === "web_fetch" && inp.url) onProgress(`🌐 Öffne: ${inp.url}`);
+        return;
+      }
+      if (block.type === "web_search_tool_result" || block.type === "web_fetch_tool_result") {
+        const c = block.content;
+        if (Array.isArray(c)) {
+          // web_search liefert bei Erfolg ein Array von Treffern.
+          toolOk++;
+          onProgress(`✓ ${c.length} Treffer gefunden`);
+        } else if (c && typeof c === "object" && typeof c.type === "string" && c.type.endsWith("_error")) {
+          onProgress(`⚠️ Abruf fehlgeschlagen (${c.error_code || "Fehler"})`);
+        } else if (c) {
+          // web_fetch liefert bei Erfolg ein Dokument-Objekt.
+          toolOk++;
+          onProgress("✓ Seite geladen");
+        }
       }
     });
 
@@ -193,6 +258,10 @@ async function runResearch(anthropic, input, model, onProgress) {
       // Server hat das interne Tool-Limit erreicht – Assistant-Turn anhängen
       // und erneut senden, der Server nimmt automatisch wieder auf.
       messages.push({ role: "assistant", content: msg.content });
+      // Rollenden Cache-Breakpoint auf den zuletzt angehängten Turn setzen, damit
+      // der wachsende Verlauf (inkl. der großen Tool-Ergebnisse) bei der nächsten
+      // Anfrage aus dem Cache gelesen wird statt erneut als Input zu zählen.
+      setRollingCache(messages);
       onProgress("… recherchiere weiter");
       continue;
     }
@@ -206,11 +275,21 @@ async function runResearch(anthropic, input, model, onProgress) {
   }
 
   if (!dossier) throw new Error("Recherche lieferte kein Dossier.");
+  // Ohne ein einziges erfolgreiches Web-Tool-Ergebnis ist das Dossier nicht
+  // belegt (häufig: Rate-Limit/Tools nicht verfügbar). Dann lieber sauber
+  // abbrechen, statt einen leeren Lead anzulegen.
+  if (toolOk === 0) {
+    throw new Error(
+      "Web-Recherche lieferte keine Ergebnisse – die Such-/Abruf-Tools waren nicht erreichbar " +
+        "(oft Rate-Limit auf niedrigem Tier oder die Seite blockiert den Abruf). Bitte erneut " +
+        "versuchen oder das Modell wechseln (Haiku/Opus haben höhere Limits)."
+    );
+  }
   return dossier;
 }
 
 // Phase 2: Felder aus dem Dossier in striktes JSON extrahieren.
-async function extractFields(anthropic, input, dossier, model) {
+async function extractFields(anthropic, input, dossier, model, signal) {
   const msg = await anthropic.messages.create({
     model,
     max_tokens: 8000,
@@ -225,17 +304,18 @@ async function extractFields(anthropic, input, dossier, model) {
     output_config: {
       format: { type: "json_schema", schema: RESEARCH_SCHEMA },
     },
-  });
+  }, { signal });
   const text = msg.content.find((b) => b.type === "text");
   return JSON.parse(text ? text.text : "{}");
 }
 
 // Öffentliche API: vollständige Recherche → strukturiertes Objekt inkl. Markdown.
-async function researchCompany(anthropic, input, model = DEFAULT_MODEL, onProgress = () => {}) {
+async function researchCompany(anthropic, input, model = DEFAULT_MODEL, onProgress = () => {}, signal) {
   onProgress(`Starte Recherche zu „${input}“…`);
-  const dossier = await runResearch(anthropic, input, model, onProgress);
+  const dossier = await runResearch(anthropic, input, model, onProgress, signal);
   onProgress("📝 Dossier erstellt – extrahiere strukturierte Felder…");
-  const fields = await extractFields(anthropic, input, dossier, model);
+  // Extraktion bewusst auf dem günstigen Modell (mechanische Aufgabe).
+  const fields = await extractFields(anthropic, input, dossier, EXTRACT_MODEL, signal);
   onProgress("✅ Recherche abgeschlossen.");
   return {
     ...fields,

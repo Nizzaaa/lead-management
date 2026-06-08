@@ -8,15 +8,80 @@ let activeFilter = "alle";
 let searchTerm = "";
 let models = [];
 let currentModel = "";
+let stageProbabilities = {};
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
+
+// Aktuell geöffnete Detailseite (Lead-ID) und ob sie im Bearbeiten-Modus ist.
+let detailId = null;
+let detailEditing = false;
 
 const $ = (sel) => document.querySelector(sel);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmtEuro = (n) => (Number(n) || 0).toLocaleString("de-DE") + " €";
 const esc = (s) =>
-  String(s || "").replace(/[&<>"']/g, (c) =>
+  String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
   );
+const getLead = (id) => leads.find((x) => x.id === id);
+
+// Macht eine Quell-URL absolut. Ohne Schema interpretiert der Browser
+// "galabau.de" relativ → landet auf localhost:3000/galabau.de. Erlaubt nur
+// http/https; andere Schemata (javascript:, mailto: …) werden verworfen.
+function extUrl(s) {
+  const v = String(s || "").trim();
+  if (!v) return "";
+  if (/^https?:\/\//i.test(v)) return v;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(v)) return "";
+  return "https://" + v.replace(/^\/+/, "");
+}
+
+// Datum/Zeit-Helfer (deutsche Formatierung).
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString("de-DE");
+}
+function fmtDateTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString("de-DE", { dateStyle: "medium", timeStyle: "short" });
+}
+// Relative Zeit ("vor 3 Std.", "in 2 Tagen").
+function relTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const diff = d.getTime() - Date.now();
+  const abs = Math.abs(diff);
+  const min = 60000, h = 3600000, day = 86400000;
+  const rtf = new Intl.RelativeTimeFormat("de-DE", { numeric: "auto" });
+  if (abs < h) return rtf.format(Math.round(diff / min), "minute");
+  if (abs < day) return rtf.format(Math.round(diff / h), "hour");
+  if (abs < 30 * day) return rtf.format(Math.round(diff / day), "day");
+  return fmtDate(iso);
+}
+// ISO → Wert für <input type="datetime-local"> (lokale Zeit, ohne Sekunden).
+function toLocalInput(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+const isOverdue = (t) => t && !t.done && t.dueAt && new Date(t.dueAt).getTime() < Date.now();
+
+// Felder der Sektion „Allgemeine Infos" (Schlüssel → Label), zentral definiert.
+const RESEARCH_FIELDS = [
+  ["branche", "Branche"],
+  ["adresse", "Adresse"],
+  ["telefonAllgemein", "Telefon (allgemein)"],
+  ["ansprechpartner", "Ansprechpartner / Entscheider"],
+  ["telefonDurchwahl", "Telefon (Durchwahl)"],
+  ["oeffnungszeiten", "Öffnungszeiten"],
+  ["mail", "Mail"],
+  ["web", "Web"],
+  ["kundenbewertung", "Kundenbewertung"],
+];
 
 // --- API -------------------------------------------------------------------
 async function api(path, opts = {}) {
@@ -38,6 +103,7 @@ async function init() {
     aiEnabled = cfg.aiEnabled;
     models = cfg.models || [];
     currentModel = cfg.model || "";
+    stageProbabilities = cfg.stageProbabilities || {};
     renderAiBadge(cfg);
     renderStatusFilters();
     renderViewToggle();
@@ -47,6 +113,9 @@ async function init() {
     toast(err.message, "error");
   }
   bindEvents();
+  window.addEventListener("hashchange", router);
+  router();
+  resumeJobs(); // noch laufende Recherchen nach Reload ins Dock zurückholen
 }
 
 function renderAiBadge(cfg) {
@@ -80,16 +149,101 @@ function populateStatusSelect() {
     .join("");
 }
 
+// --- Routing (Liste ⇄ Detail ⇄ Aufgaben ⇄ Berichte) ------------------------
+const VIEWS = ["listView", "detailView", "tasksView", "reportsView"];
+function showOnly(viewId) {
+  for (const v of VIEWS) $("#" + v).classList.toggle("hidden", v !== viewId);
+}
+function setActiveNav(name) {
+  document.querySelectorAll("[data-nav-link]").forEach((a) => {
+    a.classList.toggle("active", a.dataset.navLink === name);
+  });
+}
+
+function router() {
+  const lead = location.hash.match(/^#\/lead\/(.+)$/);
+  if (lead) return showDetail(decodeURIComponent(lead[1]));
+  if (location.hash === "#/tasks") return showTasks();
+  if (location.hash === "#/reports") return showReports();
+  showList();
+}
+
+function showList() {
+  detailId = null;
+  detailEditing = false;
+  showOnly("listView");
+  setActiveNav("list");
+  renderLeads();
+  window.scrollTo(0, 0);
+}
+
+function showDetail(id) {
+  detailId = id;
+  if (!getLead(id)) {
+    // Daten evtl. noch nicht geladen – erst nach refresh entscheiden.
+    if (!leads.length) return;
+    toast("Lead nicht gefunden", "error");
+    location.hash = "#/";
+    return;
+  }
+  showOnly("detailView");
+  setActiveNav("");
+  renderDetail();
+  loadDetailExtras(id);
+  window.scrollTo(0, 0);
+}
+
+function showTasks() {
+  detailId = null;
+  showOnly("tasksView");
+  setActiveNav("tasks");
+  renderTasksView();
+  window.scrollTo(0, 0);
+}
+
+function showReports() {
+  detailId = null;
+  showOnly("reportsView");
+  setActiveNav("reports");
+  renderReportsView();
+  window.scrollTo(0, 0);
+}
+
 // --- Daten laden + rendern -------------------------------------------------
 async function refresh() {
   leads = await api("/api/leads");
   renderStats(await api("/api/stats"));
-  renderLeads();
+  updateTaskBadge();
+  if (detailId) {
+    renderDetail();
+    loadDetailExtras(detailId);
+  } else {
+    renderLeads();
+  }
+}
+
+// Zähler offener Aufgaben in der Navigation aktualisieren.
+async function updateTaskBadge() {
+  try {
+    const tasks = await api("/api/tasks?status=open");
+    const badge = $("#taskBadge");
+    const overdue = tasks.filter(isOverdue).length;
+    badge.textContent = tasks.length;
+    badge.classList.toggle("hidden", tasks.length === 0);
+    badge.classList.toggle("overdue", overdue > 0);
+    badge.title = overdue ? `${overdue} überfällig` : `${tasks.length} offen`;
+  } catch (err) {
+    /* Badge ist unkritisch */
+  }
 }
 
 function renderStats(stats) {
   $("#statTotal").textContent = stats.total;
-  $("#statPipeline").textContent = fmtEuro(stats.pipelineValue);
+  // Primär der gewichtete (Erwartungs-)Wert; roh als Tooltip.
+  const weighted = stats.weightedPipelineValue != null ? stats.weightedPipelineValue : stats.pipelineValue;
+  $("#statPipeline").textContent = fmtEuro(Math.round(weighted));
+  const card = $("#statPipeline").closest(".stat-card");
+  if (card) card.title = `Roh (ungewichtet): ${fmtEuro(Math.round(stats.pipelineValue || 0))}\nGewichtet (Σ Wert × Wahrscheinlichkeit): ${fmtEuro(Math.round(weighted))}`;
   $("#statWon").textContent = fmtEuro(stats.wonValue);
   $("#statConversion").textContent = stats.conversion + " %";
 }
@@ -161,12 +315,14 @@ function renderKanban() {
 
 // --- Kanban Drag & Drop ----------------------------------------------------
 let dragId = null;
+let dragMoved = false;
 function bindKanbanDnd() {
   const board = $("#kanban");
   board.addEventListener("dragstart", (e) => {
     const card = e.target.closest(".kanban-card");
     if (!card) return;
     dragId = card.dataset.id;
+    dragMoved = true;
     e.dataTransfer.effectAllowed = "move";
     card.classList.add("dragging");
   });
@@ -175,6 +331,7 @@ function bindKanbanDnd() {
     if (card) card.classList.remove("dragging");
     document.querySelectorAll(".kanban-col.drop").forEach((c) => c.classList.remove("drop"));
     dragId = null;
+    setTimeout(() => (dragMoved = false), 0);
   });
   board.addEventListener("dragover", (e) => {
     const zone = e.target.closest(".kanban-cards");
@@ -193,7 +350,7 @@ function bindKanbanDnd() {
 }
 
 async function changeStatus(id, status) {
-  const l = leads.find((x) => x.id === id);
+  const l = getLead(id);
   if (!l || l.status === status) {
     renderLeads();
     return;
@@ -208,101 +365,522 @@ async function changeStatus(id, status) {
   }
 }
 
-function kanbanCard(l) {
-  const score = l.ai
-    ? `<span class="kanban-score" style="color:${scoreColor(l.ai.score)}">★ ${l.ai.score}</span>`
-    : "";
-  const researchBtn = aiEnabled
-    ? (l.research
-        ? `<button class="icon-btn" data-action="detail" data-id="${l.id}" title="Dossier">📋</button>`
-        : `<button class="icon-btn" data-action="research" data-id="${l.id}" title="Jetzt recherchieren">🔎</button>`)
-    : "";
-  return `<article class="kanban-card" draggable="true" data-id="${l.id}">
-    <div class="kanban-card-top">
-      <div class="kanban-card-title">${esc(l.company) || esc(l.name) || "—"}</div>
-      ${score}
-    </div>
-    ${l.name && l.company ? `<div class="kanban-card-sub">${esc(l.name)}</div>` : ""}
-    <div class="kanban-card-foot">
-      <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
-      <span class="kanban-card-actions">
-        ${researchBtn}
-        <button class="icon-btn" data-action="edit" data-id="${l.id}" title="Bearbeiten">✏️</button>
-      </span>
-    </div>
-  </article>`;
-}
-
+// --- Karten (schlank: nur die wichtigsten Infos) ---------------------------
 function fieldVal(f) {
   return f && f.value ? f.value : "";
 }
 
+function scoreBadge(l, cls) {
+  if (!l.ai) return "";
+  return `<span class="${cls}" style="color:${scoreColor(l.ai.score)};border-color:${scoreColor(l.ai.score)}">★ ${l.ai.score}</span>`;
+}
+
+// Kartenansicht: nur Firma, Ansprechpartner, Status, Branche, Wert, KI-Score.
 function leadCard(l) {
-  const ai = l.ai
-    ? `<div class="ai-score">
-         <div class="score-ring" style="background:conic-gradient(${scoreColor(l.ai.score)} ${l.ai.score}%, var(--border) 0); color:${scoreColor(l.ai.score)}">
-           <span style="background:var(--surface-2);width:34px;height:34px;border-radius:50%;display:grid;place-items:center">${l.ai.score}</span>
-         </div>
-         <div>
-           <small>KI-Score · Note ${esc(l.ai.grade)}</small>
-           <div class="ai-step">${esc(l.ai.nextStep || l.ai.reasoning)}</div>
-         </div>
-       </div>`
-    : "";
-
-  // Recherche-Highlights (Branche, Bewertung, stärkstes Potenzial).
-  const r = l.research;
-  const branche = r ? fieldVal(r.fields && r.fields.branche) : "";
-  const bewertung = r ? fieldVal(r.fields && r.fields.kundenbewertung) : "";
-  const topPot = r && Array.isArray(r.potenziale) && r.potenziale[0];
-  const research = r
-    ? `<div class="lead-research">
-         <div class="research-tags">
-           ${branche ? `<span class="tag">🏷️ ${esc(branche)}</span>` : ""}
-           ${bewertung ? `<span class="tag">⭐ ${esc(bewertung)}</span>` : ""}
-           ${Array.isArray(r.potenziale) ? `<span class="tag">🎯 ${r.potenziale.length} Potenziale</span>` : ""}
-         </div>
-         ${topPot ? `<div class="research-top"><strong>Top-Potenzial:</strong> ${esc(topPot.titel)}</div>` : ""}
-       </div>`
-    : `<div class="lead-research lead-research-empty">Keine Recherchedaten – neu recherchieren.</div>`;
-
-  const aiButtons = aiEnabled
-    ? `<button class="btn btn-ai btn-sm" data-action="score" data-id="${l.id}">⚡ KI-Score</button>
-       <button class="btn btn-ai btn-sm" data-action="email" data-id="${l.id}">✉️ E-Mail</button>
-       <button class="btn btn-ai btn-sm" data-action="insights" data-id="${l.id}">💡 Tipps</button>`
-    : "";
-
-  const researchBtns = aiEnabled
-    ? (r
-        ? `<button class="btn btn-sm" data-action="detail" data-id="${l.id}">📋 Dossier</button>
-           <button class="btn btn-sm" data-action="research" data-id="${l.id}">🔄 Neu recherchieren</button>`
-        : `<button class="btn btn-ai btn-sm" data-action="research" data-id="${l.id}">🔎 Jetzt recherchieren</button>`)
-    : "";
-
-  return `<article class="lead-card">
-    <div class="lead-top">
-      <div>
-        <div class="lead-name">${esc(l.company) || esc(l.name) || "—"}</div>
-        <div class="lead-company">${l.company && l.name ? esc(l.name) : ""}</div>
-      </div>
+  const branche = l.research ? fieldVal(l.research.fields && l.research.fields.branche) : "";
+  return `<article class="lead-card" data-nav="${l.id}" tabindex="0" role="button" aria-label="Lead öffnen">
+    <div class="lead-card-head">
+      <div class="lead-card-title">${esc(l.company) || esc(l.name) || "—"}</div>
       <span class="status-pill s-${l.status}">${l.status}</span>
     </div>
-    <div class="lead-meta">
-      ${l.email ? `<span>✉️ <a href="mailto:${esc(l.email)}">${esc(l.email)}</a></span>` : ""}
-      ${l.phone ? `<span>📞 ${esc(l.phone)}</span>` : ""}
-      ${l.source ? `<span>🌐 ${esc(l.source)}</span>` : ""}
-      <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
+    <div class="lead-card-sub">
+      ${l.company && l.name ? `<span>👤 ${esc(l.name)}</span>` : ""}
+      ${branche ? `<span>🏷️ ${esc(branche)}</span>` : ""}
+      ${!l.research ? `<span class="muted-note">keine Recherche</span>` : ""}
     </div>
-    ${research}
-    ${l.notes ? `<div class="lead-notes">${esc(l.notes)}</div>` : ""}
-    ${ai}
-    <div class="lead-actions">
-      ${aiButtons}
-      ${researchBtns}
-      <button class="btn btn-sm" data-action="edit" data-id="${l.id}">✏️</button>
-      <button class="btn btn-sm" data-action="delete" data-id="${l.id}">🗑️</button>
+    <div class="lead-card-foot">
+      <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
+      ${scoreBadge(l, "score-chip")}
     </div>
   </article>`;
+}
+
+function kanbanCard(l) {
+  return `<article class="kanban-card" draggable="true" data-id="${l.id}" data-nav="${l.id}">
+    <div class="kanban-card-top">
+      <div class="kanban-card-title">${esc(l.company) || esc(l.name) || "—"}</div>
+      ${scoreBadge(l, "kanban-score")}
+    </div>
+    ${l.name && l.company ? `<div class="kanban-card-sub">${esc(l.name)}</div>` : ""}
+    <div class="kanban-card-foot">
+      <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
+    </div>
+  </article>`;
+}
+
+// --- Detailseite -----------------------------------------------------------
+function renderDetail() {
+  const l = getLead(detailId);
+  if (!l) {
+    location.hash = "#/";
+    return;
+  }
+  const v = $("#detailView");
+  v.innerHTML = detailEditing ? detailEditHtml(l) : detailViewHtml(l);
+}
+
+// Tabelle „Allgemeine Infos" (Lese-Modus, mit Quellen-Links).
+function infoRowsView(f) {
+  return RESEARCH_FIELDS.map(([key, label]) => {
+    const field = f[key] || {};
+    const value = field.value && field.value !== "k.A." ? field.value : "—";
+    const href = extUrl(field.source);
+    const src = href
+      ? ` <a class="src" href="${esc(href)}" target="_blank" rel="noopener">↗ Quelle</a>`
+      : "";
+    return `<tr><th>${esc(label)}</th><td>${esc(value)}${src}</td></tr>`;
+  }).join("");
+}
+
+// Hilfsblock: Abschnitt mit Überschrift + Freitext (oder „—").
+function sectionView(title, text) {
+  return `<section class="d-section">
+    <h3>${esc(title)}</h3>
+    <p class="d-text">${esc(text) || "—"}</p>
+  </section>`;
+}
+
+function detailViewHtml(l) {
+  const r = l.research;
+  const ai = l.ai;
+
+  const aiBox = ai
+    ? `<div class="ai-score-card">
+         <div class="score-ring" style="background:conic-gradient(${scoreColor(ai.score)} ${ai.score}%, var(--border) 0); color:${scoreColor(ai.score)}">
+           <span class="score-ring-inner">${ai.score}</span>
+         </div>
+         <div class="ai-score-meta">
+           <strong>KI-Score · Note ${esc(ai.grade)}</strong>
+           ${ai.reasoning ? `<p>${esc(ai.reasoning)}</p>` : ""}
+           ${ai.nextStep ? `<p class="next-step">➡️ ${esc(ai.nextStep)}</p>` : ""}
+           ${ai.valueReasoning ? `<p class="value-reason">💶 Wertschätzung: ${esc(ai.valueReasoning)}</p>` : ""}
+         </div>
+       </div>`
+    : `<p class="d-muted">Noch keine KI-Bewertung. ${aiEnabled ? "" : "(KI nicht konfiguriert)"}</p>`;
+
+  const aiActions = aiEnabled
+    ? `<div class="d-btn-row">
+         <button class="btn btn-ai btn-sm" data-action="score">⚡ ${ai ? "Neu bewerten" : "KI-Score"}</button>
+         <button class="btn btn-ai btn-sm" data-action="email">✉️ E-Mail-Entwurf</button>
+         <button class="btn btn-ai btn-sm" data-action="insights">💡 Empfehlung</button>
+       </div>
+       <div id="aiOutput" class="ai-output hidden"></div>`
+    : "";
+
+  // Recherche-Inhalt sauber formatiert (kein Markdown).
+  let researchHtml;
+  if (r) {
+    const meta = [
+      r.rechercheStand ? `Recherche-Stand: ${esc(r.rechercheStand)}` : "",
+      r.input ? `Input: ${esc(r.input)}` : "",
+      r.model ? `Modell: ${esc(String(r.model).replace("claude-", ""))}` : "",
+    ].filter(Boolean).join(" · ");
+
+    const pots = Array.isArray(r.potenziale) && r.potenziale.length
+      ? r.potenziale.map((p) => `<li>
+          <strong>${esc(p.titel)}</strong>
+          <span>${esc(p.beschreibung)}</span>
+          ${p.signal ? `<em class="signal">Signal: ${esc(p.signal)}</em>` : ""}
+        </li>`).join("")
+      : `<li class="d-muted">Keine Potenziale erfasst.</li>`;
+
+    researchHtml = `
+      ${meta ? `<p class="d-meta">${meta}</p>` : ""}
+      ${r.ambiguityWarning ? `<p class="warn">⚠️ ${esc(r.ambiguityWarning)}</p>` : ""}
+
+      <section class="d-section">
+        <h3>Allgemeine Infos</h3>
+        <table class="info-table"><tbody>${infoRowsView(r.fields || {})}</tbody></table>
+      </section>
+
+      ${sectionView("Negative Bewertungen → Potenzial", r.negativeBewertungen)}
+      ${sectionView("Einordnung / Selbstdarstellung", r.einordnung)}
+      ${sectionView("Sichtbare Schwachstellen / Ansatzpunkte", r.schwachstellen)}
+
+      <section class="d-section">
+        <h3>Potenziale für FU/GE</h3>
+        <ul class="pot-list">${pots}</ul>
+      </section>
+
+      ${sectionView("Strategie für Cold Call", r.coldCallStrategie)}
+      ${sectionView("Risiken / Denkbare Ablehnungsgründe", r.risiken)}
+    `;
+  } else {
+    researchHtml = `<div class="d-empty">
+      <p>Für diesen Lead liegt noch keine Recherche vor.</p>
+      ${aiEnabled ? `<button class="btn btn-ai" data-action="research">🔎 Jetzt recherchieren</button>` : ""}
+    </div>`;
+  }
+
+  const contact = [
+    l.email ? `<span>✉️ <a href="mailto:${esc(l.email)}">${esc(l.email)}</a></span>` : "",
+    l.phone ? `<span>📞 ${esc(l.phone)}</span>` : "",
+    l.source ? `<span>🌐 ${esc(l.source)}</span>` : "",
+  ].filter(Boolean).join("");
+
+  return `
+    <div class="detail-bar">
+      <a class="btn btn-sm" href="#/">← Zurück</a>
+      <div class="detail-bar-actions">
+        ${aiEnabled && r ? `<button class="btn btn-sm" data-action="research">🔄 Neu recherchieren</button>` : ""}
+        <button class="btn btn-sm" data-action="edit">✏️ Bearbeiten</button>
+        <button class="btn btn-sm btn-danger" data-action="delete">🗑️ Löschen</button>
+      </div>
+    </div>
+
+    <header class="detail-hero">
+      <div>
+        <h1>${esc(l.company) || esc(l.name) || "—"}</h1>
+        ${l.company && l.name ? `<p class="detail-sub">👤 ${esc(l.name)}</p>` : ""}
+        <div class="detail-contact">${contact || `<span class="d-muted">Keine Kontaktdaten</span>`}</div>
+      </div>
+      <div class="detail-hero-right">
+        <span class="status-pill s-${l.status}">${l.status}</span>
+        <span class="lead-value big">💶 ${fmtEuro(l.value)}</span>
+      </div>
+    </header>
+
+    <div class="detail-layout">
+      <div class="detail-main">
+        ${l.notes ? `<section class="d-section card"><h3>Notizen</h3><p class="d-text">${esc(l.notes)}</p></section>` : ""}
+        <div class="card">${researchHtml}</div>
+        <section class="card" id="activityPanel">${activityPanelHtml(null)}</section>
+      </div>
+      <aside class="detail-side">
+        <section class="card">
+          <h3>KI-Bewertung</h3>
+          ${aiBox}
+          ${aiActions}
+        </section>
+        <section class="card" id="taskPanel">${taskPanelHtml(null)}</section>
+      </aside>
+    </div>
+  `;
+}
+
+// --- Detailseite: Aktivitäten-Timeline + Aufgaben --------------------------
+// Diese Daten liegen nicht im leads-Array, sondern werden je Detailseite
+// nachgeladen und in die Platzhalter-Panels gerendert.
+let detailActivities = [];
+let detailTasks = [];
+
+async function loadDetailExtras(id) {
+  try {
+    const [acts, tasks] = await Promise.all([
+      api(`/api/leads/${id}/activities`),
+      api(`/api/leads/${id}/tasks`),
+    ]);
+    if (detailId !== id) return; // inzwischen weggeblättert
+    detailActivities = acts;
+    detailTasks = tasks;
+    const ap = $("#activityPanel");
+    const tp = $("#taskPanel");
+    if (ap) ap.innerHTML = activityPanelHtml(acts);
+    if (tp) tp.innerHTML = taskPanelHtml(tasks);
+  } catch (err) {
+    /* Panels zeigen weiter den Ladezustand */
+  }
+}
+
+const ACTIVITY_META = {
+  note:    { icon: "📝", label: "Notiz" },
+  call:    { icon: "📞", label: "Anruf" },
+  email:   { icon: "✉️", label: "E-Mail" },
+  meeting: { icon: "📅", label: "Termin" },
+  status:  { icon: "🔄", label: "Status" },
+  ai:      { icon: "🤖", label: "KI" },
+  system:  { icon: "⚙️", label: "System" },
+};
+
+function activityItem(a) {
+  const m = ACTIVITY_META[a.type] || ACTIVITY_META.note;
+  const who = a.actor && a.actor !== "—" ? ` · ${esc(a.actor)}` : "";
+  const canDelete = ["note", "call", "email", "meeting"].includes(a.type);
+  return `<li class="act-item act-${a.type}">
+    <span class="act-icon" title="${esc(m.label)}">${m.icon}</span>
+    <div class="act-body">
+      <div class="act-head">
+        ${a.title ? `<strong>${esc(a.title)}</strong>` : `<strong>${esc(m.label)}</strong>`}
+        <span class="act-time" title="${esc(fmtDateTime(a.createdAt))}">${esc(relTime(a.createdAt))}${who}</span>
+        ${canDelete ? `<button class="icon-btn act-del" data-del-act="${a.id}" title="Löschen">🗑️</button>` : ""}
+      </div>
+      ${a.body ? `<p class="act-text">${esc(a.body)}</p>` : ""}
+      ${a.outcome ? `<p class="act-outcome">➡️ ${esc(a.outcome)}</p>` : ""}
+    </div>
+  </li>`;
+}
+
+function activityPanelHtml(acts) {
+  const form = `
+    <form class="act-form" id="activityForm">
+      <div class="act-form-row">
+        <select id="act_type">
+          <option value="note">📝 Notiz</option>
+          <option value="call">📞 Anruf</option>
+          <option value="email">✉️ E-Mail</option>
+          <option value="meeting">📅 Termin</option>
+        </select>
+        <input type="text" id="act_outcome" placeholder="Ergebnis (optional, z. B. Rückruf vereinbart)" />
+      </div>
+      <textarea id="act_body" rows="2" placeholder="Was ist passiert? (Gesprächsnotiz, Vereinbarung …)"></textarea>
+      <div class="act-form-actions">
+        <button type="submit" class="btn btn-sm btn-primary">+ Aktivität festhalten</button>
+      </div>
+    </form>`;
+
+  let list;
+  if (acts == null) {
+    list = `<p class="d-muted">Lädt…</p>`;
+  } else if (!acts.length) {
+    list = `<p class="d-muted">Noch keine Aktivitäten. Halte den ersten Kontakt fest.</p>`;
+  } else {
+    list = `<ul class="act-list">${acts.map(activityItem).join("")}</ul>`;
+  }
+  return `<h3>Aktivitäten</h3>${form}${list}`;
+}
+
+function taskItem(t) {
+  const over = isOverdue(t);
+  const due = t.dueAt
+    ? `<span class="task-due ${over ? "overdue" : ""}" title="${esc(fmtDateTime(t.dueAt))}">📅 ${esc(over ? "überfällig · " : "")}${esc(relTime(t.dueAt))}</span>`
+    : "";
+  return `<li class="task-item ${t.done ? "done" : ""}">
+    <input type="checkbox" class="task-check" data-task-toggle="${t.id}" ${t.done ? "checked" : ""} />
+    <div class="task-body">
+      <span class="task-title">${esc(t.title)}</span>
+      ${due}
+    </div>
+    <button class="icon-btn task-del" data-del-task="${t.id}" title="Löschen">🗑️</button>
+  </li>`;
+}
+
+function taskPanelHtml(tasks) {
+  const form = `
+    <form class="task-form" id="taskForm">
+      <input type="text" id="task_title" placeholder="Neue Aufgabe / Wiedervorlage…" />
+      <div class="task-form-row">
+        <input type="datetime-local" id="task_due" />
+        <button type="submit" class="btn btn-sm btn-primary">+ Aufgabe</button>
+      </div>
+    </form>`;
+  let list;
+  if (tasks == null) {
+    list = `<p class="d-muted">Lädt…</p>`;
+  } else if (!tasks.length) {
+    list = `<p class="d-muted">Keine Aufgaben.</p>`;
+  } else {
+    list = `<ul class="task-list">${tasks.map(taskItem).join("")}</ul>`;
+  }
+  return `<h3>Aufgaben / Wiedervorlagen</h3>${form}${list}`;
+}
+
+// --- Detailseite: Bearbeiten-Modus ----------------------------------------
+function input(id, label, value, type = "text") {
+  return `<label>${esc(label)}
+    <input type="${type}" id="${id}" value="${esc(value)}" ${type === "number" ? 'min="0" step="100"' : ""} />
+  </label>`;
+}
+
+function textarea(id, label, value, rows = 3) {
+  return `<label>${esc(label)}
+    <textarea id="${id}" rows="${rows}">${esc(value)}</textarea>
+  </label>`;
+}
+
+// Editierbare Zeilen der „Allgemeine Infos"-Tabelle (Wert + Quelle).
+function infoRowsEdit(f) {
+  return RESEARCH_FIELDS.map(([key, label]) => {
+    const field = f[key] || {};
+    return `<tr>
+      <th>${esc(label)}</th>
+      <td><input class="edit-input" data-rf="${key}.value" value="${esc(field.value || "")}" placeholder="—" /></td>
+      <td><input class="edit-input" data-rf="${key}.source" value="${esc(field.source || "")}" placeholder="Quelle (URL)" /></td>
+    </tr>`;
+  }).join("");
+}
+
+function potEditRow(p = {}) {
+  return `<div class="pot-row">
+    <input class="edit-input" data-pf="titel" value="${esc(p.titel || "")}" placeholder="Kurztitel" />
+    <textarea class="edit-input" data-pf="beschreibung" rows="2" placeholder="Beschreibung / Nutzen">${esc(p.beschreibung || "")}</textarea>
+    <input class="edit-input" data-pf="signal" value="${esc(p.signal || "")}" placeholder="Belegtes Signal" />
+    <button type="button" class="icon-btn pot-remove" title="Entfernen">🗑️</button>
+  </div>`;
+}
+
+function detailEditHtml(l) {
+  const r = l.research;
+  const statusOpts = statuses
+    .map((s) => `<option value="${s}" ${s === l.status ? "selected" : ""}>${s}</option>`)
+    .join("");
+
+  const researchEdit = r
+    ? `<div class="card">
+        <h3>Recherche-Dossier bearbeiten</h3>
+        <div class="form-row">
+          ${input("ed_r_unternehmensname", "Unternehmensname", r.unternehmensname || "")}
+          ${input("ed_r_rechercheStand", "Recherche-Stand", r.rechercheStand || "")}
+        </div>
+        ${input("ed_r_ambiguityWarning", "Hinweis / Mehrdeutigkeit", r.ambiguityWarning || "")}
+
+        <h4 class="edit-subhead">Allgemeine Infos</h4>
+        <table class="info-table edit"><tbody>${infoRowsEdit(r.fields || {})}</tbody></table>
+
+        ${textarea("ed_r_negativeBewertungen", "Negative Bewertungen → Potenzial", r.negativeBewertungen || "")}
+        ${textarea("ed_r_einordnung", "Einordnung / Selbstdarstellung", r.einordnung || "")}
+        ${textarea("ed_r_schwachstellen", "Sichtbare Schwachstellen / Ansatzpunkte", r.schwachstellen || "")}
+
+        <h4 class="edit-subhead">Potenziale für FU/GE</h4>
+        <div id="potEditList">${(Array.isArray(r.potenziale) ? r.potenziale : []).map(potEditRow).join("")}</div>
+        <button type="button" class="btn btn-sm" data-action="add-pot">+ Potenzial hinzufügen</button>
+
+        ${textarea("ed_r_coldCallStrategie", "Strategie für Cold Call", r.coldCallStrategie || "")}
+        ${textarea("ed_r_risiken", "Risiken / Denkbare Ablehnungsgründe", r.risiken || "")}
+      </div>`
+    : `<div class="card"><p class="d-muted">Keine Recherchedaten zum Bearbeiten vorhanden.</p></div>`;
+
+  return `
+    <div class="detail-bar">
+      <button class="btn btn-sm" data-action="cancel-edit">← Abbrechen</button>
+      <div class="detail-bar-actions">
+        <button class="btn btn-primary btn-sm" data-action="save-edit">💾 Speichern</button>
+      </div>
+    </div>
+
+    <div id="detailEditForm" class="detail-edit">
+      <div class="card">
+        <h3>Stammdaten</h3>
+        <div class="form-row">
+          ${input("ed_name", "Name", l.name)}
+          ${input("ed_company", "Firma", l.company)}
+        </div>
+        <div class="form-row">
+          ${input("ed_email", "E-Mail", l.email, "email")}
+          ${input("ed_phone", "Telefon", l.phone)}
+        </div>
+        <div class="form-row">
+          ${input("ed_source", "Quelle", l.source)}
+          ${input("ed_value", "Geschätzter Wert (€)", l.value, "number")}
+        </div>
+        <label>Status<select id="ed_status">${statusOpts}</select></label>
+        ${textarea("ed_notes", "Notizen", l.notes)}
+      </div>
+      ${researchEdit}
+    </div>
+  `;
+}
+
+// Sammelt die bearbeiteten Werte aus dem Detail-Formular.
+function collectStammdaten() {
+  const g = (id) => $("#" + id).value;
+  return {
+    name: g("ed_name"),
+    company: g("ed_company"),
+    email: g("ed_email"),
+    phone: g("ed_phone"),
+    source: g("ed_source"),
+    value: g("ed_value"),
+    status: g("ed_status"),
+    notes: g("ed_notes"),
+  };
+}
+
+function collectResearch() {
+  const g = (id) => { const el = $("#" + id); return el ? el.value : ""; };
+  const fields = {};
+  RESEARCH_FIELDS.forEach(([key]) => {
+    const valEl = document.querySelector(`[data-rf="${key}.value"]`);
+    const srcEl = document.querySelector(`[data-rf="${key}.source"]`);
+    fields[key] = {
+      value: valEl ? valEl.value : "",
+      source: srcEl ? srcEl.value : "",
+    };
+  });
+  const potenziale = [...document.querySelectorAll("#potEditList .pot-row")].map((row) => ({
+    titel: row.querySelector('[data-pf="titel"]').value,
+    beschreibung: row.querySelector('[data-pf="beschreibung"]').value,
+    signal: row.querySelector('[data-pf="signal"]').value,
+  }));
+  return {
+    unternehmensname: g("ed_r_unternehmensname"),
+    rechercheStand: g("ed_r_rechercheStand"),
+    ambiguityWarning: g("ed_r_ambiguityWarning"),
+    fields,
+    negativeBewertungen: g("ed_r_negativeBewertungen"),
+    einordnung: g("ed_r_einordnung"),
+    schwachstellen: g("ed_r_schwachstellen"),
+    potenziale,
+    coldCallStrategie: g("ed_r_coldCallStrategie"),
+    risiken: g("ed_r_risiken"),
+  };
+}
+
+async function saveDetailEdit() {
+  const l = getLead(detailId);
+  if (!l) return;
+  try {
+    await api(`/api/leads/${l.id}`, {
+      method: "PUT",
+      body: JSON.stringify(collectStammdaten()),
+    });
+    if (l.research) {
+      await api(`/api/leads/${l.id}/research`, {
+        method: "PUT",
+        body: JSON.stringify(collectResearch()),
+      });
+    }
+    detailEditing = false;
+    await refresh();
+    toast("Änderungen gespeichert", "success");
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// Delegierter Klick-Handler für die Detailseite (einmalig gebunden, deckt
+// Lese- und Bearbeiten-Modus ab).
+function onDetailClick(e) {
+  if (e.target.closest(".pot-remove")) {
+    e.target.closest(".pot-row").remove();
+    return;
+  }
+  const delAct = e.target.closest("[data-del-act]");
+  if (delAct) { removeActivity(delAct.dataset.delAct); return; }
+  const delTask = e.target.closest("[data-del-task]");
+  if (delTask) { removeTask(delTask.dataset.delTask, detailId); return; }
+  const btn = e.target.closest("[data-action]");
+  if (!btn) return;
+  const action = btn.dataset.action;
+  const id = detailId;
+  if (!id) return;
+
+  switch (action) {
+    case "edit":
+      detailEditing = true;
+      renderDetail();
+      break;
+    case "cancel-edit":
+      detailEditing = false;
+      renderDetail();
+      break;
+    case "save-edit":
+      saveDetailEdit();
+      break;
+    case "add-pot":
+      $("#potEditList").insertAdjacentHTML("beforeend", potEditRow());
+      break;
+    case "delete":
+      deleteLead(id, true);
+      break;
+    case "research":
+      researchLead(id, btn);
+      break;
+    case "score":
+    case "email":
+    case "insights":
+      runAi(action, id, btn);
+      break;
+  }
 }
 
 // --- Events ----------------------------------------------------------------
@@ -315,20 +893,21 @@ function bindEvents() {
 
   $("#closeResearchModal").addEventListener("click", closeResearchModal);
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
+  $("#abortResearchBtn").addEventListener("click", () => { if (modalJobId) cancelJob(modalJobId); });
   $("#researchForm").addEventListener("submit", submitResearch);
+
+  // Dock: ✕ bricht den Job ab, Klick auf den Chip öffnet das Detail-Modal.
+  $("#jobDock").addEventListener("click", (e) => {
+    const x = e.target.closest("[data-cancel]");
+    if (x) { e.stopPropagation(); cancelJob(x.dataset.cancel); return; }
+    const b = e.target.closest("[data-job]");
+    if (b) openJobModal(b.dataset.job);
+  });
 
   $("#settingsBtn").addEventListener("click", openSettingsModal);
   $("#closeSettingsModal").addEventListener("click", closeSettingsModal);
   $("#cancelSettingsBtn").addEventListener("click", closeSettingsModal);
   $("#settingsForm").addEventListener("submit", saveSettings);
-
-  $("#closeDetailModal").addEventListener("click", closeDetailModal);
-  $("#closeDetailBtn").addEventListener("click", closeDetailModal);
-  $("#copyDetailBtn").addEventListener("click", copyDetailMarkdown);
-
-  $("#closeAiModal").addEventListener("click", closeAiModal);
-  $("#closeAiBtn").addEventListener("click", closeAiModal);
-  $("#copyAiBtn").addEventListener("click", copyAiResult);
 
   $("#search").addEventListener("input", (e) => {
     searchTerm = e.target.value.toLowerCase().trim();
@@ -352,20 +931,46 @@ function bindEvents() {
     renderLeads();
   });
 
-  // Aktionen funktionieren in Listen- und Kanban-Ansicht.
-  const onAction = (e) => {
-    const btn = e.target.closest("[data-action]");
-    if (!btn) return;
-    const { action, id } = btn.dataset;
-    if (action === "edit") openLeadModal(id);
-    else if (action === "delete") deleteLead(id);
-    else if (action === "detail") openDetailModal(id);
-    else if (action === "research") researchLead(id, btn);
-    else if (["score", "email", "insights"].includes(action)) runAi(action, id, btn);
+  // Klick auf eine Karte (Liste oder Board) öffnet die Detailseite.
+  const onCardNav = (e) => {
+    const card = e.target.closest("[data-nav]");
+    if (!card) return;
+    if (dragMoved) return; // war ein Drag im Board, keine Navigation
+    location.hash = "#/lead/" + encodeURIComponent(card.dataset.nav);
   };
-  $("#leadList").addEventListener("click", onAction);
-  $("#kanban").addEventListener("click", onAction);
+  $("#leadList").addEventListener("click", onCardNav);
+  $("#leadList").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const card = e.target.closest("[data-nav]");
+    if (!card) return;
+    e.preventDefault();
+    location.hash = "#/lead/" + encodeURIComponent(card.dataset.nav);
+  });
+  $("#kanban").addEventListener("click", onCardNav);
   bindKanbanDnd();
+
+  // Detailseite: ein delegierter Handler für alle Aktionen.
+  $("#detailView").addEventListener("click", onDetailClick);
+  // Formulare (Aktivität/Aufgabe) und Checkbox-Umschalten – delegiert, da die
+  // Panels per innerHTML neu aufgebaut werden.
+  $("#detailView").addEventListener("submit", (e) => {
+    if (e.target.id === "activityForm") { e.preventDefault(); addDetailActivity(); }
+    if (e.target.id === "taskForm") { e.preventDefault(); addDetailTask(); }
+  });
+  $("#detailView").addEventListener("change", (e) => {
+    const cb = e.target.closest("[data-task-toggle]");
+    if (cb) toggleTask(cb.dataset.taskToggle, cb.checked, detailId);
+  });
+
+  // Aufgaben-Ansicht (global): delegierte Handler.
+  $("#tasksView").addEventListener("click", onTasksViewClick);
+  $("#tasksView").addEventListener("change", (e) => {
+    const cb = e.target.closest("[data-task-toggle]");
+    if (cb) toggleTask(cb.dataset.taskToggle, cb.checked, null);
+  });
+  $("#tasksView").addEventListener("submit", (e) => {
+    if (e.target.id === "globalTaskForm") { e.preventDefault(); addGlobalTask(); }
+  });
 
   // Schließen per Klick auf Overlay
   document.querySelectorAll(".modal-overlay").forEach((ov) => {
@@ -375,12 +980,12 @@ function bindEvents() {
   });
 }
 
-// --- Lead-Formular ---------------------------------------------------------
+// --- Lead-Formular (manuelles Anlegen) -------------------------------------
 function openLeadModal(id) {
   const form = $("#leadForm");
   form.reset();
   if (id) {
-    const l = leads.find((x) => x.id === id);
+    const l = getLead(id);
     if (!l) return;
     $("#modalTitle").textContent = "Lead bearbeiten";
     $("#leadId").value = l.id;
@@ -423,8 +1028,12 @@ async function saveLead(e) {
       await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify(payload) });
       toast("Lead aktualisiert", "success");
     } else {
-      await api("/api/leads", { method: "POST", body: JSON.stringify(payload) });
+      const created = await api("/api/leads", { method: "POST", body: JSON.stringify(payload) });
       toast("Lead angelegt", "success");
+      closeLeadModal();
+      await refresh();
+      if (created && created.id) location.hash = "#/lead/" + encodeURIComponent(created.id);
+      return;
     }
     closeLeadModal();
     await refresh();
@@ -433,29 +1042,51 @@ async function saveLead(e) {
   }
 }
 
-async function deleteLead(id) {
-  const l = leads.find((x) => x.id === id);
-  if (!confirm(`Lead "${l?.name || l?.company || "—"}" wirklich löschen?`)) return;
+async function deleteLead(id, fromDetail = false) {
+  const l = getLead(id);
+  if (!confirm(`Lead "${l?.company || l?.name || "—"}" wirklich löschen?`)) return;
   try {
     await api(`/api/leads/${id}`, { method: "DELETE" });
     toast("Lead gelöscht", "success");
-    await refresh();
+    if (fromDetail) {
+      location.hash = "#/";
+      await refresh();
+    } else {
+      await refresh();
+    }
   } catch (err) {
     toast(err.message, "error");
   }
 }
 
 // --- Einstellungen ---------------------------------------------------------
+// Wahrscheinlichkeitsfelder für die offenen Status (ohne gewonnen/verloren).
+function renderStageProbFields() {
+  const open = statuses.filter((s) => s !== "gewonnen" && s !== "verloren");
+  $("#stageProbFields").innerHTML = open
+    .map(
+      (s) => `<div class="prob-item">
+        <span class="prob-label">${esc(s)}</span>
+        <input type="number" min="0" max="100" step="5" data-prob="${esc(s)}" value="${Number(stageProbabilities[s] ?? 0)}" />
+        <span class="prob-pct">%</span>
+      </div>`
+    )
+    .join("");
+}
+
 function openSettingsModal() {
   const sel = $("#settingsModel");
-  if (!models.length) {
-    toast("Keine Modelle verfügbar (KI nicht konfiguriert)", "error");
-    return;
+  if (models.length) {
+    sel.innerHTML = models
+      .map((m) => `<option value="${esc(m.id)}">${esc(m.label || m.id)}</option>`)
+      .join("");
+    sel.value = currentModel;
+    sel.disabled = false;
+  } else {
+    sel.innerHTML = `<option>KI nicht konfiguriert (ANTHROPIC_API_KEY fehlt)</option>`;
+    sel.disabled = true;
   }
-  sel.innerHTML = models
-    .map((m) => `<option value="${esc(m.id)}">${esc(m.label || m.id)}</option>`)
-    .join("");
-  sel.value = currentModel;
+  renderStageProbFields();
   $("#settingsModal").classList.remove("hidden");
 }
 
@@ -465,81 +1096,245 @@ function closeSettingsModal() {
 
 async function saveSettings(e) {
   e.preventDefault();
-  const model = $("#settingsModel").value;
+  const body = {};
+  if (models.length) body.model = $("#settingsModel").value;
+  const probs = {};
+  document.querySelectorAll("#stageProbFields [data-prob]").forEach((el) => {
+    probs[el.dataset.prob] = Number(el.value);
+  });
+  body.stageProbabilities = probs;
   try {
-    const cfg = await api("/api/settings", {
-      method: "PUT",
-      body: JSON.stringify({ model }),
-    });
+    const cfg = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
     currentModel = cfg.model;
+    stageProbabilities = cfg.stageProbabilities || stageProbabilities;
     renderAiBadge({ aiEnabled, model: currentModel });
-    toast("Modell gespeichert: " + currentModel.replace("claude-", ""), "success");
+    await refresh(); // Pipeline-Wert mit den neuen Gewichten neu berechnen
+    toast("Einstellungen gespeichert", "success");
     closeSettingsModal();
   } catch (err) {
     toast(err.message, "error");
   }
 }
 
-// --- Lead-Recherche --------------------------------------------------------
+// --- Lead-Recherche (Hintergrund-Jobs + Dock) ------------------------------
+// Laufende Recherche-Jobs: jobId -> { id, label, status, steps, startTs, leadId }
+const jobs = new Map();
+let modalJobId = null; // welchen Job zeigt das Modal gerade (null = frische Eingabe)?
+
+// Öffnet das Modal für eine NEUE Recherche-Eingabe.
 function openResearchModal() {
+  modalJobId = null;
+  stopResearchTimer();
   $("#researchForm").reset();
+  $("#researchInput").disabled = false;
+  $("#researchHint").classList.remove("hidden");
   $("#researchLoading").classList.add("hidden");
+  $("#startResearchBtn").classList.remove("hidden");
+  $("#abortResearchBtn").classList.add("hidden");
+  $("#cancelResearchBtn").textContent = "Abbrechen";
   const steps = $("#researchSteps");
   steps.classList.add("hidden");
   steps.innerHTML = "";
-  setResearchBusy(false);
   $("#researchModal").classList.remove("hidden");
   $("#researchInput").focus();
 }
 
-function renderSteps(list) {
+// Öffnet das Modal als Detailansicht eines bereits laufenden Jobs.
+function openJobModal(jobId) {
+  const job = jobs.get(jobId);
+  if (!job) return;
+  modalJobId = jobId;
+  $("#researchInput").value = job.label;
+  $("#researchInput").disabled = true;
+  $("#researchHint").classList.add("hidden");
+  $("#startResearchBtn").classList.add("hidden");
+  $("#abortResearchBtn").classList.remove("hidden");
+  $("#cancelResearchBtn").textContent = "Im Hintergrund weiter ↓";
+  $("#researchLoading").classList.remove("hidden");
+  renderSteps(job.steps, job.status !== "running");
+  startResearchTimer(job.startTs);
+  $("#researchModal").classList.remove("hidden");
+}
+
+// Zeigt die Recherche-Schritte als Timeline. Der jeweils letzte Schritt ist
+// „aktiv" (pulsierender Punkt), abgeschlossene Schritte bekommen einen Haken-Punkt.
+function renderSteps(list, finished = false) {
   const el = $("#researchSteps");
   el.classList.remove("hidden");
-  // Nur die letzten ~12 Schritte zeigen, neueste unten.
-  el.innerHTML = (list || [])
-    .slice(-12)
-    .map((s) => `<li>${esc(s.text)}</li>`)
+  const items = (list || []).slice(-20);
+  el.innerHTML = items
+    .map((s, i) => {
+      const isLast = i === items.length - 1;
+      const cls = isLast && !finished ? "active" : "done";
+      return `<li class="${cls}"><span class="step-dot"></span><span class="step-text">${esc(s.text)}</span></li>`;
+    })
     .join("");
   el.scrollTop = el.scrollHeight;
 }
 
-// Pollt einen Recherche-Job bis er fertig ist und zeigt den Fortschritt an.
-async function trackResearch(jobId) {
-  renderSteps([]);
+// Live-Timer für die Recherchedauer (mm:ss), gerechnet ab Job-Start.
+let researchTimerId = null;
+function fmtElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+function startResearchTimer(startTs) {
+  stopResearchTimer();
+  const el = $("#researchElapsed");
+  const base = startTs || Date.now();
+  const tick = () => { if (el) el.textContent = fmtElapsed(Date.now() - base); };
+  tick();
+  researchTimerId = setInterval(tick, 1000);
+}
+function stopResearchTimer() {
+  if (researchTimerId) {
+    clearInterval(researchTimerId);
+    researchTimerId = null;
+  }
+}
+
+// Modal schließen = minimieren. Der Job läuft serverseitig weiter und bleibt
+// im Dock sichtbar.
+function closeResearchModal() {
+  stopResearchTimer();
+  modalJobId = null;
+  $("#researchModal").classList.add("hidden");
+}
+
+// Laufende Jobs in localStorage sichern, damit das Dock einen Seiten-Reload
+// übersteht (die Recherche läuft serverseitig weiter).
+const JOBS_KEY = "leadpilot_jobs";
+function persistJobs() {
+  const arr = [...jobs.values()].map((j) => ({ id: j.id, label: j.label, startTs: j.startTs }));
+  try { localStorage.setItem(JOBS_KEY, JSON.stringify(arr)); } catch {}
+}
+function dropJob(jobId) {
+  jobs.delete(jobId);
+  persistJobs();
+  renderDock();
+}
+
+// Bricht eine laufende Recherche ab (serverseitig via AbortController).
+async function cancelJob(jobId) {
+  const job = jobs.get(jobId);
+  if (job && !confirm(`Recherche „${job.label}" wirklich abbrechen?`)) return;
+  try {
+    await api(`/api/research/${jobId}/cancel`, { method: "POST" });
+  } catch (err) {
+    /* Job evtl. schon weg – egal, lokal aufräumen */
+  }
+  const wasOpen = modalJobId === jobId;
+  dropJob(jobId);
+  toast("Recherche abgebrochen", "");
+  if (wasOpen) closeResearchModal();
+}
+
+// Job registrieren und Polling starten. startTs optional (für Wiederaufnahme).
+function addJob(jobId, label, startTs) {
+  jobs.set(jobId, { id: jobId, label, status: "running", steps: [], startTs: startTs || Date.now(), leadId: null });
+  persistJobs();
+  renderDock();
+  pollJob(jobId);
+}
+
+// Nimmt nach einem Seiten-Reload noch laufende Jobs aus localStorage wieder auf.
+function resumeJobs() {
+  let arr = [];
+  try { arr = JSON.parse(localStorage.getItem(JOBS_KEY) || "[]"); } catch {}
+  if (!Array.isArray(arr)) return;
+  for (const j of arr) {
+    if (j && j.id && !jobs.has(j.id)) addJob(j.id, j.label || "Recherche", j.startTs);
+  }
+}
+
+// Pollt EINEN Job unabhängig vom Modal bis fertig/Fehler.
+async function pollJob(jobId) {
+  let misses = 0;
   while (true) {
     await sleep(1500);
-    let data;
+    const job = jobs.get(jobId);
+    if (!job) return; // wurde entfernt
+    let res;
     try {
-      data = await api(`/api/research/${jobId}`);
+      res = await fetch(`/api/research/${jobId}`, { headers: { "Content-Type": "application/json" } });
     } catch (err) {
-      // Einzelne fehlgeschlagene Polls tolerieren und weiter versuchen.
-      continue;
+      if (++misses > 20) { dropJob(jobId); return; }
+      continue; // einzelne fehlgeschlagene Polls tolerieren
     }
-    renderSteps(data.steps);
+    if (res.status === 404) { dropJob(jobId); return; } // Job abgelaufen/unbekannt
+    let data;
+    try { data = await res.json(); } catch { continue; }
+    if (!res.ok) { if (++misses > 20) { dropJob(jobId); return; } continue; }
+    misses = 0;
+
+    job.steps = data.steps || job.steps;
+    job.status = data.status;
+    if (data.lead && data.lead.id) job.leadId = data.lead.id;
+    if (modalJobId === jobId) renderSteps(job.steps, data.status !== "running");
+    renderDock();
+
     if (data.status === "done") {
-      toast("Recherche abgeschlossen", "success");
-      closeResearchModal();
+      const wasOpen = modalJobId === jobId;
+      dropJob(jobId);
+      toast(`✅ Recherche fertig: ${job.label}`, "success");
       await refresh();
-      if (data.lead && data.lead.research) openDetailModal(data.lead.id);
+      if (wasOpen) {
+        closeResearchModal();
+        if (job.leadId) location.hash = "#/lead/" + encodeURIComponent(job.leadId);
+      }
       return;
     }
     if (data.status === "error") {
-      toast(data.error || "Recherche fehlgeschlagen", "error");
-      setResearchBusy(false);
+      const wasOpen = modalJobId === jobId;
+      dropJob(jobId);
+      toast(data.error || `Recherche fehlgeschlagen: ${job.label}`, "error");
+      if (wasOpen) closeResearchModal();
+      return;
+    }
+    if (data.status === "cancelled") {
+      // z. B. aus einem anderen Tab abgebrochen
+      const wasOpen = modalJobId === jobId;
+      dropJob(jobId);
+      if (wasOpen) closeResearchModal();
       return;
     }
   }
 }
 
-function closeResearchModal() {
-  $("#researchModal").classList.add("hidden");
-}
+// Rendert das Dock laufender Jobs unten rechts. Aktualisiert IN PLACE: neue
+// Jobs werden hinzugefügt (einmalige Einblend-Animation), bestehende Chips nur
+// im Text aktualisiert. So zuckt/flackert nichts bei jedem Poll.
+function renderDock() {
+  const dock = $("#jobDock");
+  const list = [...jobs.values()];
+  dock.classList.toggle("hidden", list.length === 0);
 
-function setResearchBusy(busy) {
-  $("#startResearchBtn").disabled = busy;
-  $("#cancelResearchBtn").disabled = busy;
-  $("#researchInput").disabled = busy;
-  $("#researchLoading").classList.toggle("hidden", !busy);
+  const seen = new Set();
+  for (const j of list) {
+    seen.add(j.id);
+    const last = j.steps && j.steps.length ? j.steps[j.steps.length - 1].text : "Starte…";
+    let chip = dock.querySelector(`[data-job="${j.id}"]`);
+    if (!chip) {
+      chip = document.createElement("button");
+      chip.className = "job-chip";
+      chip.setAttribute("data-job", j.id);
+      chip.title = "Recherche-Fortschritt öffnen";
+      chip.innerHTML =
+        `<span class="spinner"></span>` +
+        `<span class="job-chip-body">` +
+        `<span class="job-chip-title"></span>` +
+        `<span class="job-chip-step"></span></span>` +
+        `<span class="job-chip-x" data-cancel="${j.id}" role="button" title="Recherche abbrechen">✕</span>`;
+      chip.querySelector(".job-chip-title").textContent = "🔎 " + j.label;
+      dock.appendChild(chip);
+    }
+    const stepEl = chip.querySelector(".job-chip-step");
+    if (stepEl.textContent !== last) stepEl.textContent = last;
+  }
+  // Nicht mehr laufende Jobs entfernen.
+  dock.querySelectorAll("[data-job]").forEach((el) => {
+    if (!seen.has(el.getAttribute("data-job"))) el.remove();
+  });
 }
 
 async function submitResearch(e) {
@@ -549,24 +1344,21 @@ async function submitResearch(e) {
     toast("Bitte Website oder Firmennamen eingeben", "error");
     return;
   }
-  setResearchBusy(true);
   try {
     const { jobId } = await api("/api/leads/research", {
       method: "POST",
       body: JSON.stringify({ input }),
     });
-    await trackResearch(jobId);
+    addJob(jobId, input);
+    openJobModal(jobId);
   } catch (err) {
     toast(err.message, "error");
-    setResearchBusy(false);
   }
 }
 
-// Recherchiert einen bestehenden Lead. Hat er bereits eine Recherche, fragen
-// wir den Input ab (Korrektur möglich). Ein manuell angelegter Lead ohne
-// Recherche wird direkt anhand seiner Firma/Quelle recherchiert.
+// Recherchiert einen bestehenden Lead neu.
 async function researchLead(id, btn) {
-  const l = leads.find((x) => x.id === id);
+  const l = getLead(id);
   let body = {};
   let label = (l && (l.company || l.source)) || "";
   if (l && l.research) {
@@ -585,122 +1377,24 @@ async function researchLead(id, btn) {
     body = { input: t };
     label = t;
   }
-  // sonst: kein Input → Server recherchiert anhand Firma/Quelle des Leads.
-  openResearchModal();
-  $("#researchInput").value = label;
-  setResearchBusy(true);
   try {
     const { jobId } = await api(`/api/leads/${id}/research`, {
       method: "POST",
       body: JSON.stringify(body),
     });
-    await trackResearch(jobId);
+    addJob(jobId, label);
+    openJobModal(jobId);
   } catch (err) {
     toast(err.message, "error");
-    setResearchBusy(false);
-    closeResearchModal();
   }
 }
 
-// --- Recherche-Detail (Dossier) --------------------------------------------
-let detailMarkdown = "";
-
-function detailRow(label, field) {
-  const v = field && field.value ? field.value : "—";
-  const src = field && field.source ? field.source : "";
-  const srcHtml = src
-    ? ` <a class="src" href="${esc(src)}" target="_blank" rel="noopener">↗ Quelle</a>`
-    : "";
-  return `<tr><th>${esc(label)}</th><td>${esc(v)}${srcHtml}</td></tr>`;
-}
-
-function openDetailModal(id) {
-  const l = leads.find((x) => x.id === id);
-  if (!l || !l.research) {
-    toast("Keine Recherchedaten vorhanden", "error");
-    return;
-  }
-  const r = l.research;
-  const f = r.fields || {};
-  detailMarkdown = r.markdown || "";
-
-  $("#detailTitle").textContent = r.unternehmensname || l.company || "Recherche-Dossier";
-
-  const pots =
-    Array.isArray(r.potenziale) && r.potenziale.length
-      ? r.potenziale
-          .map(
-            (p) =>
-              `<li><strong>${esc(p.titel)}</strong> — ${esc(p.beschreibung)}<br><em class="signal">Signal: ${esc(p.signal)}</em></li>`
-          )
-          .join("")
-      : "<li>—</li>";
-
-  const meta = [
-    r.rechercheStand ? `Recherche-Stand: ${esc(r.rechercheStand)}` : "",
-    r.input ? `Input: ${esc(r.input)}` : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
-  $("#detailBody").innerHTML = `
-    <p class="detail-meta">${meta}</p>
-    ${r.ambiguityWarning ? `<p class="warn">⚠️ ${esc(r.ambiguityWarning)}</p>` : ""}
-
-    <h3>1. Allgemeine Infos</h3>
-    <table class="detail-table">
-      ${detailRow("Branche", f.branche)}
-      ${detailRow("Adresse", f.adresse)}
-      ${detailRow("Telefon (allgemein)", f.telefonAllgemein)}
-      ${detailRow("Ansprechpartner / Entscheider", f.ansprechpartner)}
-      ${detailRow("Telefon (Durchwahl)", f.telefonDurchwahl)}
-      ${detailRow("Öffnungszeiten", f.oeffnungszeiten)}
-      ${detailRow("Mail", f.mail)}
-      ${detailRow("Web", f.web)}
-      ${detailRow("Kundenbewertung", f.kundenbewertung)}
-    </table>
-
-    <h3>Negative Bewertungen → Potenzial</h3>
-    <p>${esc(r.negativeBewertungen) || "—"}</p>
-
-    <h3>2. Einordnung / Selbstdarstellung</h3>
-    <p>${esc(r.einordnung) || "—"}</p>
-
-    <h3>3. Sichtbare Schwachstellen / Ansatzpunkte</h3>
-    <p>${esc(r.schwachstellen) || "—"}</p>
-
-    <h3>4. Potenziale für FU/GE</h3>
-    <ul class="detail-pots">${pots}</ul>
-
-    <h3>5. Strategie für Cold Call</h3>
-    <p>${esc(r.coldCallStrategie) || "—"}</p>
-
-    <h3>6. Risiken / Denkbare Ablehnungsgründe</h3>
-    <p>${esc(r.risiken) || "—"}</p>
-  `;
-
-  $("#copyDetailBtn").classList.toggle("hidden", !detailMarkdown);
-  $("#detailModal").classList.remove("hidden");
-}
-
-function closeDetailModal() {
-  $("#detailModal").classList.add("hidden");
-}
-
-async function copyDetailMarkdown() {
-  try {
-    await navigator.clipboard.writeText(detailMarkdown);
-    toast("Dossier in Zwischenablage kopiert", "success");
-  } catch {
-    toast("Kopieren nicht möglich", "error");
-  }
-}
-
-// --- KI-Aktionen -----------------------------------------------------------
+// --- KI-Aktionen (auf der Detailseite) -------------------------------------
 async function runAi(action, id, btn) {
   if (action === "score") {
     btn.disabled = true;
-    btn.textContent = "⏳…";
+    const orig = btn.textContent;
+    btn.textContent = "⏳ …";
     try {
       await api(`/api/leads/${id}/score`, { method: "POST" });
       toast("KI-Bewertung erstellt", "success");
@@ -708,17 +1402,14 @@ async function runAi(action, id, btn) {
     } catch (err) {
       toast(err.message, "error");
       btn.disabled = false;
-      btn.textContent = "⚡ KI-Score";
+      btn.textContent = orig;
     }
     return;
   }
 
-  // E-Mail oder Insights → Ergebnis-Modal
-  const titles = { email: "✉️ KI-E-Mail-Entwurf", insights: "💡 KI-Empfehlung" };
-  $("#aiModalTitle").textContent = titles[action];
-  $("#aiResult").textContent = "";
-  $("#aiLoading").classList.remove("hidden");
-  $("#aiModal").classList.remove("hidden");
+  const out = $("#aiOutput");
+  out.classList.remove("hidden");
+  out.innerHTML = `<div class="ai-loading"><span class="spinner"></span> KI arbeitet…</div>`;
 
   try {
     let body = {};
@@ -728,7 +1419,7 @@ async function runAi(action, id, btn) {
         "Erstkontakt herstellen und ein kurzes Kennenlerngespräch vorschlagen"
       );
       if (goal === null) {
-        closeAiModal();
+        out.classList.add("hidden");
         return;
       }
       body = { goal };
@@ -737,26 +1428,295 @@ async function runAi(action, id, btn) {
       method: "POST",
       body: JSON.stringify(body),
     });
-    $("#aiResult").textContent = data.email || data.insights || "";
+    const text = data.email || data.insights || "";
+    const title = action === "email" ? "✉️ E-Mail-Entwurf" : "💡 Empfehlung";
+    out.innerHTML = `
+      <div class="ai-output-head">
+        <strong>${title}</strong>
+        <button class="btn btn-sm" id="copyAiOut">📋 Kopieren</button>
+      </div>
+      <pre class="ai-result">${esc(text)}</pre>`;
+    $("#copyAiOut").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        toast("In Zwischenablage kopiert", "success");
+      } catch {
+        toast("Kopieren nicht möglich", "error");
+      }
+    });
   } catch (err) {
-    $("#aiResult").textContent = "Fehler: " + err.message;
-  } finally {
-    $("#aiLoading").classList.add("hidden");
+    out.innerHTML = `<p class="warn">Fehler: ${esc(err.message)}</p>`;
   }
 }
 
-function closeAiModal() {
-  $("#aiModal").classList.add("hidden");
-}
-
-async function copyAiResult() {
-  const text = $("#aiResult").textContent;
+// --- Detailseite: Aktivitäten & Aufgaben (Aktionen) ------------------------
+async function addDetailActivity() {
+  const type = $("#act_type").value;
+  const body = $("#act_body").value.trim();
+  const outcome = $("#act_outcome").value.trim();
+  if (!body && !outcome) {
+    toast("Bitte einen Text eingeben", "error");
+    return;
+  }
   try {
-    await navigator.clipboard.writeText(text);
-    toast("In Zwischenablage kopiert", "success");
-  } catch {
-    toast("Kopieren nicht möglich", "error");
+    await api(`/api/leads/${detailId}/activities`, {
+      method: "POST",
+      body: JSON.stringify({ type, body, outcome }),
+    });
+    toast("Aktivität festgehalten", "success");
+    loadDetailExtras(detailId);
+  } catch (err) {
+    toast(err.message, "error");
   }
+}
+
+async function removeActivity(actId) {
+  if (!confirm("Diese Aktivität löschen?")) return;
+  try {
+    await api(`/api/activities/${actId}`, { method: "DELETE" });
+    loadDetailExtras(detailId);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function addDetailTask() {
+  const title = $("#task_title").value.trim();
+  const due = $("#task_due").value;
+  if (!title) {
+    toast("Bitte einen Titel eingeben", "error");
+    return;
+  }
+  try {
+    await api("/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({ title, dueAt: due ? new Date(due).toISOString() : null, leadId: detailId }),
+    });
+    toast("Aufgabe angelegt", "success");
+    loadDetailExtras(detailId);
+    updateTaskBadge();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function toggleTask(taskId, done, leadId) {
+  try {
+    await api(`/api/tasks/${taskId}`, { method: "PUT", body: JSON.stringify({ done }) });
+    updateTaskBadge();
+    if (leadId) loadDetailExtras(leadId);
+    else renderTasksView();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function removeTask(taskId, leadId) {
+  if (!confirm("Diese Aufgabe löschen?")) return;
+  try {
+    await api(`/api/tasks/${taskId}`, { method: "DELETE" });
+    updateTaskBadge();
+    if (leadId) loadDetailExtras(leadId);
+    else renderTasksView();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// --- Globale Aufgaben-Ansicht ----------------------------------------------
+let tasksShowDone = false;
+
+async function renderTasksView() {
+  const v = $("#tasksView");
+  v.innerHTML = `<div class="view-head"><h2>✅ Aufgaben & Wiedervorlagen</h2></div><p class="d-muted">Lädt…</p>`;
+  let tasks;
+  try {
+    tasks = await api(`/api/tasks?status=${tasksShowDone ? "all" : "open"}`);
+  } catch (err) {
+    v.innerHTML = `<p class="warn">Fehler: ${esc(err.message)}</p>`;
+    return;
+  }
+
+  const leadOpts = leads
+    .map((l) => `<option value="${esc(l.id)}">${esc(l.company || l.name || "—")}</option>`)
+    .join("");
+
+  const open = tasks.filter((t) => !t.done);
+  const overdue = open.filter(isOverdue);
+
+  const rows = tasks.length
+    ? tasks.map(globalTaskRow).join("")
+    : `<p class="d-muted">Keine Aufgaben.</p>`;
+
+  v.innerHTML = `
+    <div class="view-head">
+      <h2>✅ Aufgaben & Wiedervorlagen</h2>
+      <label class="toggle-done"><input type="checkbox" id="toggleShowDone" ${tasksShowDone ? "checked" : ""}/> Erledigte zeigen</label>
+    </div>
+    <div class="task-summary">
+      <span class="chip-stat">${open.length} offen</span>
+      <span class="chip-stat ${overdue.length ? "overdue" : ""}">${overdue.length} überfällig</span>
+    </div>
+    <form class="task-form global" id="globalTaskForm">
+      <input type="text" id="gt_title" placeholder="Neue Aufgabe…" />
+      <select id="gt_lead"><option value="">— ohne Lead —</option>${leadOpts}</select>
+      <input type="datetime-local" id="gt_due" />
+      <button type="submit" class="btn btn-sm btn-primary">+ Aufgabe</button>
+    </form>
+    <ul class="task-list global">${rows}</ul>
+  `;
+  $("#toggleShowDone").addEventListener("change", (e) => {
+    tasksShowDone = e.target.checked;
+    renderTasksView();
+  });
+}
+
+function globalTaskRow(t) {
+  const over = isOverdue(t);
+  const leadLabel = t.leadCompany || t.leadName || "";
+  const leadLink = t.leadId
+    ? `<a class="task-lead" href="#/lead/${encodeURIComponent(t.leadId)}">🔗 ${esc(leadLabel || "Lead")}</a>`
+    : "";
+  const due = t.dueAt
+    ? `<span class="task-due ${over ? "overdue" : ""}">📅 ${esc(over ? "überfällig · " : "")}${esc(fmtDateTime(t.dueAt))}</span>`
+    : `<span class="task-due muted">ohne Termin</span>`;
+  return `<li class="task-item ${t.done ? "done" : ""}">
+    <input type="checkbox" class="task-check" data-task-toggle="${t.id}" ${t.done ? "checked" : ""} />
+    <div class="task-body">
+      <span class="task-title">${esc(t.title)}</span>
+      <span class="task-meta">${due} ${leadLink}</span>
+    </div>
+    <button class="icon-btn task-del" data-del-task="${t.id}" title="Löschen">🗑️</button>
+  </li>`;
+}
+
+function onTasksViewClick(e) {
+  const del = e.target.closest("[data-del-task]");
+  if (del) { removeTask(del.dataset.delTask, null); return; }
+}
+
+async function addGlobalTask() {
+  const title = $("#gt_title").value.trim();
+  const leadId = $("#gt_lead").value || null;
+  const due = $("#gt_due").value;
+  if (!title) {
+    toast("Bitte einen Titel eingeben", "error");
+    return;
+  }
+  try {
+    await api("/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({ title, leadId, dueAt: due ? new Date(due).toISOString() : null }),
+    });
+    toast("Aufgabe angelegt", "success");
+    updateTaskBadge();
+    renderTasksView();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// --- Berichte-Ansicht ------------------------------------------------------
+const MONTH_SHORT = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+function monthLabel(ym) {
+  const [, m] = ym.split("-");
+  return MONTH_SHORT[Number(m) - 1] || ym;
+}
+
+// Einfaches, abhängigkeitsfreies SVG-Säulendiagramm.
+function barChart(series, { format = (v) => v, color = "var(--primary)" } = {}) {
+  if (!series.length) return `<p class="d-muted">Keine Daten.</p>`;
+  const max = Math.max(1, ...series.map((s) => s.value));
+  const W = 640, H = 180, pad = 24, bw = (W - pad * 2) / series.length;
+  const bars = series.map((s, i) => {
+    const h = Math.round((s.value / max) * (H - 40));
+    const x = pad + i * bw;
+    const y = H - 20 - h;
+    const cx = x + bw / 2;
+    return `
+      <g>
+        <rect x="${x + bw * 0.15}" y="${y}" width="${bw * 0.7}" height="${h}" rx="3" fill="${color}">
+          <title>${esc(s.label)}: ${esc(String(format(s.value)))}</title>
+        </rect>
+        ${s.value ? `<text x="${cx}" y="${y - 4}" class="bar-val">${esc(String(format(s.value)))}</text>` : ""}
+        <text x="${cx}" y="${H - 6}" class="bar-lbl">${esc(s.label)}</text>
+      </g>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" class="bar-chart" preserveAspectRatio="xMidYMid meet">${bars}</svg>`;
+}
+
+function funnelHtml(funnel) {
+  const max = Math.max(1, ...funnel.map((f) => f.count));
+  return `<div class="funnel">${funnel.map((f) => {
+    const pct = Math.round((f.count / max) * 100);
+    return `<div class="funnel-row">
+      <span class="funnel-label status-pill s-${f.status}">${esc(f.status)}</span>
+      <div class="funnel-bar-wrap"><div class="funnel-bar" style="width:${pct}%"></div></div>
+      <span class="funnel-count">${f.count} · ${fmtEuro(Math.round(f.value))}</span>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+async function renderReportsView() {
+  const v = $("#reportsView");
+  v.innerHTML = `<div class="view-head"><h2>📊 Berichte</h2></div><p class="d-muted">Lädt…</p>`;
+  let r;
+  try {
+    r = await api("/api/report");
+  } catch (err) {
+    v.innerHTML = `<p class="warn">Fehler: ${esc(err.message)}</p>`;
+    return;
+  }
+  const s = r.stats;
+  const eur = (v) => fmtEuro(Math.round(v));
+
+  const kpis = [
+    ["Leads gesamt", s.total],
+    ["Pipeline (gewichtet)", eur(s.weightedPipelineValue)],
+    ["Gewonnen", eur(s.wonValue)],
+    ["Abschlussquote", s.conversion + " %"],
+    ["Ø Auftragswert", eur(r.avgWon)],
+    ["Offene Aufgaben", `${r.tasks.open}${r.tasks.overdue ? ` · ${r.tasks.overdue} überfällig` : ""}`],
+  ].map(([label, val]) => `<div class="stat-card"><span class="stat-value">${esc(String(val))}</span><span class="stat-label">${esc(label)}</span></div>`).join("");
+
+  const created = r.createdByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
+  const won = r.wonByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
+
+  const sourceRows = r.bySource.length
+    ? r.bySource.map((x) => `<tr>
+        <td>${esc(x.source)}</td>
+        <td class="num">${x.count}</td>
+        <td class="num">${x.won}</td>
+        <td class="num">${eur(x.value)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="4" class="d-muted">Keine Daten.</td></tr>`;
+
+  v.innerHTML = `
+    <div class="view-head"><h2>📊 Berichte</h2></div>
+    <section class="stats report-kpis">${kpis}</section>
+
+    <div class="report-grid">
+      <section class="card">
+        <h3>Pipeline-Trichter</h3>
+        ${funnelHtml(r.funnel)}
+      </section>
+      <section class="card">
+        <h3>Neue Leads je Monat</h3>
+        ${barChart(created, { color: "var(--primary)" })}
+      </section>
+      <section class="card">
+        <h3>Gewonnener Umsatz je Monat</h3>
+        ${barChart(won, { color: "var(--green)", format: (val) => (val >= 1000 ? Math.round(val / 1000) + "k" : val) })}
+      </section>
+      <section class="card">
+        <h3>Quellen-Performance</h3>
+        <table class="report-table">
+          <thead><tr><th>Quelle</th><th class="num">Leads</th><th class="num">Gewonnen</th><th class="num">Wert</th></tr></thead>
+          <tbody>${sourceRows}</tbody>
+        </table>
+      </section>
+    </div>
+  `;
 }
 
 // --- Toast -----------------------------------------------------------------

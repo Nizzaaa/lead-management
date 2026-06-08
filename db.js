@@ -65,6 +65,38 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
           value TEXT NOT NULL
         );
       `);
+      // Aktivitäten-Timeline: jeder Touchpoint (Notiz, Anruf, Mail, Termin) und
+      // automatische System-/KI-Ereignisse je Lead, chronologisch.
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS activities (
+          id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          lead_id     UUID        NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+          type        TEXT        NOT NULL DEFAULT 'note',
+          title       TEXT        NOT NULL DEFAULT '',
+          body        TEXT        NOT NULL DEFAULT '',
+          outcome     TEXT        NOT NULL DEFAULT '',
+          actor       TEXT        NOT NULL DEFAULT '',
+          meta        JSONB,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_activities_lead ON activities(lead_id, created_at DESC);");
+      // Aufgaben / Wiedervorlagen: optional an einen Lead gebunden, mit Fälligkeit.
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS tasks (
+          id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          lead_id     UUID        REFERENCES leads(id) ON DELETE CASCADE,
+          title       TEXT        NOT NULL DEFAULT '',
+          notes       TEXT        NOT NULL DEFAULT '',
+          due_at      TIMESTAMPTZ,
+          done        BOOLEAN     NOT NULL DEFAULT false,
+          done_at     TIMESTAMPTZ,
+          actor       TEXT        NOT NULL DEFAULT '',
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_tasks_open ON tasks(done, due_at);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_tasks_lead ON tasks(lead_id);");
       console.log("Datenbank verbunden, Schema bereit.");
       return;
     } catch (err) {
@@ -132,6 +164,17 @@ async function setLeadResearch(id, research, data) {
   return rows[0] ? rowToLead(rows[0]) : null;
 }
 
+// Aktualisiert ausschließlich die Recherchedaten (JSONB) eines Leads – ohne
+// die Stammdaten anzufassen. Wird für die manuelle Bearbeitung des Dossiers
+// auf der Detailseite verwendet (kein erneuter KI-Lauf).
+async function updateLeadResearch(id, research) {
+  const { rows } = await pool.query(
+    "UPDATE leads SET research = $2, updated_at = now() WHERE id = $1 RETURNING *",
+    [id, research]
+  );
+  return rows[0] ? rowToLead(rows[0]) : null;
+}
+
 async function deleteLead(id) {
   const { rowCount } = await pool.query("DELETE FROM leads WHERE id = $1", [id]);
   return rowCount > 0;
@@ -150,24 +193,221 @@ async function setSetting(key, value) {
   );
 }
 
-async function getStats(statuses) {
+// probabilities: { status: Prozent } – gewichtet den offenen Pipeline-Wert nach
+// Abschlusswahrscheinlichkeit (Erwartungswert). Offen = nicht gewonnen/verloren.
+async function getStats(statuses, probabilities = {}) {
   const { rows } = await pool.query(
     "SELECT status, COUNT(*)::int AS count, COALESCE(SUM(value), 0)::float AS sum FROM leads GROUP BY status"
   );
   const byStatus = {};
   for (const s of statuses) byStatus[s] = 0;
   let total = 0;
-  let pipelineValue = 0;
+  let pipelineValue = 0; // roh (ungewichtet)
+  let weightedPipelineValue = 0; // Σ value × Wahrscheinlichkeit
   let wonValue = 0;
   for (const r of rows) {
     byStatus[r.status] = r.count;
     total += r.count;
-    if (r.status === "gewonnen") wonValue += r.sum;
-    else if (r.status !== "verloren") pipelineValue += r.sum;
+    if (r.status === "gewonnen") {
+      wonValue += r.sum;
+    } else if (r.status !== "verloren") {
+      pipelineValue += r.sum;
+      const p = Number(probabilities[r.status]);
+      weightedPipelineValue += r.sum * ((Number.isFinite(p) ? p : 0) / 100);
+    }
   }
   const closed = (byStatus["gewonnen"] || 0) + (byStatus["verloren"] || 0);
   const conversion = closed > 0 ? Math.round(((byStatus["gewonnen"] || 0) / closed) * 100) : 0;
-  return { total, byStatus, pipelineValue, wonValue, conversion };
+  return { total, byStatus, pipelineValue, weightedPipelineValue, wonValue, conversion };
+}
+
+// --- Aktivitäten-Timeline --------------------------------------------------
+function rowToActivity(row) {
+  return {
+    id: row.id,
+    leadId: row.lead_id,
+    type: row.type,
+    title: row.title,
+    body: row.body,
+    outcome: row.outcome,
+    actor: row.actor,
+    meta: row.meta || null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+  };
+}
+
+async function listActivities(leadId) {
+  const { rows } = await pool.query(
+    "SELECT * FROM activities WHERE lead_id = $1 ORDER BY created_at DESC",
+    [leadId]
+  );
+  return rows.map(rowToActivity);
+}
+
+async function createActivity(a) {
+  const { rows } = await pool.query(
+    `INSERT INTO activities (lead_id, type, title, body, outcome, actor, meta)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *`,
+    [a.leadId, a.type || "note", a.title || "", a.body || "", a.outcome || "", a.actor || "", a.meta || null]
+  );
+  return rowToActivity(rows[0]);
+}
+
+async function deleteActivity(id) {
+  const { rowCount } = await pool.query("DELETE FROM activities WHERE id = $1", [id]);
+  return rowCount > 0;
+}
+
+// --- Aufgaben / Wiedervorlagen ---------------------------------------------
+function rowToTask(row) {
+  return {
+    id: row.id,
+    leadId: row.lead_id,
+    title: row.title,
+    notes: row.notes,
+    dueAt: row.due_at instanceof Date ? row.due_at.toISOString() : row.due_at,
+    done: row.done,
+    doneAt: row.done_at instanceof Date ? row.done_at.toISOString() : row.done_at,
+    actor: row.actor,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    // Bei der globalen Liste mitgelieferte Lead-Kurzinfos (per JOIN):
+    leadCompany: row.lead_company !== undefined ? row.lead_company : undefined,
+    leadName: row.lead_name !== undefined ? row.lead_name : undefined,
+  };
+}
+
+async function listTasksByLead(leadId) {
+  const { rows } = await pool.query(
+    "SELECT * FROM tasks WHERE lead_id = $1 ORDER BY done ASC, due_at ASC NULLS LAST, created_at DESC",
+    [leadId]
+  );
+  return rows.map(rowToTask);
+}
+
+// Globale Aufgabenliste mit Lead-Bezug. status: "open" | "done" | "all".
+async function listTasks(status = "open") {
+  let where = "";
+  if (status === "open") where = "WHERE t.done = false";
+  else if (status === "done") where = "WHERE t.done = true";
+  const { rows } = await pool.query(
+    `SELECT t.*, l.company AS lead_company, l.name AS lead_name
+     FROM tasks t LEFT JOIN leads l ON l.id = t.lead_id
+     ${where}
+     ORDER BY t.done ASC, t.due_at ASC NULLS LAST, t.created_at DESC`
+  );
+  return rows.map(rowToTask);
+}
+
+async function createTask(t) {
+  const { rows } = await pool.query(
+    `INSERT INTO tasks (lead_id, title, notes, due_at, actor)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING *`,
+    [t.leadId || null, t.title || "", t.notes || "", t.dueAt || null, t.actor || ""]
+  );
+  return rowToTask(rows[0]);
+}
+
+async function updateTask(id, t) {
+  const { rows } = await pool.query(
+    `UPDATE tasks
+     SET title = COALESCE($2, title),
+         notes = COALESCE($3, notes),
+         due_at = $4,
+         done = COALESCE($5, done),
+         done_at = CASE WHEN $5 IS TRUE THEN now() WHEN $5 IS FALSE THEN NULL ELSE done_at END
+     WHERE id = $1
+     RETURNING *`,
+    [id, t.title ?? null, t.notes ?? null, t.dueAt ?? null, t.done ?? null]
+  );
+  return rows[0] ? rowToTask(rows[0]) : null;
+}
+
+async function deleteTask(id) {
+  const { rowCount } = await pool.query("DELETE FROM tasks WHERE id = $1", [id]);
+  return rowCount > 0;
+}
+
+async function countOpenTasks() {
+  const { rows } = await pool.query(
+    `SELECT
+       COUNT(*)::int AS open,
+       COUNT(*) FILTER (WHERE due_at IS NOT NULL AND due_at < now())::int AS overdue
+     FROM tasks WHERE done = false`
+  );
+  return { open: rows[0].open, overdue: rows[0].overdue };
+}
+
+// --- Reporting -------------------------------------------------------------
+// Liefert die Daten für die Berichte-Seite in einem Rutsch.
+async function getReport(statuses, probabilities = {}) {
+  const stats = await getStats(statuses, probabilities);
+
+  // Wert je Status (für den Trichter).
+  const funnelRes = await pool.query(
+    "SELECT status, COUNT(*)::int AS count, COALESCE(SUM(value),0)::float AS value FROM leads GROUP BY status"
+  );
+  const funnelMap = {};
+  for (const r of funnelRes.rows) funnelMap[r.status] = { count: r.count, value: r.value };
+  const funnel = statuses.map((s) => ({
+    status: s,
+    count: (funnelMap[s] && funnelMap[s].count) || 0,
+    value: (funnelMap[s] && funnelMap[s].value) || 0,
+  }));
+
+  // Neue Leads je Monat (letzte 12 Monate, inkl. Lücken).
+  const createdRes = await pool.query(
+    `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS month, COUNT(*)::int AS count
+     FROM leads
+     WHERE created_at >= date_trunc('month', now()) - interval '11 months'
+     GROUP BY 1 ORDER BY 1`
+  );
+  const createdByMonth = fillMonths(createdRes.rows, "count");
+
+  // Gewonnener Umsatz je Monat (Status gewonnen; updated_at als Abschlussdatum).
+  const wonRes = await pool.query(
+    `SELECT to_char(date_trunc('month', updated_at), 'YYYY-MM') AS month, COALESCE(SUM(value),0)::float AS value
+     FROM leads
+     WHERE status = 'gewonnen' AND updated_at >= date_trunc('month', now()) - interval '11 months'
+     GROUP BY 1 ORDER BY 1`
+  );
+  const wonByMonth = fillMonths(wonRes.rows, "value");
+
+  // Quellen-Performance: Anzahl, gewonnen, Gesamtwert je Quelle (Top 8).
+  const sourceRes = await pool.query(
+    `SELECT COALESCE(NULLIF(source,''),'(ohne Quelle)') AS source,
+            COUNT(*)::int AS count,
+            COUNT(*) FILTER (WHERE status = 'gewonnen')::int AS won,
+            COALESCE(SUM(value),0)::float AS value
+     FROM leads GROUP BY 1 ORDER BY count DESC, value DESC LIMIT 8`
+  );
+  const bySource = sourceRes.rows.map((r) => ({
+    source: r.source, count: r.count, won: r.won, value: r.value,
+  }));
+
+  // Durchschnittlicher gewonnener Auftragswert.
+  const avgWon = stats.byStatus["gewonnen"]
+    ? Math.round(stats.wonValue / stats.byStatus["gewonnen"])
+    : 0;
+
+  const tasks = await countOpenTasks();
+
+  return { stats, funnel, createdByMonth, wonByMonth, bySource, avgWon, tasks };
+}
+
+// Füllt fehlende Monate der letzten 12 Monate mit 0 auf.
+function fillMonths(rows, key) {
+  const map = {};
+  for (const r of rows) map[r.month] = Number(r[key]) || 0;
+  const out = [];
+  const now = new Date();
+  for (let i = 11; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    const m = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+    out.push({ month: m, value: map[m] || 0 });
+  }
+  return out;
 }
 
 module.exports = {
@@ -178,8 +418,19 @@ module.exports = {
   updateLead,
   setLeadAi,
   setLeadResearch,
+  updateLeadResearch,
   deleteLead,
   getSetting,
   setSetting,
   getStats,
+  listActivities,
+  createActivity,
+  deleteActivity,
+  listTasksByLead,
+  listTasks,
+  createTask,
+  updateTask,
+  deleteTask,
+  countOpenTasks,
+  getReport,
 };

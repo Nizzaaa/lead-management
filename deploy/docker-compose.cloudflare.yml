@@ -1,0 +1,73 @@
+# LeadPilot hinter Cloudflare Access (Zero Trust) – zur Einbettung in Nextcloud
+# ---------------------------------------------------------------------------
+# Routing, TLS und Authentifizierung übernimmt Cloudflare an der Edge:
+#
+#   Browser → Cloudflare (Access-Policy + Tunnel) → Traefik → leadpilot → db
+#
+# - Cloudflare Access schützt leads.lennartg.de (IdP: Zitadel) und lässt nur
+#   authentifizierte Benutzer durch. Die Identität kommt als Header
+#   "Cf-Access-Authenticated-User-Email" an – LeadPilot nutzt sie als Aktor.
+# - TLS macht Cloudflare; intern genügt HTTP (Traefik-Entrypoint "web").
+# - Die App hängt nur an Traefik (+ internem DB-Netz), kein öffentlicher Port.
+#
+# WICHTIG (Sicherheit): Der cloudflared-Tunnel muss die EINZIGE Route zum
+# Origin sein. Andernfalls könnte jemand den Cf-Access-Header fälschen. Mehr
+# dazu in docs/nextcloud-deployment.md (Abschnitt "Origin absichern").
+#
+# Variablen siehe deploy/.env.example.
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: leadpilot-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=leadpilot
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - POSTGRES_DB=leadpilot
+    volumes:
+      - leadpilot-db:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadpilot -d leadpilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  leadpilot:
+    image: ghcr.io/nizzaaa/leadpilot:${LEADPILOT_TAG:-latest}
+    container_name: leadpilot
+    restart: unless-stopped
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PORT=3000
+      - PGHOST=db
+      - PGPORT=5432
+      - PGUSER=leadpilot
+      - PGPASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - PGDATABASE=leadpilot
+      # Einbettung NUR durch Nextcloud erlauben:
+      - FRAME_ANCESTORS=https://${NC_DOMAIN}
+      - LOG_LEVEL=info
+    networks:
+      - internal   # Verbindung zur Datenbank
+      - traefik     # Ingress über Traefik (hinter Cloudflare)
+    depends_on:
+      db:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.leadpilot.rule=Host(`${LEAD_DOMAIN}`)
+      - traefik.http.routers.leadpilot.entrypoints=web
+      - traefik.http.services.leadpilot.loadbalancer.server.port=3000
+      - traefik.docker.network=traefik
+
+networks:
+  # Externes Traefik-Netzwerk (vom Traefik-Stack bereitgestellt). Ggf. anpassen.
+  traefik:
+    external: true
+  internal:
+
+volumes:
+  leadpilot-db:

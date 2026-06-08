@@ -1,0 +1,115 @@
+# LeadPilot hinter Zitadel-SSO – zur Einbettung in Nextcloud (iframe)
+# ---------------------------------------------------------------------------
+# Aufbau:
+#   Traefik (TLS)  →  oauth2-proxy  →(nur wenn Zitadel-Session)→  leadpilot
+#                                                                    └─ db
+#
+# - Nur der oauth2-proxy ist über Traefik nach außen erreichbar.
+# - Die App selbst hängt NUR im internen Netz (kein direkter Zugriff von außen).
+# - oauth2-proxy authentifiziert jeden Request gegen Zitadel (OIDC) und reicht
+#   die Identität als Header (X-Forwarded-Email) an die App weiter.
+#
+# Voraussetzungen:
+#   - Traefik läuft mit einem externen Docker-Netzwerk (hier: "traefik")
+#     und einem TLS-Entrypoint "websecure" inkl. Zertifikats-Resolver.
+#   - Zitadel ist erreichbar; eine Web-Application ist angelegt (siehe
+#     docs/nextcloud-deployment.md, Schritt 2).
+#   - Alle Hosts idealerweise unter derselben Domain (z. B. *.lennartg.de),
+#     damit das SSO im iframe als same-site läuft.
+#
+# Variablen im ".env"-Editor (siehe deploy/.env.example):
+#   LEAD_DOMAIN, NC_DOMAIN, ZITADEL_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET,
+#   COOKIE_SECRET, POSTGRES_PASSWORD, ANTHROPIC_API_KEY, TRAEFIK_CERTRESOLVER
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: leadpilot-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=leadpilot
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - POSTGRES_DB=leadpilot
+    volumes:
+      - leadpilot-db:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U leadpilot -d leadpilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  leadpilot:
+    image: ghcr.io/nizzaaa/leadpilot:${LEADPILOT_TAG:-latest}
+    container_name: leadpilot
+    restart: unless-stopped
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - PORT=3000
+      - PGHOST=db
+      - PGPORT=5432
+      - PGUSER=leadpilot
+      - PGPASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - PGDATABASE=leadpilot
+      # Einbettung NUR durch Nextcloud erlauben:
+      - FRAME_ANCESTORS=https://${NC_DOMAIN}
+      - LOG_LEVEL=info
+    networks:
+      - internal
+    depends_on:
+      db:
+        condition: service_healthy
+    # Bewusst KEINE Traefik-Labels und KEIN ports: – die App ist von außen
+    # nicht direkt erreichbar, nur über den oauth2-proxy.
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:latest
+    container_name: leadpilot-auth
+    restart: unless-stopped
+    environment:
+      OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${ZITADEL_ISSUER}
+      OAUTH2_PROXY_CLIENT_ID: ${OIDC_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OIDC_CLIENT_SECRET}
+      OAUTH2_PROXY_REDIRECT_URL: https://${LEAD_DOMAIN}/oauth2/callback
+      OAUTH2_PROXY_COOKIE_SECRET: ${COOKIE_SECRET}
+      # Cookie auf die Registrar-Domain, damit es im iframe als same-site gilt:
+      OAUTH2_PROXY_COOKIE_DOMAINS: ".${COOKIE_DOMAIN}"
+      OAUTH2_PROXY_COOKIE_SAMESITE: none
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_WHITELIST_DOMAINS: ".${COOKIE_DOMAIN}"
+      # Direkt zu Zitadel weiterleiten statt eine "Sign in"-Zwischenseite zu
+      # rendern (die im iframe geblockt würde):
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_SCOPE: "openid email profile"
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_UPSTREAMS: http://leadpilot:3000
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      # Identität an die App durchreichen (X-Forwarded-* / X-Auth-Request-*):
+      OAUTH2_PROXY_PASS_USER_HEADERS: "true"
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+      # Falls die Zitadel-App PKCE erzwingt, zusätzlich:
+      # OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+    networks:
+      - internal
+      - traefik
+    depends_on:
+      - leadpilot
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.leadpilot.rule=Host(`${LEAD_DOMAIN}`)
+      - traefik.http.routers.leadpilot.entrypoints=websecure
+      - traefik.http.routers.leadpilot.tls=true
+      - traefik.http.routers.leadpilot.tls.certresolver=${TRAEFIK_CERTRESOLVER}
+      - traefik.http.services.leadpilot.loadbalancer.server.port=4180
+      - traefik.docker.network=traefik
+
+networks:
+  traefik:
+    external: true
+  internal:
+
+volumes:
+  leadpilot-db:

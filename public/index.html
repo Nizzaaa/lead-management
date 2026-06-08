@@ -4,19 +4,22 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LeadPilot · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=5" />
+  <link rel="stylesheet" href="styles.css?v=14" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
+    <a class="brand" href="#/" aria-label="Zur Übersicht">
       <span class="logo">🎯</span>
       <div>
         <h1>LeadPilot</h1>
         <p class="tagline">Lead-Verwaltung mit KI-Unterstützung</p>
       </div>
-    </div>
+    </a>
     <div class="topbar-actions">
+      <a class="navlink" href="#/" data-nav-link="list">🗂 Leads</a>
+      <a class="navlink" href="#/tasks" data-nav-link="tasks">✅ Aufgaben <span id="taskBadge" class="nav-badge hidden">0</span></a>
+      <a class="navlink" href="#/reports" data-nav-link="reports">📊 Berichte</a>
       <span id="aiBadge" class="badge badge-off" title="KI-Status">KI: …</span>
       <button id="settingsBtn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">⚙️</button>
       <button id="manualLeadBtn" class="btn">+ Manuell</button>
@@ -24,29 +27,25 @@
     </div>
   </header>
 
-  <main class="container">
-    <!-- Dashboard -->
+  <!-- ============ LISTEN-ANSICHT ============ -->
+  <main class="container" id="listView">
     <section class="stats" id="stats" aria-label="Kennzahlen">
       <div class="stat-card"><span class="stat-value" id="statTotal">0</span><span class="stat-label">Leads gesamt</span></div>
-      <div class="stat-card"><span class="stat-value" id="statPipeline">0 €</span><span class="stat-label">Pipeline-Wert</span></div>
+      <div class="stat-card" title="Erwartungswert: Σ Wert × Abschlusswahrscheinlichkeit je Status"><span class="stat-value" id="statPipeline">0 €</span><span class="stat-label" id="statPipelineLabel">Pipeline (gewichtet)</span></div>
       <div class="stat-card"><span class="stat-value" id="statWon">0 €</span><span class="stat-label">Gewonnen</span></div>
       <div class="stat-card"><span class="stat-value" id="statConversion">0 %</span><span class="stat-label">Abschlussquote</span></div>
     </section>
 
-    <!-- Filter -->
     <section class="toolbar">
       <input type="search" id="search" class="search" placeholder="🔍 Suche nach Name, Firma, E-Mail…" />
       <div class="filters" id="statusFilters"></div>
       <div class="view-toggle" id="viewToggle">
-        <button class="chip active" data-view="list" title="Listenansicht">🗂 Liste</button>
+        <button class="chip active" data-view="list" title="Kartenansicht">🗂 Karten</button>
         <button class="chip" data-view="kanban" title="Kanban-Board nach Status">▦ Board</button>
       </div>
     </section>
 
-    <!-- Lead-Liste -->
     <section id="leadList" class="lead-grid" aria-live="polite"></section>
-
-    <!-- Kanban-Board (nach Status) -->
     <section id="kanban" class="kanban hidden" aria-live="polite"></section>
 
     <div id="emptyState" class="empty hidden">
@@ -54,6 +53,15 @@
       <button class="btn btn-primary" onclick="document.getElementById('addLeadBtn').click()">Ersten Lead recherchieren</button>
     </div>
   </main>
+
+  <!-- ============ DETAIL-ANSICHT (eine Seite pro Lead) ============ -->
+  <main class="container hidden" id="detailView" aria-live="polite"></main>
+
+  <!-- ============ AUFGABEN-ANSICHT ============ -->
+  <main class="container hidden" id="tasksView" aria-live="polite"></main>
+
+  <!-- ============ BERICHTE-ANSICHT ============ -->
+  <main class="container hidden" id="reportsView" aria-live="polite"></main>
 
   <!-- Recherche-Modal: Lead per Website/Name automatisch recherchieren -->
   <div class="modal-overlay hidden" id="researchModal">
@@ -66,10 +74,11 @@
         <label>Unternehmens-Website oder Name
           <input type="text" id="researchInput" placeholder="z. B. muster-gmbh.de oder Muster GmbH" autocomplete="off" />
         </label>
-        <p class="hint">Die KI recherchiert automatisch Stammdaten, Bewertungen, Schwachstellen und FU/GE-Potenziale und legt den Lead an. Das dauert i. d. R. 30–90 Sekunden.</p>
-        <div id="researchLoading" class="ai-loading hidden"><span class="spinner"></span> Recherchiere… das kann 1–2 Minuten dauern.</div>
+        <p class="hint" id="researchHint">Die KI recherchiert automatisch Stammdaten, Bewertungen, Schwachstellen und FU/GE-Potenziale, ermittelt den KI-Score und legt den Lead an. Du kannst dieses Fenster jederzeit schließen – die Recherche läuft im Hintergrund weiter (unten rechts).</p>
+        <div id="researchLoading" class="ai-loading hidden"><span class="spinner"></span> Recherchiere… <span id="researchElapsed" class="elapsed">0:00</span> · meist 1–2 Minuten</div>
         <ul id="researchSteps" class="research-steps hidden"></ul>
         <div class="form-actions">
+          <button type="button" class="btn btn-danger hidden" id="abortResearchBtn">⛔ Recherche abbrechen</button>
           <button type="button" class="btn" id="cancelResearchBtn">Abbrechen</button>
           <button type="submit" class="btn btn-primary" id="startResearchBtn">Recherchieren &amp; anlegen</button>
         </div>
@@ -88,7 +97,15 @@
         <label>KI-Modell (für Recherche und alle KI-Funktionen)
           <select id="settingsModel"></select>
         </label>
-        <p class="hint">Das gewählte Modell wird für die Web-Recherche sowie für KI-Score, E-Mail-Entwurf und Empfehlungen verwendet. Stärkere Modelle liefern bessere Ergebnisse, günstigere sind schneller und kostengünstiger.</p>
+        <p class="hint">Dieses Modell erstellt das Recherche-Dossier und liefert KI-Score, E-Mail-Entwurf &amp; Empfehlungen. Die JSON-Extraktion läuft zur Kostenersparnis immer auf Haiku.<br>
+        Richtwerte pro Lead: <strong>Haiku ~$0,10</strong> · <strong>Sonnet ~$0,30</strong> · <strong>Opus ~$0,50</strong>.<br>
+        Hinweis: Sonnet hat auf Anthropic-Tier&nbsp;1 ein niedriges Minuten-Limit (30k Input-Tokens). Bei häufigen Rate-Limit-Fehlern (429) auf Haiku wechseln oder das Tier erhöhen.</p>
+
+        <label>Abschlusswahrscheinlichkeit je Status (%) – für den gewichteten Pipeline-Wert
+          <div id="stageProbFields" class="prob-grid"></div>
+        </label>
+        <p class="hint">Der gewichtete Pipeline-Wert = Σ (geschätzter Wert × Wahrscheinlichkeit). Startwerte sind Richtwerte – über echte Abschlüsse kalibrieren.</p>
+
         <div class="form-actions">
           <button type="button" class="btn" id="cancelSettingsBtn">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Speichern</button>
@@ -97,22 +114,7 @@
     </div>
   </div>
 
-  <!-- Recherche-Detail: zeigt das vollständige Cold-Call-Dossier -->
-  <div class="modal-overlay hidden" id="detailModal">
-    <div class="modal modal-wide" role="dialog" aria-modal="true">
-      <div class="modal-head">
-        <h2 id="detailTitle">Recherche-Dossier</h2>
-        <button class="icon-btn" id="closeDetailModal" aria-label="Schließen">✕</button>
-      </div>
-      <div id="detailBody" class="detail-body"></div>
-      <div class="form-actions">
-        <button type="button" class="btn" id="copyDetailBtn">📋 Markdown kopieren</button>
-        <button type="button" class="btn btn-primary" id="closeDetailBtn">Schließen</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Lead-Formular Modal -->
+  <!-- Lead-Formular Modal (nur für manuelles Anlegen) -->
   <div class="modal-overlay hidden" id="leadModal">
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-head">
@@ -145,26 +147,11 @@
     </div>
   </div>
 
-  <!-- KI-Ergebnis Modal -->
-  <div class="modal-overlay hidden" id="aiModal">
-    <div class="modal" role="dialog" aria-modal="true">
-      <div class="modal-head">
-        <h2 id="aiModalTitle">KI-Ergebnis</h2>
-        <button class="icon-btn" id="closeAiModal" aria-label="Schließen">✕</button>
-      </div>
-      <div class="ai-body">
-        <div id="aiLoading" class="ai-loading hidden"><span class="spinner"></span> KI arbeitet…</div>
-        <pre id="aiResult" class="ai-result"></pre>
-      </div>
-      <div class="form-actions">
-        <button type="button" class="btn" id="copyAiBtn">📋 Kopieren</button>
-        <button type="button" class="btn btn-primary" id="closeAiBtn">Schließen</button>
-      </div>
-    </div>
-  </div>
+  <!-- Dock für laufende Recherche-Jobs (unten rechts) -->
+  <div id="jobDock" class="job-dock hidden" aria-live="polite"></div>
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=5"></script>
+  <script src="app.js?v=14"></script>
 </body>
 </html>
