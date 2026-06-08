@@ -9,7 +9,7 @@
 //   2) Extraktion der Felder aus dem Dossier in ein striktes JSON-Schema,
 //      damit das Frontend und die KI-Funktionen damit arbeiten können.
 
-const DEFAULT_MODEL = "claude-opus-4-8";
+const DEFAULT_MODEL = "claude-haiku-4-5";
 
 // Phase 2 (Extraktion in JSON) ist eine rein mechanische Aufgabe und läuft
 // daher immer auf dem günstigsten Modell – unabhängig vom Recherche-Modell.

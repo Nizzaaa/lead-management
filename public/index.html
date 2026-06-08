@@ -87,7 +87,9 @@
         <label>KI-Modell (für Recherche und alle KI-Funktionen)
           <select id="settingsModel"></select>
         </label>
-        <p class="hint">Das gewählte Modell wird für die Web-Recherche sowie für KI-Score, E-Mail-Entwurf und Empfehlungen verwendet. Stärkere Modelle liefern bessere Ergebnisse, günstigere sind schneller und kostengünstiger.</p>
+        <p class="hint">Dieses Modell erstellt das Recherche-Dossier und liefert KI-Score, E-Mail-Entwurf &amp; Empfehlungen. Die JSON-Extraktion läuft zur Kostenersparnis immer auf Haiku.<br>
+        Richtwerte pro Lead: <strong>Haiku ~$0,10</strong> · <strong>Sonnet ~$0,30</strong> · <strong>Opus ~$0,50</strong>.<br>
+        Hinweis: Sonnet hat auf Anthropic-Tier&nbsp;1 ein niedriges Minuten-Limit (30k Input-Tokens). Bei häufigen Rate-Limit-Fehlern (429) auf Haiku wechseln oder das Tier erhöhen.</p>
         <div class="form-actions">
           <button type="button" class="btn" id="cancelSettingsBtn">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Speichern</button>

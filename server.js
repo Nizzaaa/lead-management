@@ -16,11 +16,13 @@ const PORT = process.env.PORT || 3000;
 // (web_search/web_fetch) als auch strukturierte Outputs (output_config.format)
 // unterstützen – beides wird für die Recherche benötigt.
 const AVAILABLE_MODELS = [
-  { id: "claude-opus-4-8", label: "Claude Opus 4.8 – stärkste Recherche (empfohlen)" },
-  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 – schnell & ausgewogen" },
-  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 – am günstigsten/schnellsten" },
+  { id: "claude-haiku-4-5", label: "Claude Haiku 4.5 – am günstigsten & rate-limit-sicher (Standard)" },
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6 – bestes Preis/Leistung (empfohlen)" },
+  { id: "claude-opus-4-8", label: "Claude Opus 4.8 – höchste Qualität, am teuersten" },
 ];
-const DEFAULT_MODEL = "claude-opus-4-8";
+// Günstigstes Modell als Default, damit nicht versehentlich teuer recherchiert
+// wird. Für bessere Dossiers in den Einstellungen auf Sonnet umstellen.
+const DEFAULT_MODEL = "claude-haiku-4-5";
 const MODEL_SETTING_KEY = "ai_model";
 
 // Aktuell gewähltes Modell (wird beim Start aus der DB geladen).
