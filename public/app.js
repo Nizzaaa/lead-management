@@ -1017,28 +1017,39 @@ async function pollJob(jobId) {
   }
 }
 
-// Rendert das Dock laufender Jobs unten rechts.
+// Rendert das Dock laufender Jobs unten rechts. Aktualisiert IN PLACE: neue
+// Jobs werden hinzugefügt (einmalige Einblend-Animation), bestehende Chips nur
+// im Text aktualisiert. So zuckt/flackert nichts bei jedem Poll.
 function renderDock() {
   const dock = $("#jobDock");
   const list = [...jobs.values()];
-  if (!list.length) {
-    dock.classList.add("hidden");
-    dock.innerHTML = "";
-    return;
+  dock.classList.toggle("hidden", list.length === 0);
+
+  const seen = new Set();
+  for (const j of list) {
+    seen.add(j.id);
+    const last = j.steps && j.steps.length ? j.steps[j.steps.length - 1].text : "Starte…";
+    let chip = dock.querySelector(`[data-job="${j.id}"]`);
+    if (!chip) {
+      chip = document.createElement("button");
+      chip.className = "job-chip";
+      chip.setAttribute("data-job", j.id);
+      chip.title = "Recherche-Fortschritt öffnen";
+      chip.innerHTML =
+        `<span class="spinner"></span>` +
+        `<span class="job-chip-body">` +
+        `<span class="job-chip-title"></span>` +
+        `<span class="job-chip-step"></span></span>`;
+      chip.querySelector(".job-chip-title").textContent = "🔎 " + j.label;
+      dock.appendChild(chip);
+    }
+    const stepEl = chip.querySelector(".job-chip-step");
+    if (stepEl.textContent !== last) stepEl.textContent = last;
   }
-  dock.classList.remove("hidden");
-  dock.innerHTML = list
-    .map((j) => {
-      const last = j.steps && j.steps.length ? j.steps[j.steps.length - 1].text : "Starte…";
-      return `<button class="job-chip" data-job="${esc(j.id)}" title="Recherche-Fortschritt öffnen">
-        <span class="spinner"></span>
-        <span class="job-chip-body">
-          <span class="job-chip-title">🔎 ${esc(j.label)}</span>
-          <span class="job-chip-step">${esc(last)}</span>
-        </span>
-      </button>`;
-    })
-    .join("");
+  // Nicht mehr laufende Jobs entfernen.
+  dock.querySelectorAll("[data-job]").forEach((el) => {
+    if (!seen.has(el.getAttribute("data-job"))) el.remove();
+  });
 }
 
 async function submitResearch(e) {
