@@ -23,6 +23,17 @@ const esc = (s) =>
   );
 const getLead = (id) => leads.find((x) => x.id === id);
 
+// Macht eine Quell-URL absolut. Ohne Schema interpretiert der Browser
+// "galabau.de" relativ → landet auf localhost:3000/galabau.de. Erlaubt nur
+// http/https; andere Schemata (javascript:, mailto: …) werden verworfen.
+function extUrl(s) {
+  const v = String(s || "").trim();
+  if (!v) return "";
+  if (/^https?:\/\//i.test(v)) return v;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(v)) return "";
+  return "https://" + v.replace(/^\/+/, "");
+}
+
 // Felder der Sektion „Allgemeine Infos" (Schlüssel → Label), zentral definiert.
 const RESEARCH_FIELDS = [
   ["branche", "Branche"],
@@ -322,8 +333,9 @@ function infoRowsView(f) {
   return RESEARCH_FIELDS.map(([key, label]) => {
     const field = f[key] || {};
     const value = field.value && field.value !== "k.A." ? field.value : "—";
-    const src = field.source
-      ? ` <a class="src" href="${esc(field.source)}" target="_blank" rel="noopener">↗ Quelle</a>`
+    const href = extUrl(field.source);
+    const src = href
+      ? ` <a class="src" href="${esc(href)}" target="_blank" rel="noopener">↗ Quelle</a>`
       : "";
     return `<tr><th>${esc(label)}</th><td>${esc(value)}${src}</td></tr>`;
   }).join("");
