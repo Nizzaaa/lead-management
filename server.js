@@ -163,7 +163,8 @@ const researchJobs = new Map();
 
 function startResearchJob(runner) {
   const id = crypto.randomUUID();
-  const job = { id, status: "running", steps: [], lead: null, error: null, finishedAt: 0 };
+  const controller = new AbortController();
+  const job = { id, status: "running", steps: [], lead: null, error: null, finishedAt: 0, controller };
   researchJobs.set(id, job);
 
   const onProgress = (text) => {
@@ -174,17 +175,22 @@ function startResearchJob(runner) {
 
   (async () => {
     try {
-      job.lead = await runner(onProgress);
+      job.lead = await runner(onProgress, controller.signal);
       job.status = "done";
     } catch (err) {
-      console.error("Recherche-Fehler:", err.message);
-      // Eigene, verständliche Fehlermeldungen durchreichen; technische
-      // SDK-Meldungen (z. B. lange 429-Texte) kürzen.
-      const msg = (err && err.message) ? String(err.message) : "";
-      job.error = msg
-        ? `Recherche fehlgeschlagen: ${msg.slice(0, 300)}`
-        : "Recherche fehlgeschlagen. Bitte erneut versuchen.";
-      job.status = "error";
+      if (controller.signal.aborted) {
+        job.status = "cancelled";
+        job.error = "Recherche abgebrochen.";
+      } else {
+        console.error("Recherche-Fehler:", err.message);
+        // Eigene, verständliche Fehlermeldungen durchreichen; technische
+        // SDK-Meldungen (z. B. lange 429-Texte) kürzen.
+        const msg = (err && err.message) ? String(err.message) : "";
+        job.error = msg
+          ? `Recherche fehlgeschlagen: ${msg.slice(0, 300)}`
+          : "Recherche fehlgeschlagen. Bitte erneut versuchen.";
+        job.status = "error";
+      }
     } finally {
       job.finishedAt = Date.now();
     }
@@ -288,8 +294,8 @@ app.post("/api/leads/research", wrap(async (req, res) => {
   if (!input) {
     return res.status(400).json({ error: "Firmenname oder Website-URL ist erforderlich." });
   }
-  const job = startResearchJob(async (onProgress) => {
-    const research = await researchCompany(anthropic, input, currentModel, onProgress);
+  const job = startResearchJob(async (onProgress, signal) => {
+    const research = await researchCompany(anthropic, input, currentModel, onProgress, signal);
     const data = { ...leadFromResearch(research, input), status: "neu", value: 0, notes: "" };
     const lead = await db.createLead(data, research);
     return scoreAfterResearch(lead, onProgress);
@@ -310,8 +316,8 @@ app.post("/api/leads/:id/research", wrap(async (req, res) => {
   if (!input) {
     return res.status(400).json({ error: "Kein Recherche-Input vorhanden." });
   }
-  const job = startResearchJob(async (onProgress) => {
-    const research = await researchCompany(anthropic, input, currentModel, onProgress);
+  const job = startResearchJob(async (onProgress, signal) => {
+    const research = await researchCompany(anthropic, input, currentModel, onProgress, signal);
     const data = leadFromResearch(research, input);
     const updated = await db.setLeadResearch(lead.id, research, data);
     return scoreAfterResearch(updated, onProgress);
@@ -324,6 +330,17 @@ app.get("/api/research/:jobId", (req, res) => {
   const job = researchJobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: "Recherche-Job nicht gefunden." });
   res.json({ status: job.status, steps: job.steps, lead: job.lead, error: job.error });
+});
+
+// Laufende Recherche abbrechen (bricht den KI-Stream via AbortController ab).
+app.post("/api/research/:jobId/cancel", (req, res) => {
+  const job = researchJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "Recherche-Job nicht gefunden." });
+  if (job.status === "running") {
+    job.status = "cancelled";
+    try { job.controller.abort(); } catch (err) { /* ignore */ }
+  }
+  res.json({ status: job.status });
 });
 
 // Recherche-Dossier manuell bearbeiten (ohne KI neu zu starten).

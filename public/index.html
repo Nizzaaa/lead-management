@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LeadPilot · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=12" />
+  <link rel="stylesheet" href="styles.css?v=13" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
 </head>
 <body>
@@ -69,6 +69,7 @@
         <div id="researchLoading" class="ai-loading hidden"><span class="spinner"></span> Recherchiere… <span id="researchElapsed" class="elapsed">0:00</span> · meist 1–2 Minuten</div>
         <ul id="researchSteps" class="research-steps hidden"></ul>
         <div class="form-actions">
+          <button type="button" class="btn btn-danger hidden" id="abortResearchBtn">⛔ Recherche abbrechen</button>
           <button type="button" class="btn" id="cancelResearchBtn">Abbrechen</button>
           <button type="submit" class="btn btn-primary" id="startResearchBtn">Recherchieren &amp; anlegen</button>
         </div>
@@ -142,6 +143,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=12"></script>
+  <script src="app.js?v=13"></script>
 </body>
 </html>

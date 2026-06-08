@@ -687,10 +687,13 @@ function bindEvents() {
 
   $("#closeResearchModal").addEventListener("click", closeResearchModal);
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
+  $("#abortResearchBtn").addEventListener("click", () => { if (modalJobId) cancelJob(modalJobId); });
   $("#researchForm").addEventListener("submit", submitResearch);
 
-  // Dock: Klick auf einen laufenden Job öffnet wieder das Detail-Modal.
+  // Dock: ✕ bricht den Job ab, Klick auf den Chip öffnet das Detail-Modal.
   $("#jobDock").addEventListener("click", (e) => {
+    const x = e.target.closest("[data-cancel]");
+    if (x) { e.stopPropagation(); cancelJob(x.dataset.cancel); return; }
     const b = e.target.closest("[data-job]");
     if (b) openJobModal(b.dataset.job);
   });
@@ -901,6 +904,7 @@ function openResearchModal() {
   $("#researchHint").classList.remove("hidden");
   $("#researchLoading").classList.add("hidden");
   $("#startResearchBtn").classList.remove("hidden");
+  $("#abortResearchBtn").classList.add("hidden");
   $("#cancelResearchBtn").textContent = "Abbrechen";
   const steps = $("#researchSteps");
   steps.classList.add("hidden");
@@ -918,6 +922,7 @@ function openJobModal(jobId) {
   $("#researchInput").disabled = true;
   $("#researchHint").classList.add("hidden");
   $("#startResearchBtn").classList.add("hidden");
+  $("#abortResearchBtn").classList.remove("hidden");
   $("#cancelResearchBtn").textContent = "Im Hintergrund weiter ↓";
   $("#researchLoading").classList.remove("hidden");
   renderSteps(job.steps, job.status !== "running");
@@ -983,6 +988,21 @@ function dropJob(jobId) {
   renderDock();
 }
 
+// Bricht eine laufende Recherche ab (serverseitig via AbortController).
+async function cancelJob(jobId) {
+  const job = jobs.get(jobId);
+  if (job && !confirm(`Recherche „${job.label}" wirklich abbrechen?`)) return;
+  try {
+    await api(`/api/research/${jobId}/cancel`, { method: "POST" });
+  } catch (err) {
+    /* Job evtl. schon weg – egal, lokal aufräumen */
+  }
+  const wasOpen = modalJobId === jobId;
+  dropJob(jobId);
+  toast("Recherche abgebrochen", "");
+  if (wasOpen) closeResearchModal();
+}
+
 // Job registrieren und Polling starten. startTs optional (für Wiederaufnahme).
 function addJob(jobId, label, startTs) {
   jobs.set(jobId, { id: jobId, label, status: "running", steps: [], startTs: startTs || Date.now(), leadId: null });
@@ -1045,6 +1065,13 @@ async function pollJob(jobId) {
       if (wasOpen) closeResearchModal();
       return;
     }
+    if (data.status === "cancelled") {
+      // z. B. aus einem anderen Tab abgebrochen
+      const wasOpen = modalJobId === jobId;
+      dropJob(jobId);
+      if (wasOpen) closeResearchModal();
+      return;
+    }
   }
 }
 
@@ -1070,7 +1097,8 @@ function renderDock() {
         `<span class="spinner"></span>` +
         `<span class="job-chip-body">` +
         `<span class="job-chip-title"></span>` +
-        `<span class="job-chip-step"></span></span>`;
+        `<span class="job-chip-step"></span></span>` +
+        `<span class="job-chip-x" data-cancel="${j.id}" role="button" title="Recherche abbrechen">✕</span>`;
       chip.querySelector(".job-chip-title").textContent = "🔎 " + j.label;
       dock.appendChild(chip);
     }

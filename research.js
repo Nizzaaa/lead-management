@@ -197,7 +197,7 @@ function setRollingCache(messages) {
 // Phase 1: agentische Web-Recherche → Markdown-Dossier.
 // Server-Tools laufen in einer serverseitigen Schleife; bei Erreichen des
 // Iterationslimits liefert die API stop_reason "pause_turn" und wir setzen fort.
-async function runResearch(anthropic, input, model, onProgress) {
+async function runResearch(anthropic, input, model, onProgress, signal) {
   const messages = [
     {
       role: "user",
@@ -225,7 +225,7 @@ async function runResearch(anthropic, input, model, onProgress) {
     if (thinking) params.thinking = thinking;
     const effort = effortFor(model);
     if (effort) params.output_config = { effort };
-    const stream = anthropic.messages.stream(params);
+    const stream = anthropic.messages.stream(params, { signal });
 
     // Fortschritt melden: Tool-Aufrufe UND deren Ergebnisse/Fehler.
     stream.on("contentBlock", (block) => {
@@ -289,7 +289,7 @@ async function runResearch(anthropic, input, model, onProgress) {
 }
 
 // Phase 2: Felder aus dem Dossier in striktes JSON extrahieren.
-async function extractFields(anthropic, input, dossier, model) {
+async function extractFields(anthropic, input, dossier, model, signal) {
   const msg = await anthropic.messages.create({
     model,
     max_tokens: 8000,
@@ -304,18 +304,18 @@ async function extractFields(anthropic, input, dossier, model) {
     output_config: {
       format: { type: "json_schema", schema: RESEARCH_SCHEMA },
     },
-  });
+  }, { signal });
   const text = msg.content.find((b) => b.type === "text");
   return JSON.parse(text ? text.text : "{}");
 }
 
 // Öffentliche API: vollständige Recherche → strukturiertes Objekt inkl. Markdown.
-async function researchCompany(anthropic, input, model = DEFAULT_MODEL, onProgress = () => {}) {
+async function researchCompany(anthropic, input, model = DEFAULT_MODEL, onProgress = () => {}, signal) {
   onProgress(`Starte Recherche zu „${input}“…`);
-  const dossier = await runResearch(anthropic, input, model, onProgress);
+  const dossier = await runResearch(anthropic, input, model, onProgress, signal);
   onProgress("📝 Dossier erstellt – extrahiere strukturierte Felder…");
   // Extraktion bewusst auf dem günstigen Modell (mechanische Aufgabe).
-  const fields = await extractFields(anthropic, input, dossier, EXTRACT_MODEL);
+  const fields = await extractFields(anthropic, input, dossier, EXTRACT_MODEL, signal);
   onProgress("✅ Recherche abgeschlossen.");
   return {
     ...fields,
