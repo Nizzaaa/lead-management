@@ -1,136 +1,137 @@
-# LeadPilot in Nextcloud einbinden
+# LeadPilot in Nextcloud einbinden (Zitadel-SSO)
 
-Ziel: LeadPilot **innerhalb der Nextcloud-Oberfläche** anzeigen (als Reiter in
-der Navigation) und so absichern, dass die App **ausschließlich für angemeldete
-Nextcloud-Benutzer** erreichbar ist – ohne eigenes Login im Lead-Tool.
+Ziel: LeadPilot **innerhalb der Nextcloud-Oberfläche** anzeigen (als Reiter)
+und so absichern, dass es **nur für angemeldete Benutzer** erreichbar ist.
+Wer in Nextcloud eingeloggt ist, sieht das Lead-System **ohne zweites Login**.
 
-Das gelingt mit zwei Bausteinen:
-
-1. **Inpage-Rendering** über die Nextcloud-App *External Sites* (iframe).
-2. **Zugriffsschutz** über einen vorgeschalteten `oauth2-proxy`, der jeden
-   Request gegen Nextcloud (als OIDC-Provider) authentifiziert (SSO).
+Zentrale Idee: **Zitadel ist der gemeinsame Identity-Provider** für Nextcloud
+*und* LeadPilot. Dadurch teilen sich beide dieselbe Anmeldesitzung (SSO).
 
 ```
-Browser ──> Nextcloud (cloud.firma.de)
+Browser ──> Nextcloud (cloud.lennartg.de)   [Login via Zitadel]
               │  External Sites (iframe)
               ▼
-        leads.firma.de ──> oauth2-proxy ──(nur wenn eingeloggt)──> LeadPilot
-                                  │
-                                  └── OIDC-Login gegen Nextcloud
+        leads.lennartg.de ──> oauth2-proxy ──(nur wenn Zitadel-Session)──> LeadPilot
+                                    │                                          └─ db
+                                    └── OIDC gegen Zitadel (auth.lennartg.de)
 ```
 
-> **Wichtig – gleiche Domain:** LeadPilot auf eine **Subdomain derselben
-> Registrar-Domain** legen wie Nextcloud (z. B. `cloud.firma.de` +
-> `leads.firma.de`). Beide teilen die Site `firma.de`, dadurch gelten die
-> SSO-Cookies im iframe als *same-site* und der Login funktioniert nahtlos.
-> Auf getrennten Domains blockieren moderne Browser die Cookies im iframe.
+## Warum SSO und nicht „nur Zugriffsbeschränkung"?
+
+Beim Einbetten per iframe lädt **der Browser des Nutzers** die App direkt –
+Nextcloud sitzt nicht in der Verbindung. Eine reine Netzwerk-/IP-Regel
+(„nur der Nextcloud-Server darf zugreifen") würde deshalb **alle echten Nutzer
+aussperren**. Die wirksame Zugriffskontrolle ist daher die **Authentifizierung
+am Proxy** (Forward-Auth/SSO). Als zusätzliche Härtung gilt:
+
+- Die App ist **nicht direkt** exponiert – nur der oauth2-proxy ist erreichbar.
+- `Content-Security-Policy: frame-ancestors` (in der App eingebaut, via
+  `FRAME_ANCESTORS`) verhindert, dass **andere** Seiten die App einbetten.
+
+## Voraussetzung: gleiche Domain
+
+Nextcloud, LeadPilot und Zitadel sollten unter **derselben Registrar-Domain**
+laufen (z. B. `cloud.lennartg.de`, `leads.lennartg.de`, `auth.lennartg.de`).
+Dann ist die gesamte SSO-Kette im iframe *same-site* und unabhängig vom
+Third-Party-Cookie-Blocking moderner Browser robust.
 
 ---
 
-## 1. Nextcloud als OIDC-Provider
+## Schritt 1 – Nextcloud-Login auf Zitadel umziehen
 
-1. In Nextcloud die App **„OpenID Connect Identity Provider"** (`oidc`)
-   installieren und aktivieren.
-2. Unter *Administrationseinstellungen → Sicherheit → OpenID Connect* einen
-   **Client** anlegen:
-   - **Redirect-URI:** `https://leads.firma.de/oauth2/callback`
-   - **Client-ID** und **Client-Secret** notieren.
-3. Discovery-/Issuer-URL ist in der Regel:
-   `https://cloud.firma.de/index.php/apps/oidc` (je nach Version; die genaue
-   `.well-known/openid-configuration` wird in den App-Einstellungen angezeigt).
+Damit „in Nextcloud eingeloggt = im Lead-System eingeloggt" gilt, muss
+Nextcloud sich ebenfalls über Zitadel anmelden.
 
-## 2. oauth2-proxy + LeadPilot per Docker Compose
+1. In Zitadel eine **Web-Application** „Nextcloud" anlegen (Projekt z. B.
+   „Interne Tools"), Flow **Code**, Auth-Methode **Client Secret**.
+   - Redirect-URI: `https://cloud.lennartg.de/apps/user_oidc/code`
+2. In Nextcloud die App **„OpenID Connect user backend" (`user_oidc`)**
+   installieren und einen Provider anlegen – per UI
+   (*Administration → OpenID Connect*) oder per `occ`:
 
-`docker-compose.nextcloud.yml` (Beispiel):
+   ```bash
+   occ user_oidc:provider Zitadel \
+     --clientid="<CLIENT_ID>" \
+     --clientsecret="<CLIENT_SECRET>" \
+     --discoveryuri="https://auth.lennartg.de/.well-known/openid-configuration" \
+     --scope="openid email profile" \
+     --mapping-uid=sub --mapping-email=email --mapping-display-name=name \
+     --unique-uid=0
+   ```
 
-```yaml
-services:
-  leadpilot:
-    image: ghcr.io/<owner>/leadpilot:latest
-    environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      PGHOST: db
-      PGUSER: leadpilot
-      PGPASSWORD: ${POSTGRES_PASSWORD}
-      PGDATABASE: leadpilot
-      # Einbettung in Nextcloud erlauben:
-      FRAME_ANCESTORS: https://cloud.firma.de
-      LOG_LEVEL: info
-    depends_on: [db]
-    # KEIN Port nach außen – nur der Proxy erreicht die App.
-    expose: ["3000"]
+3. Testen: Abmelden → „Mit Zitadel anmelden" → Login läuft über Zitadel.
+   (Den lokalen Login kann man später optional ausblenden.)
 
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: leadpilot
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: leadpilot
-    volumes: ["leadpilot-db:/var/lib/postgresql/data"]
+## Schritt 2 – Zitadel-App für LeadPilot
 
-  oauth2-proxy:
-    image: quay.io/oauth2-proxy/oauth2-proxy:latest
-    command:
-      - --http-address=0.0.0.0:4180
-      - --upstream=http://leadpilot:3000
-      - --provider=oidc
-      - --oidc-issuer-url=https://cloud.firma.de/index.php/apps/oidc
-      - --client-id=${OIDC_CLIENT_ID}
-      - --client-secret=${OIDC_CLIENT_SECRET}
-      - --redirect-url=https://leads.firma.de/oauth2/callback
-      - --cookie-secret=${COOKIE_SECRET}      # 32 zufällige Bytes, base64
-      - --cookie-domain=.firma.de             # für same-site im iframe
-      - --cookie-samesite=none
-      - --cookie-secure=true
-      - --email-domain=*
-      - --pass-user-headers=true              # X-Forwarded-User/-Email an App
-      - --set-xauthrequest=true
-    ports:
-      - "443:4180"   # in der Praxis hinter einem TLS-Reverse-Proxy (Caddy/Traefik)
+In Zitadel eine zweite **Web-Application** „LeadPilot" anlegen:
 
-volumes:
-  leadpilot-db:
+- Flow **Code**, Auth-Methode **Client Secret** (oder PKCE – dann im Compose
+  `OAUTH2_PROXY_CODE_CHALLENGE_METHOD=S256` setzen).
+- Redirect-URI: `https://leads.lennartg.de/oauth2/callback`
+- Post-Logout-URI (optional): `https://leads.lennartg.de/`
+- **Client-ID** und **Client-Secret** notieren.
+
+## Schritt 3 – Stack ausrollen
+
+Vorlage: [`deploy/docker-compose.nextcloud.yml`](../deploy/docker-compose.nextcloud.yml)
+und [`deploy/.env.example`](../deploy/.env.example).
+
+```bash
+cd deploy
+cp .env.example .env       # Werte ausfüllen (Domains, Zitadel, Secrets)
+# Cookie-Secret erzeugen:
+python3 -c 'import os,base64;print(base64.urlsafe_b64encode(os.urandom(32)).decode())'
+docker compose -f docker-compose.nextcloud.yml up -d
 ```
 
-`.env` dazu:
+Der Stack startet **db**, **leadpilot** (nur intern) und **oauth2-proxy**
+(über Traefik unter `leads.lennartg.de`, TLS). Direktaufruf von
+`https://leads.lennartg.de` löst nun den Zitadel-Login aus; danach erscheint
+die App.
 
-```env
-ANTHROPIC_API_KEY=sk-ant-...
-POSTGRES_PASSWORD=ein-sicheres-passwort
-OIDC_CLIENT_ID=...
-OIDC_CLIENT_SECRET=...
-COOKIE_SECRET=...   # z. B.  openssl rand -base64 32
-```
+> TLS ist Pflicht (`Secure`-Cookies). Traefik muss einen Entrypoint
+> `websecure` und einen Zertifikats-Resolver haben (`TRAEFIK_CERTRESOLVER`).
 
-> TLS (HTTPS) sollte ein Reverse Proxy (Caddy, Traefik, nginx) davor
-> terminieren. `--cookie-secure=true` setzt zwingend HTTPS voraus.
-
-## 3. Inpage-Rendering in Nextcloud
+## Schritt 4 – Inpage-Rendering in Nextcloud
 
 1. Nextcloud-App **„External sites"** installieren.
-2. Unter *Administrationseinstellungen → External sites* einen Eintrag anlegen:
+2. *Administration → External sites* → Eintrag anlegen:
    - **Name:** LeadPilot
-   - **URL:** `https://leads.firma.de`
-   - **Darstellung:** *„in einem iframe anzeigen"* (damit es inpage erscheint)
-   - Icon/Gerätesichtbarkeit nach Bedarf.
+   - **URL:** `https://leads.lennartg.de`
+   - **Darstellung:** *in einem iframe anzeigen*
 
-Da LeadPilot den Header `Content-Security-Policy: frame-ancestors 'self'
-https://cloud.firma.de` sendet (gesetzt über `FRAME_ANCESTORS`), erlaubt der
-Browser die Einbettung **nur** durch Nextcloud.
+Weil LeadPilot `frame-ancestors 'self' https://cloud.lennartg.de` sendet,
+erlaubt der Browser die Einbettung **nur** durch Nextcloud.
 
-## 4. Benutzer-Identität in LeadPilot
+## Ergebnis & Identität
 
-`oauth2-proxy` reicht die Identität als Header weiter
-(`X-Forwarded-Email` / `X-Forwarded-User`). LeadPilot liest diese automatisch
-und schreibt sie als **Aktor** in die Aktivitäten-Timeline und an Aufgaben
-(„wer hat was angelegt/erledigt"). Ohne vorgeschalteten Proxy bleibt das Feld
-leer (`—`) und die App läuft unverändert weiter.
+- Eingeloggt in Nextcloud (via Zitadel) → das Lead-System lädt im iframe und ist
+  durch die bestehende Zitadel-Session **sofort** authentifiziert (stiller
+  302-Redirect, keine Login-Maske im iframe).
+- oauth2-proxy reicht `X-Forwarded-Email` an die App weiter; LeadPilot
+  übernimmt das als **Aktor** in Aktivitäten-Timeline und Aufgaben.
+
+## Stolpersteine
+
+- **Login-Maske erscheint im iframe / wird blockiert:** Es bestand keine aktive
+  Zitadel-Session (Nextcloud nutzt noch lokalen Login, oder Session abgelaufen).
+  → Schritt 1 umsetzen bzw. Session-Lebensdauer in Zitadel erhöhen.
+- **Cookies werden im iframe nicht gesendet:** Hosts liegen auf verschiedenen
+  Registrar-Domains. → Alles unter eine Domain bringen, `COOKIE_DOMAIN` prüfen.
+- **`redirect_uri` mismatch:** Redirect-URI in der Zitadel-App muss exakt
+  `https://leads.lennartg.de/oauth2/callback` lauten.
+- **Zitadel rendert seine Seite im iframe nicht (X-Frame-Options):** ist
+  beabsichtigt; mit aktiver Session sind es nur 302-Redirects, die nicht
+  gerendert werden. Bei Bedarf die App alternativ als eigener Tab statt iframe
+  öffnen.
 
 ## Checkliste
 
-- [ ] `oidc`-App in Nextcloud aktiv, Client mit Redirect-URI angelegt
-- [ ] LeadPilot + DB + oauth2-proxy laufen, App ist **nicht** direkt exponiert
-- [ ] `FRAME_ANCESTORS` zeigt auf die Nextcloud-Origin
-- [ ] LeadPilot läuft auf einer Subdomain derselben Domain wie Nextcloud
-- [ ] TLS aktiv, Cookies `Secure` + `SameSite=None`
+- [ ] Zitadel-Apps „Nextcloud" und „LeadPilot" angelegt (Redirect-URIs korrekt)
+- [ ] Nextcloud meldet sich über Zitadel an (`user_oidc`)
+- [ ] `deploy/.env` gefüllt, `COOKIE_SECRET` erzeugt
+- [ ] Stack läuft; App ist **nicht** direkt exponiert (nur oauth2-proxy)
+- [ ] Hosts unter einer Registrar-Domain, `COOKIE_DOMAIN` passt
 - [ ] External-Sites-Eintrag als iframe sichtbar
+- [ ] Test: in NC eingeloggt → Lead-System ohne zweites Login sichtbar
