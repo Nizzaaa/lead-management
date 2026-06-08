@@ -178,7 +178,12 @@ function startResearchJob(runner) {
       job.status = "done";
     } catch (err) {
       console.error("Recherche-Fehler:", err.message);
-      job.error = "Recherche fehlgeschlagen. Bitte erneut versuchen.";
+      // Eigene, verständliche Fehlermeldungen durchreichen; technische
+      // SDK-Meldungen (z. B. lange 429-Texte) kürzen.
+      const msg = (err && err.message) ? String(err.message) : "";
+      job.error = msg
+        ? `Recherche fehlgeschlagen: ${msg.slice(0, 300)}`
+        : "Recherche fehlgeschlagen. Bitte erneut versuchen.";
       job.status = "error";
     } finally {
       job.finishedAt = Date.now();

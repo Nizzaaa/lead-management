@@ -32,10 +32,13 @@ function effortFor(model) {
 // Wichtig für niedrige Nutzungs-Tiers (z. B. Tier 1: nur 30.000 Input-Tokens/min
 // bei Sonnet): Wir begrenzen Anzahl und Größe der Web-Zugriffe, damit eine
 // einzelne Recherche das Minuten-Limit (ITPM) nicht sprengt.
+// Stabile GA-Tool-Versionen (ohne „dynamic filtering"). Die neueren
+// _20260209-Versionen filtern Inhalte per Code-Execution vor – ist diese
+// Umgebung nicht aktiviert, schlagen die Abrufe fehl ("Tools nicht verfügbar").
 const WEB_TOOLS = [
-  { type: "web_search_20260209", name: "web_search", max_uses: 5 },
+  { type: "web_search_20250305", name: "web_search", max_uses: 5 },
   {
-    type: "web_fetch_20260209",
+    type: "web_fetch_20250910",
     name: "web_fetch",
     max_uses: 5,
     // Deckelt die pro Seite/PDF in den Kontext geladenen Tokens. Ohne Limit
@@ -206,6 +209,7 @@ async function runResearch(anthropic, input, model, onProgress) {
 
   const thinking = thinkingFor(model);
   let dossier = "";
+  let toolOk = 0; // erfolgreiche Web-Tool-Ergebnisse (Such-Treffer/Seitenabrufe)
   for (let i = 0; i < 16; i++) {
     const params = {
       model,
@@ -223,14 +227,28 @@ async function runResearch(anthropic, input, model, onProgress) {
     if (effort) params.output_config = { effort };
     const stream = anthropic.messages.stream(params);
 
-    // Fortschritt melden, sobald die KI eine Web-Suche/Seitenabruf nutzt.
+    // Fortschritt melden: Tool-Aufrufe UND deren Ergebnisse/Fehler.
     stream.on("contentBlock", (block) => {
-      if (!block || block.type !== "server_tool_use") return;
-      const inp = block.input || {};
-      if (block.name === "web_search" && inp.query) {
-        onProgress(`🔍 Suche: ${inp.query}`);
-      } else if (block.name === "web_fetch" && inp.url) {
-        onProgress(`🌐 Öffne: ${inp.url}`);
+      if (!block) return;
+      if (block.type === "server_tool_use") {
+        const inp = block.input || {};
+        if (block.name === "web_search" && inp.query) onProgress(`🔍 Suche: ${inp.query}`);
+        else if (block.name === "web_fetch" && inp.url) onProgress(`🌐 Öffne: ${inp.url}`);
+        return;
+      }
+      if (block.type === "web_search_tool_result" || block.type === "web_fetch_tool_result") {
+        const c = block.content;
+        if (Array.isArray(c)) {
+          // web_search liefert bei Erfolg ein Array von Treffern.
+          toolOk++;
+          onProgress(`✓ ${c.length} Treffer gefunden`);
+        } else if (c && typeof c === "object" && typeof c.type === "string" && c.type.endsWith("_error")) {
+          onProgress(`⚠️ Abruf fehlgeschlagen (${c.error_code || "Fehler"})`);
+        } else if (c) {
+          // web_fetch liefert bei Erfolg ein Dokument-Objekt.
+          toolOk++;
+          onProgress("✓ Seite geladen");
+        }
       }
     });
 
@@ -257,6 +275,16 @@ async function runResearch(anthropic, input, model, onProgress) {
   }
 
   if (!dossier) throw new Error("Recherche lieferte kein Dossier.");
+  // Ohne ein einziges erfolgreiches Web-Tool-Ergebnis ist das Dossier nicht
+  // belegt (häufig: Rate-Limit/Tools nicht verfügbar). Dann lieber sauber
+  // abbrechen, statt einen leeren Lead anzulegen.
+  if (toolOk === 0) {
+    throw new Error(
+      "Web-Recherche lieferte keine Ergebnisse – die Such-/Abruf-Tools waren nicht erreichbar " +
+        "(oft Rate-Limit auf niedrigem Tier oder die Seite blockiert den Abruf). Bitte erneut " +
+        "versuchen oder das Modell wechseln (Haiku/Opus haben höhere Limits)."
+    );
+  }
   return dossier;
 }
 
