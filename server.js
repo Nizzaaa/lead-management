@@ -5,8 +5,15 @@ const path = require("path");
 const crypto = require("crypto");
 const db = require("./db");
 const { researchCompany } = require("./research");
+const { logger, httpLogger } = require("./logger");
 
 const PORT = process.env.PORT || 3000;
+
+// Erlaubte Einbettungs-Quellen für den iframe (z. B. Nextcloud „External Sites").
+// Kommagetrennte Origin-Liste in FRAME_ANCESTORS, z. B.
+//   FRAME_ANCESTORS="https://cloud.firma.de"
+// Ohne diese Variable wird kein frame-ancestors-Header gesetzt (Verhalten wie bisher).
+const FRAME_ANCESTORS = String(process.env.FRAME_ANCESTORS || "").trim();
 
 // --- Anthropic / KI-Setup --------------------------------------------------
 // Das SDK wird nur geladen, wenn ein API-Key vorhanden ist. So läuft die App
@@ -40,7 +47,7 @@ try {
     anthropic = new Anthropic({ maxRetries: 5 });
   }
 } catch (err) {
-  console.warn("Anthropic SDK konnte nicht geladen werden:", err.message);
+  logger.warn("anthropic_sdk_load_failed", { error: err.message });
 }
 
 const aiEnabled = () => Boolean(anthropic);
@@ -182,7 +189,7 @@ function startResearchJob(runner) {
         job.status = "cancelled";
         job.error = "Recherche abgebrochen.";
       } else {
-        console.error("Recherche-Fehler:", err.message);
+        logger.error("research_failed", { error: err.message });
         // Eigene, verständliche Fehlermeldungen durchreichen; technische
         // SDK-Meldungen (z. B. lange 429-Texte) kürzen.
         const msg = (err && err.message) ? String(err.message) : "";
@@ -207,13 +214,40 @@ function startResearchJob(runner) {
 // Kleiner Wrapper, damit Fehler in async-Handlern sauber als 500 landen.
 const wrap = (fn) => (req, res) =>
   Promise.resolve(fn(req, res)).catch((err) => {
-    console.error("Serverfehler:", err.message);
+    (req.log || logger).error("server_error", { error: err.message, stack: err.stack });
     if (!res.headersSent) res.status(500).json({ error: "Interner Serverfehler." });
   });
 
+// Aktor (handelnder Benutzer) eines Requests – stammt aus den Headern eines
+// vorgeschalteten Auth-Proxys (Nextcloud-SSO). Fallback für direkte Zugriffe.
+function actor(req) {
+  return (req && req.actor) || "—";
+}
+
+// Schreibt einen Aktivitäts-Eintrag, ohne den Hauptablauf scheitern zu lassen.
+async function logActivity(leadId, fields, who) {
+  if (!leadId) return;
+  try {
+    await db.createActivity({ leadId, actor: who || "—", ...fields });
+  } catch (err) {
+    logger.warn("activity_log_failed", { leadId, error: err.message });
+  }
+}
+
 // --- App -------------------------------------------------------------------
 const app = express();
+app.use(httpLogger());
 app.use(express.json({ limit: "1mb" }));
+
+// Einbettung in Nextcloud (iframe) erlauben, wenn FRAME_ANCESTORS gesetzt ist.
+if (FRAME_ANCESTORS) {
+  const policy = `frame-ancestors 'self' ${FRAME_ANCESTORS}`;
+  app.use((req, res, next) => {
+    res.setHeader("Content-Security-Policy", policy);
+    next();
+  });
+}
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // Health / Konfiguration
@@ -266,6 +300,7 @@ app.post("/api/leads", wrap(async (req, res) => {
     return res.status(400).json({ error: "Name oder Firma ist erforderlich." });
   }
   const lead = await db.createLead(data);
+  await logActivity(lead.id, { type: "system", title: "Lead manuell angelegt" }, actor(req));
   res.status(201).json(lead);
 }));
 
@@ -278,9 +313,14 @@ async function scoreAfterResearch(lead, onProgress) {
     const { lead: updated, ai } = await applyScore(lead);
     const wert = ai.value > 0 ? ` · geschätzter Wert ${ai.value.toLocaleString("de-DE")} €` : "";
     onProgress(`✅ KI-Score: ${ai.score}/100 (Note ${ai.grade})${wert}`);
+    await logActivity(lead.id, {
+      type: "ai",
+      title: `KI-Score: ${ai.score}/100 (Note ${ai.grade})`,
+      body: ai.reasoning || "",
+    }, "KI");
     return updated;
   } catch (err) {
-    console.error("Auto-Score fehlgeschlagen:", err.message);
+    logger.error("auto_score_failed", { error: err.message });
     onProgress("⚠️ KI-Score konnte nicht ermittelt werden (später nachholbar).");
     return lead;
   }
@@ -298,6 +338,7 @@ app.post("/api/leads/research", wrap(async (req, res) => {
     const research = await researchCompany(anthropic, input, currentModel, onProgress, signal);
     const data = { ...leadFromResearch(research, input), status: "neu", value: 0, notes: "" };
     const lead = await db.createLead(data, research);
+    await logActivity(lead.id, { type: "system", title: "Per Recherche angelegt", body: `Input: ${input}` }, "KI-Recherche");
     return scoreAfterResearch(lead, onProgress);
   });
   res.status(202).json({ jobId: job.id });
@@ -320,6 +361,7 @@ app.post("/api/leads/:id/research", wrap(async (req, res) => {
     const research = await researchCompany(anthropic, input, currentModel, onProgress, signal);
     const data = leadFromResearch(research, input);
     const updated = await db.setLeadResearch(lead.id, research, data);
+    await logActivity(lead.id, { type: "system", title: "Recherche aktualisiert", body: `Input: ${input}` }, "KI-Recherche");
     return scoreAfterResearch(updated, onProgress);
   });
   res.status(202).json({ jobId: job.id });
@@ -358,6 +400,12 @@ app.put("/api/leads/:id", wrap(async (req, res) => {
   if (!existing) return res.status(404).json({ error: "Lead nicht gefunden." });
   const data = sanitizeLead({ ...existing, ...req.body });
   const lead = await db.updateLead(req.params.id, data);
+  if (lead && existing.status !== lead.status) {
+    await logActivity(lead.id, {
+      type: "status",
+      title: `Status: ${existing.status} → ${lead.status}`,
+    }, actor(req));
+  }
   res.json(lead);
 }));
 
@@ -505,10 +553,15 @@ app.post("/api/leads/:id/score", wrap(async (req, res) => {
   const lead = await db.getLead(req.params.id);
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
   try {
-    const { lead: updated } = await applyScore(lead);
+    const { lead: updated, ai } = await applyScore(lead);
+    await logActivity(lead.id, {
+      type: "ai",
+      title: `KI-Score: ${ai.score}/100 (Note ${ai.grade})`,
+      body: ai.reasoning || "",
+    }, actor(req));
     res.json(updated);
   } catch (err) {
-    console.error("Scoring-Fehler:", err.message);
+    (req.log || logger).error("scoring_failed", { leadId: req.params.id, error: err.message });
     res.status(502).json({ error: "KI-Bewertung fehlgeschlagen. Bitte erneut versuchen." });
   }
 }));
@@ -531,9 +584,10 @@ app.post("/api/leads/:id/email", wrap(async (req, res) => {
         "Keine Floskeln, kein Spam-Ton, maximal 150 Wörter.",
       `Ziel der E-Mail: ${goal}\n\nLead:\n${leadContext(lead)}`
     );
+    await logActivity(lead.id, { type: "email", title: "KI-E-Mail-Entwurf erstellt", body: text }, actor(req));
     res.json({ email: text });
   } catch (err) {
-    console.error("E-Mail-Fehler:", err.message);
+    (req.log || logger).error("email_failed", { leadId: req.params.id, error: err.message });
     res.status(502).json({ error: "E-Mail-Entwurf fehlgeschlagen. Bitte erneut versuchen." });
   }
 }));
@@ -550,11 +604,118 @@ app.post("/api/leads/:id/insights", wrap(async (req, res) => {
         "belegten Ansatzpunkten und Potenzialen des Recherche-Dossiers. Pragmatisch und umsetzbar.",
       `Was sind die besten nächsten Schritte für diesen Lead?\n\n${leadContext(lead)}`
     );
+    await logActivity(lead.id, { type: "ai", title: "KI-Empfehlung erstellt", body: text }, actor(req));
     res.json({ insights: text });
   } catch (err) {
-    console.error("Insights-Fehler:", err.message);
+    (req.log || logger).error("insights_failed", { leadId: req.params.id, error: err.message });
     res.status(502).json({ error: "Empfehlung fehlgeschlagen. Bitte erneut versuchen." });
   }
+}));
+
+// --- Aktivitäten-Timeline --------------------------------------------------
+const ACTIVITY_TYPES = ["note", "call", "email", "meeting", "status", "ai", "system"];
+
+// Aktivitäten eines Leads (chronologisch, neueste zuerst).
+app.get("/api/leads/:id/activities", wrap(async (req, res) => {
+  res.json(await db.listActivities(req.params.id));
+}));
+
+// Aktivität manuell erfassen (Notiz, Anruf, Mail, Termin …).
+app.post("/api/leads/:id/activities", wrap(async (req, res) => {
+  const lead = await db.getLead(req.params.id);
+  if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
+  const clean = (v) => (typeof v === "string" ? v.trim() : "");
+  let type = clean(req.body.type).toLowerCase();
+  if (!ACTIVITY_TYPES.includes(type)) type = "note";
+  const title = clean(req.body.title);
+  const body = clean(req.body.body);
+  if (!title && !body) {
+    return res.status(400).json({ error: "Titel oder Text ist erforderlich." });
+  }
+  const activity = await db.createActivity({
+    leadId: lead.id, type, title, body, outcome: clean(req.body.outcome), actor: actor(req),
+  });
+  res.status(201).json(activity);
+}));
+
+// Aktivität löschen.
+app.delete("/api/activities/:id", wrap(async (req, res) => {
+  const ok = await db.deleteActivity(req.params.id);
+  if (!ok) return res.status(404).json({ error: "Aktivität nicht gefunden." });
+  res.status(204).end();
+}));
+
+// --- Aufgaben / Wiedervorlagen ---------------------------------------------
+function sanitizeTask(body = {}) {
+  const clean = (v) => (typeof v === "string" ? v.trim() : "");
+  let dueAt = null;
+  if (body.dueAt) {
+    const d = new Date(body.dueAt);
+    if (!Number.isNaN(d.getTime())) dueAt = d.toISOString();
+  }
+  return { title: clean(body.title), notes: clean(body.notes), dueAt };
+}
+
+// Globale Aufgabenliste. ?status=open|done|all (Default: open).
+app.get("/api/tasks", wrap(async (req, res) => {
+  const status = ["open", "done", "all"].includes(req.query.status) ? req.query.status : "open";
+  res.json(await db.listTasks(status));
+}));
+
+// Aufgaben eines Leads.
+app.get("/api/leads/:id/tasks", wrap(async (req, res) => {
+  res.json(await db.listTasksByLead(req.params.id));
+}));
+
+// Aufgabe anlegen (optional an einen Lead gebunden).
+app.post("/api/tasks", wrap(async (req, res) => {
+  const data = sanitizeTask(req.body);
+  if (!data.title) return res.status(400).json({ error: "Titel ist erforderlich." });
+  let leadId = null;
+  if (req.body.leadId) {
+    const lead = await db.getLead(req.body.leadId);
+    if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
+    leadId = lead.id;
+  }
+  const task = await db.createTask({ ...data, leadId, actor: actor(req) });
+  if (leadId) {
+    const due = task.dueAt ? ` (fällig ${new Date(task.dueAt).toLocaleDateString("de-DE")})` : "";
+    await logActivity(leadId, { type: "system", title: `Aufgabe angelegt: ${task.title}${due}` }, actor(req));
+  }
+  res.status(201).json(task);
+}));
+
+// Aufgabe aktualisieren (erledigen, Titel/Fälligkeit ändern).
+app.put("/api/tasks/:id", wrap(async (req, res) => {
+  const patch = {};
+  if (req.body.title !== undefined) patch.title = String(req.body.title).trim();
+  if (req.body.notes !== undefined) patch.notes = String(req.body.notes).trim();
+  if (req.body.done !== undefined) patch.done = Boolean(req.body.done);
+  if (req.body.dueAt !== undefined) {
+    patch.dueAt = null;
+    if (req.body.dueAt) {
+      const d = new Date(req.body.dueAt);
+      if (!Number.isNaN(d.getTime())) patch.dueAt = d.toISOString();
+    }
+  }
+  const task = await db.updateTask(req.params.id, patch);
+  if (!task) return res.status(404).json({ error: "Aufgabe nicht gefunden." });
+  if (patch.done === true && task.leadId) {
+    await logActivity(task.leadId, { type: "system", title: `Aufgabe erledigt: ${task.title}` }, actor(req));
+  }
+  res.json(task);
+}));
+
+// Aufgabe löschen.
+app.delete("/api/tasks/:id", wrap(async (req, res) => {
+  const ok = await db.deleteTask(req.params.id);
+  if (!ok) return res.status(404).json({ error: "Aufgabe nicht gefunden." });
+  res.status(204).end();
+}));
+
+// --- Reporting -------------------------------------------------------------
+app.get("/api/report", wrap(async (req, res) => {
+  res.json(await db.getReport(STATUSES, stageProbabilities));
 }));
 
 // --- Start -----------------------------------------------------------------
@@ -565,21 +726,25 @@ db.init()
       const saved = await db.getSetting(MODEL_SETTING_KEY);
       if (saved && isValidModel(saved)) currentModel = saved;
     } catch (err) {
-      console.warn("Modell-Einstellung konnte nicht geladen werden:", err.message);
+      logger.warn("model_setting_load_failed", { error: err.message });
     }
     // Gespeicherte Abschlusswahrscheinlichkeiten laden.
     try {
       const savedProb = await db.getSetting(STAGE_PROB_SETTING_KEY);
       if (savedProb) stageProbabilities = sanitizeStageProbabilities(JSON.parse(savedProb));
     } catch (err) {
-      console.warn("Wahrscheinlichkeiten konnten nicht geladen werden:", err.message);
+      logger.warn("stage_probabilities_load_failed", { error: err.message });
     }
     app.listen(PORT, () => {
-      console.log(`Lead-Management läuft auf http://localhost:${PORT}`);
-      console.log(`KI-Funktionen: ${aiEnabled() ? "aktiv (" + currentModel + ")" : "inaktiv (ANTHROPIC_API_KEY setzen)"}`);
+      logger.info("server_started", {
+        port: PORT,
+        aiEnabled: aiEnabled(),
+        model: aiEnabled() ? currentModel : null,
+        frameAncestors: FRAME_ANCESTORS || null,
+      });
     });
   })
   .catch((err) => {
-    console.error("Start abgebrochen – Datenbank nicht verfügbar:", err.message);
+    logger.error("startup_failed", { error: err.message });
     process.exit(1);
   });

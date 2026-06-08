@@ -35,6 +35,41 @@ function extUrl(s) {
   return "https://" + v.replace(/^\/+/, "");
 }
 
+// Datum/Zeit-Helfer (deutsche Formatierung).
+function fmtDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleDateString("de-DE");
+}
+function fmtDateTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleString("de-DE", { dateStyle: "medium", timeStyle: "short" });
+}
+// Relative Zeit ("vor 3 Std.", "in 2 Tagen").
+function relTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const diff = d.getTime() - Date.now();
+  const abs = Math.abs(diff);
+  const min = 60000, h = 3600000, day = 86400000;
+  const rtf = new Intl.RelativeTimeFormat("de-DE", { numeric: "auto" });
+  if (abs < h) return rtf.format(Math.round(diff / min), "minute");
+  if (abs < day) return rtf.format(Math.round(diff / h), "hour");
+  if (abs < 30 * day) return rtf.format(Math.round(diff / day), "day");
+  return fmtDate(iso);
+}
+// ISO → Wert für <input type="datetime-local"> (lokale Zeit, ohne Sekunden).
+function toLocalInput(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+const isOverdue = (t) => t && !t.done && t.dueAt && new Date(t.dueAt).getTime() < Date.now();
+
 // Felder der Sektion „Allgemeine Infos" (Schlüssel → Label), zentral definiert.
 const RESEARCH_FIELDS = [
   ["branche", "Branche"],
@@ -114,18 +149,30 @@ function populateStatusSelect() {
     .join("");
 }
 
-// --- Routing (Liste ⇄ Detailseite) -----------------------------------------
+// --- Routing (Liste ⇄ Detail ⇄ Aufgaben ⇄ Berichte) ------------------------
+const VIEWS = ["listView", "detailView", "tasksView", "reportsView"];
+function showOnly(viewId) {
+  for (const v of VIEWS) $("#" + v).classList.toggle("hidden", v !== viewId);
+}
+function setActiveNav(name) {
+  document.querySelectorAll("[data-nav-link]").forEach((a) => {
+    a.classList.toggle("active", a.dataset.navLink === name);
+  });
+}
+
 function router() {
-  const m = location.hash.match(/^#\/lead\/(.+)$/);
-  if (m) showDetail(decodeURIComponent(m[1]));
-  else showList();
+  const lead = location.hash.match(/^#\/lead\/(.+)$/);
+  if (lead) return showDetail(decodeURIComponent(lead[1]));
+  if (location.hash === "#/tasks") return showTasks();
+  if (location.hash === "#/reports") return showReports();
+  showList();
 }
 
 function showList() {
   detailId = null;
   detailEditing = false;
-  $("#detailView").classList.add("hidden");
-  $("#listView").classList.remove("hidden");
+  showOnly("listView");
+  setActiveNav("list");
   renderLeads();
   window.scrollTo(0, 0);
 }
@@ -139,9 +186,26 @@ function showDetail(id) {
     location.hash = "#/";
     return;
   }
-  $("#listView").classList.add("hidden");
-  $("#detailView").classList.remove("hidden");
+  showOnly("detailView");
+  setActiveNav("");
   renderDetail();
+  loadDetailExtras(id);
+  window.scrollTo(0, 0);
+}
+
+function showTasks() {
+  detailId = null;
+  showOnly("tasksView");
+  setActiveNav("tasks");
+  renderTasksView();
+  window.scrollTo(0, 0);
+}
+
+function showReports() {
+  detailId = null;
+  showOnly("reportsView");
+  setActiveNav("reports");
+  renderReportsView();
   window.scrollTo(0, 0);
 }
 
@@ -149,8 +213,28 @@ function showDetail(id) {
 async function refresh() {
   leads = await api("/api/leads");
   renderStats(await api("/api/stats"));
-  if (detailId) renderDetail();
-  else renderLeads();
+  updateTaskBadge();
+  if (detailId) {
+    renderDetail();
+    loadDetailExtras(detailId);
+  } else {
+    renderLeads();
+  }
+}
+
+// Zähler offener Aufgaben in der Navigation aktualisieren.
+async function updateTaskBadge() {
+  try {
+    const tasks = await api("/api/tasks?status=open");
+    const badge = $("#taskBadge");
+    const overdue = tasks.filter(isOverdue).length;
+    badge.textContent = tasks.length;
+    badge.classList.toggle("hidden", tasks.length === 0);
+    badge.classList.toggle("overdue", overdue > 0);
+    badge.title = overdue ? `${overdue} überfällig` : `${tasks.length} offen`;
+  } catch (err) {
+    /* Badge ist unkritisch */
+  }
 }
 
 function renderStats(stats) {
@@ -460,6 +544,7 @@ function detailViewHtml(l) {
       <div class="detail-main">
         ${l.notes ? `<section class="d-section card"><h3>Notizen</h3><p class="d-text">${esc(l.notes)}</p></section>` : ""}
         <div class="card">${researchHtml}</div>
+        <section class="card" id="activityPanel">${activityPanelHtml(null)}</section>
       </div>
       <aside class="detail-side">
         <section class="card">
@@ -467,9 +552,126 @@ function detailViewHtml(l) {
           ${aiBox}
           ${aiActions}
         </section>
+        <section class="card" id="taskPanel">${taskPanelHtml(null)}</section>
       </aside>
     </div>
   `;
+}
+
+// --- Detailseite: Aktivitäten-Timeline + Aufgaben --------------------------
+// Diese Daten liegen nicht im leads-Array, sondern werden je Detailseite
+// nachgeladen und in die Platzhalter-Panels gerendert.
+let detailActivities = [];
+let detailTasks = [];
+
+async function loadDetailExtras(id) {
+  try {
+    const [acts, tasks] = await Promise.all([
+      api(`/api/leads/${id}/activities`),
+      api(`/api/leads/${id}/tasks`),
+    ]);
+    if (detailId !== id) return; // inzwischen weggeblättert
+    detailActivities = acts;
+    detailTasks = tasks;
+    const ap = $("#activityPanel");
+    const tp = $("#taskPanel");
+    if (ap) ap.innerHTML = activityPanelHtml(acts);
+    if (tp) tp.innerHTML = taskPanelHtml(tasks);
+  } catch (err) {
+    /* Panels zeigen weiter den Ladezustand */
+  }
+}
+
+const ACTIVITY_META = {
+  note:    { icon: "📝", label: "Notiz" },
+  call:    { icon: "📞", label: "Anruf" },
+  email:   { icon: "✉️", label: "E-Mail" },
+  meeting: { icon: "📅", label: "Termin" },
+  status:  { icon: "🔄", label: "Status" },
+  ai:      { icon: "🤖", label: "KI" },
+  system:  { icon: "⚙️", label: "System" },
+};
+
+function activityItem(a) {
+  const m = ACTIVITY_META[a.type] || ACTIVITY_META.note;
+  const who = a.actor && a.actor !== "—" ? ` · ${esc(a.actor)}` : "";
+  const canDelete = ["note", "call", "email", "meeting"].includes(a.type);
+  return `<li class="act-item act-${a.type}">
+    <span class="act-icon" title="${esc(m.label)}">${m.icon}</span>
+    <div class="act-body">
+      <div class="act-head">
+        ${a.title ? `<strong>${esc(a.title)}</strong>` : `<strong>${esc(m.label)}</strong>`}
+        <span class="act-time" title="${esc(fmtDateTime(a.createdAt))}">${esc(relTime(a.createdAt))}${who}</span>
+        ${canDelete ? `<button class="icon-btn act-del" data-del-act="${a.id}" title="Löschen">🗑️</button>` : ""}
+      </div>
+      ${a.body ? `<p class="act-text">${esc(a.body)}</p>` : ""}
+      ${a.outcome ? `<p class="act-outcome">➡️ ${esc(a.outcome)}</p>` : ""}
+    </div>
+  </li>`;
+}
+
+function activityPanelHtml(acts) {
+  const form = `
+    <form class="act-form" id="activityForm">
+      <div class="act-form-row">
+        <select id="act_type">
+          <option value="note">📝 Notiz</option>
+          <option value="call">📞 Anruf</option>
+          <option value="email">✉️ E-Mail</option>
+          <option value="meeting">📅 Termin</option>
+        </select>
+        <input type="text" id="act_outcome" placeholder="Ergebnis (optional, z. B. Rückruf vereinbart)" />
+      </div>
+      <textarea id="act_body" rows="2" placeholder="Was ist passiert? (Gesprächsnotiz, Vereinbarung …)"></textarea>
+      <div class="act-form-actions">
+        <button type="submit" class="btn btn-sm btn-primary">+ Aktivität festhalten</button>
+      </div>
+    </form>`;
+
+  let list;
+  if (acts == null) {
+    list = `<p class="d-muted">Lädt…</p>`;
+  } else if (!acts.length) {
+    list = `<p class="d-muted">Noch keine Aktivitäten. Halte den ersten Kontakt fest.</p>`;
+  } else {
+    list = `<ul class="act-list">${acts.map(activityItem).join("")}</ul>`;
+  }
+  return `<h3>Aktivitäten</h3>${form}${list}`;
+}
+
+function taskItem(t) {
+  const over = isOverdue(t);
+  const due = t.dueAt
+    ? `<span class="task-due ${over ? "overdue" : ""}" title="${esc(fmtDateTime(t.dueAt))}">📅 ${esc(over ? "überfällig · " : "")}${esc(relTime(t.dueAt))}</span>`
+    : "";
+  return `<li class="task-item ${t.done ? "done" : ""}">
+    <input type="checkbox" class="task-check" data-task-toggle="${t.id}" ${t.done ? "checked" : ""} />
+    <div class="task-body">
+      <span class="task-title">${esc(t.title)}</span>
+      ${due}
+    </div>
+    <button class="icon-btn task-del" data-del-task="${t.id}" title="Löschen">🗑️</button>
+  </li>`;
+}
+
+function taskPanelHtml(tasks) {
+  const form = `
+    <form class="task-form" id="taskForm">
+      <input type="text" id="task_title" placeholder="Neue Aufgabe / Wiedervorlage…" />
+      <div class="task-form-row">
+        <input type="datetime-local" id="task_due" />
+        <button type="submit" class="btn btn-sm btn-primary">+ Aufgabe</button>
+      </div>
+    </form>`;
+  let list;
+  if (tasks == null) {
+    list = `<p class="d-muted">Lädt…</p>`;
+  } else if (!tasks.length) {
+    list = `<p class="d-muted">Keine Aufgaben.</p>`;
+  } else {
+    list = `<ul class="task-list">${tasks.map(taskItem).join("")}</ul>`;
+  }
+  return `<h3>Aufgaben / Wiedervorlagen</h3>${form}${list}`;
 }
 
 // --- Detailseite: Bearbeiten-Modus ----------------------------------------
@@ -642,6 +844,10 @@ function onDetailClick(e) {
     e.target.closest(".pot-row").remove();
     return;
   }
+  const delAct = e.target.closest("[data-del-act]");
+  if (delAct) { removeActivity(delAct.dataset.delAct); return; }
+  const delTask = e.target.closest("[data-del-task]");
+  if (delTask) { removeTask(delTask.dataset.delTask, detailId); return; }
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
   const action = btn.dataset.action;
@@ -745,6 +951,26 @@ function bindEvents() {
 
   // Detailseite: ein delegierter Handler für alle Aktionen.
   $("#detailView").addEventListener("click", onDetailClick);
+  // Formulare (Aktivität/Aufgabe) und Checkbox-Umschalten – delegiert, da die
+  // Panels per innerHTML neu aufgebaut werden.
+  $("#detailView").addEventListener("submit", (e) => {
+    if (e.target.id === "activityForm") { e.preventDefault(); addDetailActivity(); }
+    if (e.target.id === "taskForm") { e.preventDefault(); addDetailTask(); }
+  });
+  $("#detailView").addEventListener("change", (e) => {
+    const cb = e.target.closest("[data-task-toggle]");
+    if (cb) toggleTask(cb.dataset.taskToggle, cb.checked, detailId);
+  });
+
+  // Aufgaben-Ansicht (global): delegierte Handler.
+  $("#tasksView").addEventListener("click", onTasksViewClick);
+  $("#tasksView").addEventListener("change", (e) => {
+    const cb = e.target.closest("[data-task-toggle]");
+    if (cb) toggleTask(cb.dataset.taskToggle, cb.checked, null);
+  });
+  $("#tasksView").addEventListener("submit", (e) => {
+    if (e.target.id === "globalTaskForm") { e.preventDefault(); addGlobalTask(); }
+  });
 
   // Schließen per Klick auf Overlay
   document.querySelectorAll(".modal-overlay").forEach((ov) => {
@@ -1221,6 +1447,276 @@ async function runAi(action, id, btn) {
   } catch (err) {
     out.innerHTML = `<p class="warn">Fehler: ${esc(err.message)}</p>`;
   }
+}
+
+// --- Detailseite: Aktivitäten & Aufgaben (Aktionen) ------------------------
+async function addDetailActivity() {
+  const type = $("#act_type").value;
+  const body = $("#act_body").value.trim();
+  const outcome = $("#act_outcome").value.trim();
+  if (!body && !outcome) {
+    toast("Bitte einen Text eingeben", "error");
+    return;
+  }
+  try {
+    await api(`/api/leads/${detailId}/activities`, {
+      method: "POST",
+      body: JSON.stringify({ type, body, outcome }),
+    });
+    toast("Aktivität festgehalten", "success");
+    loadDetailExtras(detailId);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function removeActivity(actId) {
+  if (!confirm("Diese Aktivität löschen?")) return;
+  try {
+    await api(`/api/activities/${actId}`, { method: "DELETE" });
+    loadDetailExtras(detailId);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function addDetailTask() {
+  const title = $("#task_title").value.trim();
+  const due = $("#task_due").value;
+  if (!title) {
+    toast("Bitte einen Titel eingeben", "error");
+    return;
+  }
+  try {
+    await api("/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({ title, dueAt: due ? new Date(due).toISOString() : null, leadId: detailId }),
+    });
+    toast("Aufgabe angelegt", "success");
+    loadDetailExtras(detailId);
+    updateTaskBadge();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function toggleTask(taskId, done, leadId) {
+  try {
+    await api(`/api/tasks/${taskId}`, { method: "PUT", body: JSON.stringify({ done }) });
+    updateTaskBadge();
+    if (leadId) loadDetailExtras(leadId);
+    else renderTasksView();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function removeTask(taskId, leadId) {
+  if (!confirm("Diese Aufgabe löschen?")) return;
+  try {
+    await api(`/api/tasks/${taskId}`, { method: "DELETE" });
+    updateTaskBadge();
+    if (leadId) loadDetailExtras(leadId);
+    else renderTasksView();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// --- Globale Aufgaben-Ansicht ----------------------------------------------
+let tasksShowDone = false;
+
+async function renderTasksView() {
+  const v = $("#tasksView");
+  v.innerHTML = `<div class="view-head"><h2>✅ Aufgaben & Wiedervorlagen</h2></div><p class="d-muted">Lädt…</p>`;
+  let tasks;
+  try {
+    tasks = await api(`/api/tasks?status=${tasksShowDone ? "all" : "open"}`);
+  } catch (err) {
+    v.innerHTML = `<p class="warn">Fehler: ${esc(err.message)}</p>`;
+    return;
+  }
+
+  const leadOpts = leads
+    .map((l) => `<option value="${esc(l.id)}">${esc(l.company || l.name || "—")}</option>`)
+    .join("");
+
+  const open = tasks.filter((t) => !t.done);
+  const overdue = open.filter(isOverdue);
+
+  const rows = tasks.length
+    ? tasks.map(globalTaskRow).join("")
+    : `<p class="d-muted">Keine Aufgaben.</p>`;
+
+  v.innerHTML = `
+    <div class="view-head">
+      <h2>✅ Aufgaben & Wiedervorlagen</h2>
+      <label class="toggle-done"><input type="checkbox" id="toggleShowDone" ${tasksShowDone ? "checked" : ""}/> Erledigte zeigen</label>
+    </div>
+    <div class="task-summary">
+      <span class="chip-stat">${open.length} offen</span>
+      <span class="chip-stat ${overdue.length ? "overdue" : ""}">${overdue.length} überfällig</span>
+    </div>
+    <form class="task-form global" id="globalTaskForm">
+      <input type="text" id="gt_title" placeholder="Neue Aufgabe…" />
+      <select id="gt_lead"><option value="">— ohne Lead —</option>${leadOpts}</select>
+      <input type="datetime-local" id="gt_due" />
+      <button type="submit" class="btn btn-sm btn-primary">+ Aufgabe</button>
+    </form>
+    <ul class="task-list global">${rows}</ul>
+  `;
+  $("#toggleShowDone").addEventListener("change", (e) => {
+    tasksShowDone = e.target.checked;
+    renderTasksView();
+  });
+}
+
+function globalTaskRow(t) {
+  const over = isOverdue(t);
+  const leadLabel = t.leadCompany || t.leadName || "";
+  const leadLink = t.leadId
+    ? `<a class="task-lead" href="#/lead/${encodeURIComponent(t.leadId)}">🔗 ${esc(leadLabel || "Lead")}</a>`
+    : "";
+  const due = t.dueAt
+    ? `<span class="task-due ${over ? "overdue" : ""}">📅 ${esc(over ? "überfällig · " : "")}${esc(fmtDateTime(t.dueAt))}</span>`
+    : `<span class="task-due muted">ohne Termin</span>`;
+  return `<li class="task-item ${t.done ? "done" : ""}">
+    <input type="checkbox" class="task-check" data-task-toggle="${t.id}" ${t.done ? "checked" : ""} />
+    <div class="task-body">
+      <span class="task-title">${esc(t.title)}</span>
+      <span class="task-meta">${due} ${leadLink}</span>
+    </div>
+    <button class="icon-btn task-del" data-del-task="${t.id}" title="Löschen">🗑️</button>
+  </li>`;
+}
+
+function onTasksViewClick(e) {
+  const del = e.target.closest("[data-del-task]");
+  if (del) { removeTask(del.dataset.delTask, null); return; }
+}
+
+async function addGlobalTask() {
+  const title = $("#gt_title").value.trim();
+  const leadId = $("#gt_lead").value || null;
+  const due = $("#gt_due").value;
+  if (!title) {
+    toast("Bitte einen Titel eingeben", "error");
+    return;
+  }
+  try {
+    await api("/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({ title, leadId, dueAt: due ? new Date(due).toISOString() : null }),
+    });
+    toast("Aufgabe angelegt", "success");
+    updateTaskBadge();
+    renderTasksView();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// --- Berichte-Ansicht ------------------------------------------------------
+const MONTH_SHORT = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+function monthLabel(ym) {
+  const [, m] = ym.split("-");
+  return MONTH_SHORT[Number(m) - 1] || ym;
+}
+
+// Einfaches, abhängigkeitsfreies SVG-Säulendiagramm.
+function barChart(series, { format = (v) => v, color = "var(--primary)" } = {}) {
+  if (!series.length) return `<p class="d-muted">Keine Daten.</p>`;
+  const max = Math.max(1, ...series.map((s) => s.value));
+  const W = 640, H = 180, pad = 24, bw = (W - pad * 2) / series.length;
+  const bars = series.map((s, i) => {
+    const h = Math.round((s.value / max) * (H - 40));
+    const x = pad + i * bw;
+    const y = H - 20 - h;
+    const cx = x + bw / 2;
+    return `
+      <g>
+        <rect x="${x + bw * 0.15}" y="${y}" width="${bw * 0.7}" height="${h}" rx="3" fill="${color}">
+          <title>${esc(s.label)}: ${esc(String(format(s.value)))}</title>
+        </rect>
+        ${s.value ? `<text x="${cx}" y="${y - 4}" class="bar-val">${esc(String(format(s.value)))}</text>` : ""}
+        <text x="${cx}" y="${H - 6}" class="bar-lbl">${esc(s.label)}</text>
+      </g>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" class="bar-chart" preserveAspectRatio="xMidYMid meet">${bars}</svg>`;
+}
+
+function funnelHtml(funnel) {
+  const max = Math.max(1, ...funnel.map((f) => f.count));
+  return `<div class="funnel">${funnel.map((f) => {
+    const pct = Math.round((f.count / max) * 100);
+    return `<div class="funnel-row">
+      <span class="funnel-label status-pill s-${f.status}">${esc(f.status)}</span>
+      <div class="funnel-bar-wrap"><div class="funnel-bar" style="width:${pct}%"></div></div>
+      <span class="funnel-count">${f.count} · ${fmtEuro(Math.round(f.value))}</span>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+async function renderReportsView() {
+  const v = $("#reportsView");
+  v.innerHTML = `<div class="view-head"><h2>📊 Berichte</h2></div><p class="d-muted">Lädt…</p>`;
+  let r;
+  try {
+    r = await api("/api/report");
+  } catch (err) {
+    v.innerHTML = `<p class="warn">Fehler: ${esc(err.message)}</p>`;
+    return;
+  }
+  const s = r.stats;
+  const eur = (v) => fmtEuro(Math.round(v));
+
+  const kpis = [
+    ["Leads gesamt", s.total],
+    ["Pipeline (gewichtet)", eur(s.weightedPipelineValue)],
+    ["Gewonnen", eur(s.wonValue)],
+    ["Abschlussquote", s.conversion + " %"],
+    ["Ø Auftragswert", eur(r.avgWon)],
+    ["Offene Aufgaben", `${r.tasks.open}${r.tasks.overdue ? ` · ${r.tasks.overdue} überfällig` : ""}`],
+  ].map(([label, val]) => `<div class="stat-card"><span class="stat-value">${esc(String(val))}</span><span class="stat-label">${esc(label)}</span></div>`).join("");
+
+  const created = r.createdByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
+  const won = r.wonByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
+
+  const sourceRows = r.bySource.length
+    ? r.bySource.map((x) => `<tr>
+        <td>${esc(x.source)}</td>
+        <td class="num">${x.count}</td>
+        <td class="num">${x.won}</td>
+        <td class="num">${eur(x.value)}</td>
+      </tr>`).join("")
+    : `<tr><td colspan="4" class="d-muted">Keine Daten.</td></tr>`;
+
+  v.innerHTML = `
+    <div class="view-head"><h2>📊 Berichte</h2></div>
+    <section class="stats report-kpis">${kpis}</section>
+
+    <div class="report-grid">
+      <section class="card">
+        <h3>Pipeline-Trichter</h3>
+        ${funnelHtml(r.funnel)}
+      </section>
+      <section class="card">
+        <h3>Neue Leads je Monat</h3>
+        ${barChart(created, { color: "var(--primary)" })}
+      </section>
+      <section class="card">
+        <h3>Gewonnener Umsatz je Monat</h3>
+        ${barChart(won, { color: "var(--green)", format: (val) => (val >= 1000 ? Math.round(val / 1000) + "k" : val) })}
+      </section>
+      <section class="card">
+        <h3>Quellen-Performance</h3>
+        <table class="report-table">
+          <thead><tr><th>Quelle</th><th class="num">Leads</th><th class="num">Gewonnen</th><th class="num">Wert</th></tr></thead>
+          <tbody>${sourceRows}</tbody>
+        </table>
+      </section>
+    </div>
+  `;
 }
 
 // --- Toast -----------------------------------------------------------------

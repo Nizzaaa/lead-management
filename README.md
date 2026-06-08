@@ -29,6 +29,24 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 > Die Web-Recherche läuft über die serverseitigen Anthropic-Tools `web_search` und `web_fetch`
 > und benötigt daher einen gesetzten `ANTHROPIC_API_KEY`.
 
+**Aktivitäten-Timeline** (je Lead)
+- Jeder Touchpoint wird festgehalten: **Notiz, Anruf, E-Mail, Termin** (mit Ergebnis)
+- **Automatische Einträge** für Systemereignisse: Anlage, Recherche, KI-Score, Status­wechsel, KI-E-Mail/Empfehlung – chronologisch mit Zeit und Aktor
+
+**Aufgaben / Wiedervorlagen**
+- Aufgaben mit **Fälligkeit** anlegen – direkt am Lead oder in der globalen Ansicht
+- **Überfällige** Aufgaben sind hervorgehoben; ein **Zähler in der Navigation** zeigt offene/überfällige Aufgaben
+- Erledigen per Häkchen; erledigte Aufgaben optional einblendbar
+
+**Berichte** (📊)
+- KPIs (Leads, gewichtete Pipeline, gewonnen, Abschlussquote, Ø Auftragswert, offene Aufgaben)
+- **Pipeline-Trichter**, **neue Leads je Monat**, **gewonnener Umsatz je Monat** (abhängigkeitsfreie SVG-Charts)
+- **Quellen-Performance** (Leads/Gewonnen/Wert je Quelle)
+
+**Betrieb & Sicherheit**
+- **Strukturiertes Logging** (JSON-Lines) mit Request-ID, Dauer, Aktor und Redaction sensibler Felder; Level über `LOG_LEVEL`, lesbar mit `LOG_PRETTY=1`
+- **Einbettung in Nextcloud** als iframe inkl. Zugriffsschutz nur für Nextcloud-Benutzer – siehe [`docs/nextcloud-deployment.md`](docs/nextcloud-deployment.md). Der erkannte Benutzer (Proxy-Header) wird als Aktor in Timeline und Aufgaben übernommen.
+
 ## Schnellstart mit Docker Compose (empfohlen)
 
 ```bash
