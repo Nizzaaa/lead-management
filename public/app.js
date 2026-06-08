@@ -80,6 +80,7 @@ async function init() {
   bindEvents();
   window.addEventListener("hashchange", router);
   router();
+  resumeJobs(); // noch laufende Recherchen nach Reload ins Dock zurückholen
 }
 
 function renderAiBadge(cfg) {
@@ -969,25 +970,57 @@ function closeResearchModal() {
   $("#researchModal").classList.add("hidden");
 }
 
-// Job registrieren und Polling starten.
-function addJob(jobId, label) {
-  jobs.set(jobId, { id: jobId, label, status: "running", steps: [], startTs: Date.now(), leadId: null });
+// Laufende Jobs in localStorage sichern, damit das Dock einen Seiten-Reload
+// übersteht (die Recherche läuft serverseitig weiter).
+const JOBS_KEY = "leadpilot_jobs";
+function persistJobs() {
+  const arr = [...jobs.values()].map((j) => ({ id: j.id, label: j.label, startTs: j.startTs }));
+  try { localStorage.setItem(JOBS_KEY, JSON.stringify(arr)); } catch {}
+}
+function dropJob(jobId) {
+  jobs.delete(jobId);
+  persistJobs();
+  renderDock();
+}
+
+// Job registrieren und Polling starten. startTs optional (für Wiederaufnahme).
+function addJob(jobId, label, startTs) {
+  jobs.set(jobId, { id: jobId, label, status: "running", steps: [], startTs: startTs || Date.now(), leadId: null });
+  persistJobs();
   renderDock();
   pollJob(jobId);
 }
 
+// Nimmt nach einem Seiten-Reload noch laufende Jobs aus localStorage wieder auf.
+function resumeJobs() {
+  let arr = [];
+  try { arr = JSON.parse(localStorage.getItem(JOBS_KEY) || "[]"); } catch {}
+  if (!Array.isArray(arr)) return;
+  for (const j of arr) {
+    if (j && j.id && !jobs.has(j.id)) addJob(j.id, j.label || "Recherche", j.startTs);
+  }
+}
+
 // Pollt EINEN Job unabhängig vom Modal bis fertig/Fehler.
 async function pollJob(jobId) {
+  let misses = 0;
   while (true) {
     await sleep(1500);
     const job = jobs.get(jobId);
     if (!job) return; // wurde entfernt
-    let data;
+    let res;
     try {
-      data = await api(`/api/research/${jobId}`);
+      res = await fetch(`/api/research/${jobId}`, { headers: { "Content-Type": "application/json" } });
     } catch (err) {
+      if (++misses > 20) { dropJob(jobId); return; }
       continue; // einzelne fehlgeschlagene Polls tolerieren
     }
+    if (res.status === 404) { dropJob(jobId); return; } // Job abgelaufen/unbekannt
+    let data;
+    try { data = await res.json(); } catch { continue; }
+    if (!res.ok) { if (++misses > 20) { dropJob(jobId); return; } continue; }
+    misses = 0;
+
     job.steps = data.steps || job.steps;
     job.status = data.status;
     if (data.lead && data.lead.id) job.leadId = data.lead.id;
@@ -996,8 +1029,7 @@ async function pollJob(jobId) {
 
     if (data.status === "done") {
       const wasOpen = modalJobId === jobId;
-      jobs.delete(jobId);
-      renderDock();
+      dropJob(jobId);
       toast(`✅ Recherche fertig: ${job.label}`, "success");
       await refresh();
       if (wasOpen) {
@@ -1008,8 +1040,7 @@ async function pollJob(jobId) {
     }
     if (data.status === "error") {
       const wasOpen = modalJobId === jobId;
-      jobs.delete(jobId);
-      renderDock();
+      dropJob(jobId);
       toast(data.error || `Recherche fehlgeschlagen: ${job.label}`, "error");
       if (wasOpen) closeResearchModal();
       return;
