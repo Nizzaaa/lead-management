@@ -19,10 +19,10 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 - **Detailseite pro Lead** mit Inline-Bearbeitung von **allem**: Stammdaten *und* sämtliche Recherche-Inhalte (Felder inkl. Quellen, Texte, Potenziale)
 - Pipeline-Status: `neu → kontaktiert → qualifiziert → angebot → gewonnen / verloren`
 - Manuelles Bearbeiten (Status, Wert, Notizen, Stammdaten), Live-Suche und Status-Filter
-- Dashboard mit Kennzahlen: Anzahl Leads, Pipeline-Wert, gewonnener Umsatz, Abschlussquote
+- Dashboard mit Kennzahlen: Anzahl Leads, **gewichteter Pipeline-Wert** (Erwartungswert = Σ Wert × Abschlusswahrscheinlichkeit je Status, in den Einstellungen anpassbar), gewonnener Umsatz, Abschlussquote
 
-**KI-Funktionen** (🤖 über das Anthropic-Modell `claude-opus-4-8`) – nutzen das Recherche-Dossier als Grundlage
-- **⚡ KI-Score** – bewertet das Abschlusspotenzial eines Leads von 0–100 inkl. Schulnote und Begründung
+**KI-Funktionen** – nutzen das Recherche-Dossier als Grundlage
+- **⚡ KI-Score** – wird automatisch nach der Recherche ermittelt; bewertet das Abschlusspotenzial von 0–100 inkl. Schulnote, Begründung **und einer Auftragswert-Schätzung** (befüllt den Wert, wenn noch keiner gepflegt ist)
 - **✉️ E-Mail-Entwurf** – generiert eine personalisierte Akquise-E-Mail, die an einen belegten Ansatzpunkt anknüpft
 - **💡 Empfehlungen** – schlägt die nächsten besten Schritte ("Next Best Action") für den Cold Call vor
 

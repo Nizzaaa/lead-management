@@ -8,6 +8,7 @@ let activeFilter = "alle";
 let searchTerm = "";
 let models = [];
 let currentModel = "";
+let stageProbabilities = {};
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
 // Aktuell geöffnete Detailseite (Lead-ID) und ob sie im Bearbeiten-Modus ist.
@@ -67,6 +68,7 @@ async function init() {
     aiEnabled = cfg.aiEnabled;
     models = cfg.models || [];
     currentModel = cfg.model || "";
+    stageProbabilities = cfg.stageProbabilities || {};
     renderAiBadge(cfg);
     renderStatusFilters();
     renderViewToggle();
@@ -152,7 +154,11 @@ async function refresh() {
 
 function renderStats(stats) {
   $("#statTotal").textContent = stats.total;
-  $("#statPipeline").textContent = fmtEuro(stats.pipelineValue);
+  // Primär der gewichtete (Erwartungs-)Wert; roh als Tooltip.
+  const weighted = stats.weightedPipelineValue != null ? stats.weightedPipelineValue : stats.pipelineValue;
+  $("#statPipeline").textContent = fmtEuro(Math.round(weighted));
+  const card = $("#statPipeline").closest(".stat-card");
+  if (card) card.title = `Roh (ungewichtet): ${fmtEuro(Math.round(stats.pipelineValue || 0))}\nGewichtet (Σ Wert × Wahrscheinlichkeit): ${fmtEuro(Math.round(weighted))}`;
   $("#statWon").textContent = fmtEuro(stats.wonValue);
   $("#statConversion").textContent = stats.conversion + " %";
 }
@@ -362,6 +368,7 @@ function detailViewHtml(l) {
            <strong>KI-Score · Note ${esc(ai.grade)}</strong>
            ${ai.reasoning ? `<p>${esc(ai.reasoning)}</p>` : ""}
            ${ai.nextStep ? `<p class="next-step">➡️ ${esc(ai.nextStep)}</p>` : ""}
+           ${ai.valueReasoning ? `<p class="value-reason">💶 Wertschätzung: ${esc(ai.valueReasoning)}</p>` : ""}
          </div>
        </div>`
     : `<p class="d-muted">Noch keine KI-Bewertung. ${aiEnabled ? "" : "(KI nicht konfiguriert)"}</p>`;
@@ -817,16 +824,33 @@ async function deleteLead(id, fromDetail = false) {
 }
 
 // --- Einstellungen ---------------------------------------------------------
+// Wahrscheinlichkeitsfelder für die offenen Status (ohne gewonnen/verloren).
+function renderStageProbFields() {
+  const open = statuses.filter((s) => s !== "gewonnen" && s !== "verloren");
+  $("#stageProbFields").innerHTML = open
+    .map(
+      (s) => `<div class="prob-item">
+        <span class="prob-label">${esc(s)}</span>
+        <input type="number" min="0" max="100" step="5" data-prob="${esc(s)}" value="${Number(stageProbabilities[s] ?? 0)}" />
+        <span class="prob-pct">%</span>
+      </div>`
+    )
+    .join("");
+}
+
 function openSettingsModal() {
   const sel = $("#settingsModel");
-  if (!models.length) {
-    toast("Keine Modelle verfügbar (KI nicht konfiguriert)", "error");
-    return;
+  if (models.length) {
+    sel.innerHTML = models
+      .map((m) => `<option value="${esc(m.id)}">${esc(m.label || m.id)}</option>`)
+      .join("");
+    sel.value = currentModel;
+    sel.disabled = false;
+  } else {
+    sel.innerHTML = `<option>KI nicht konfiguriert (ANTHROPIC_API_KEY fehlt)</option>`;
+    sel.disabled = true;
   }
-  sel.innerHTML = models
-    .map((m) => `<option value="${esc(m.id)}">${esc(m.label || m.id)}</option>`)
-    .join("");
-  sel.value = currentModel;
+  renderStageProbFields();
   $("#settingsModal").classList.remove("hidden");
 }
 
@@ -836,15 +860,20 @@ function closeSettingsModal() {
 
 async function saveSettings(e) {
   e.preventDefault();
-  const model = $("#settingsModel").value;
+  const body = {};
+  if (models.length) body.model = $("#settingsModel").value;
+  const probs = {};
+  document.querySelectorAll("#stageProbFields [data-prob]").forEach((el) => {
+    probs[el.dataset.prob] = Number(el.value);
+  });
+  body.stageProbabilities = probs;
   try {
-    const cfg = await api("/api/settings", {
-      method: "PUT",
-      body: JSON.stringify({ model }),
-    });
+    const cfg = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
     currentModel = cfg.model;
+    stageProbabilities = cfg.stageProbabilities || stageProbabilities;
     renderAiBadge({ aiEnabled, model: currentModel });
-    toast("Modell gespeichert: " + currentModel.replace("claude-", ""), "success");
+    await refresh(); // Pipeline-Wert mit den neuen Gewichten neu berechnen
+    toast("Einstellungen gespeichert", "success");
     closeSettingsModal();
   } catch (err) {
     toast(err.message, "error");

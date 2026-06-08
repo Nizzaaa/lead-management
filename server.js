@@ -47,6 +47,28 @@ const aiEnabled = () => Boolean(anthropic);
 
 const STATUSES = ["neu", "kontaktiert", "qualifiziert", "angebot", "gewonnen", "verloren"];
 
+// Abschlusswahrscheinlichkeit je Status (Prozent) für den gewichteten
+// Pipeline-Wert (Erwartungswert). In den Einstellungen anpassbar und in der
+// DB gespeichert. Startwerte sind übliche B2B-Richtwerte – über echte Deals
+// kalibrieren.
+const DEFAULT_STAGE_PROBABILITIES = {
+  neu: 10, kontaktiert: 20, qualifiziert: 40, angebot: 65, gewonnen: 100, verloren: 0,
+};
+const STAGE_PROB_SETTING_KEY = "stage_probabilities";
+let stageProbabilities = { ...DEFAULT_STAGE_PROBABILITIES };
+
+function sanitizeStageProbabilities(input) {
+  const out = { ...DEFAULT_STAGE_PROBABILITIES };
+  if (input && typeof input === "object") {
+    for (const s of STATUSES) {
+      if (input[s] === undefined || input[s] === "") continue;
+      const n = Math.round(Number(input[s]));
+      if (Number.isFinite(n)) out[s] = Math.max(0, Math.min(100, n));
+    }
+  }
+  return out;
+}
+
 function sanitizeLead(body = {}) {
   const clean = (v) => (typeof v === "string" ? v.trim() : "");
   let status = clean(body.status).toLowerCase();
@@ -190,23 +212,30 @@ app.get("/api/config", (req, res) => {
     model: currentModel,
     models: AVAILABLE_MODELS,
     statuses: STATUSES,
+    stageProbabilities,
   });
 });
 
 // Einstellungen lesen
 app.get("/api/settings", (req, res) => {
-  res.json({ model: currentModel, models: AVAILABLE_MODELS });
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities });
 });
 
-// Einstellungen speichern (aktuell: KI-Modell)
+// Einstellungen speichern (KI-Modell und/oder Abschlusswahrscheinlichkeiten).
 app.put("/api/settings", wrap(async (req, res) => {
-  const model = typeof req.body.model === "string" ? req.body.model.trim() : "";
-  if (!isValidModel(model)) {
-    return res.status(400).json({ error: "Unbekanntes Modell." });
+  if (req.body.model !== undefined) {
+    const model = typeof req.body.model === "string" ? req.body.model.trim() : "";
+    if (!isValidModel(model)) {
+      return res.status(400).json({ error: "Unbekanntes Modell." });
+    }
+    await db.setSetting(MODEL_SETTING_KEY, model);
+    currentModel = model;
   }
-  await db.setSetting(MODEL_SETTING_KEY, model);
-  currentModel = model;
-  res.json({ model: currentModel, models: AVAILABLE_MODELS });
+  if (req.body.stageProbabilities !== undefined) {
+    stageProbabilities = sanitizeStageProbabilities(req.body.stageProbabilities);
+    await db.setSetting(STAGE_PROB_SETTING_KEY, JSON.stringify(stageProbabilities));
+  }
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities });
 }));
 
 // Liste aller Leads
@@ -216,7 +245,7 @@ app.get("/api/leads", wrap(async (req, res) => {
 
 // Statistiken für das Dashboard
 app.get("/api/stats", wrap(async (req, res) => {
-  res.json(await db.getStats(STATUSES));
+  res.json(await db.getStats(STATUSES, stageProbabilities));
 }));
 
 // Lead anlegen
@@ -234,11 +263,11 @@ app.post("/api/leads", wrap(async (req, res) => {
 async function scoreAfterResearch(lead, onProgress) {
   if (!lead) return lead;
   try {
-    onProgress("⚡ Ermittle KI-Score…");
-    const ai = await computeLeadScore(lead);
-    const updated = await db.setLeadAi(lead.id, ai);
-    onProgress(`✅ KI-Score: ${ai.score}/100 (Note ${ai.grade})`);
-    return updated || lead;
+    onProgress("⚡ Ermittle KI-Score & Wertschätzung…");
+    const { lead: updated, ai } = await applyScore(lead);
+    const wert = ai.value > 0 ? ` · geschätzter Wert ${ai.value.toLocaleString("de-DE")} €` : "";
+    onProgress(`✅ KI-Score: ${ai.score}/100 (Note ${ai.grade})${wert}`);
+    return updated;
   } catch (err) {
     console.error("Auto-Score fehlgeschlagen:", err.message);
     onProgress("⚠️ KI-Score konnte nicht ermittelt werden (später nachholbar).");
@@ -376,8 +405,17 @@ async function callClaude(system, userText, { json = false } = {}) {
             grade: { type: "string", enum: ["A", "B", "C", "D"] },
             reasoning: { type: "string" },
             nextStep: { type: "string" },
+            value: {
+              type: "integer",
+              description:
+                "Geschätzter Auftragswert in EUR (Einmalprojekt; bei laufenden/SaaS-Erlösen den 12-Monats-Wert). 0, wenn nicht seriös schätzbar.",
+            },
+            valueReasoning: {
+              type: "string",
+              description: "Kurze Begründung der Wertschätzung (Signale, angenommene Leistung).",
+            },
           },
-          required: ["score", "grade", "reasoning", "nextStep"],
+          required: ["score", "grade", "reasoning", "nextStep", "value", "valueReasoning"],
           additionalProperties: false,
         },
       },
@@ -396,23 +434,47 @@ function requireAi(res) {
   return true;
 }
 
-// Ermittelt den KI-Score für einen Lead und liefert das ai-Objekt zurück.
-// Wird sowohl vom Score-Endpoint als auch automatisch nach jeder Recherche genutzt.
+// Ermittelt KI-Score UND eine Wertschätzung für einen Lead. Liefert das
+// ai-Objekt plus den geschätzten Wert. Wird vom Score-Endpoint und automatisch
+// nach jeder Recherche genutzt.
 async function computeLeadScore(lead) {
   const raw = await callClaude(
-    "Du bist ein erfahrener B2B-Vertriebsanalyst. Bewerte die Qualität und das Abschlusspotenzial eines Leads. " +
-      "Antworte ausschließlich im geforderten JSON-Format. Halte 'reasoning' und 'nextStep' kurz und auf Deutsch.",
-    `Bewerte diesen Lead von 0 (kalt) bis 100 (sehr heiß) und vergib eine Schulnote A–D.\n\n${leadContext(lead)}`,
+    "Du bist ein erfahrener B2B-Vertriebsanalyst für FU/GE Solutions (Integration & Entwicklung " +
+      "individueller KI-Systeme im Mittelstand/Handwerk). Bewerte Qualität und Abschlusspotenzial eines Leads " +
+      "und schätze den realistischen Auftragswert in EUR. Leite den Wert aus belegten Signalen ab " +
+      "(Unternehmensgröße/Standorte/Branche, passende Leistung: Potenzialanalyse, Workshop, KI-Integration oder " +
+      "TelKI-SaaS). Sei eher konservativ; wenn keine seriöse Schätzung möglich ist, value=0. " +
+      "Antworte ausschließlich im geforderten JSON-Format, kurz und auf Deutsch.",
+    `Bewerte diesen Lead von 0 (kalt) bis 100 (sehr heiß), vergib eine Schulnote A–D und schätze den Auftragswert.\n\n${leadContext(lead)}`,
     { json: true }
   );
   const result = JSON.parse(raw);
+  let value = Math.round(Number(result.value));
+  if (!Number.isFinite(value) || value < 0) value = 0;
   return {
     score: Math.max(0, Math.min(100, Number(result.score) || 0)),
     grade: result.grade || "C",
     reasoning: result.reasoning || "",
     nextStep: result.nextStep || "",
+    value,
+    valueReasoning: result.valueReasoning || "",
     scoredAt: new Date().toISOString(),
   };
+}
+
+// Persistiert Score + Wertschätzung. Der geschätzte Wert wird nur übernommen,
+// wenn noch kein Wert manuell gepflegt wurde (überschreibt nichts).
+async function applyScore(lead) {
+  const r = await computeLeadScore(lead);
+  const ai = {
+    score: r.score, grade: r.grade, reasoning: r.reasoning,
+    nextStep: r.nextStep, valueReasoning: r.valueReasoning, scoredAt: r.scoredAt,
+  };
+  let updated = await db.setLeadAi(lead.id, ai);
+  if (r.value > 0 && (!lead.value || Number(lead.value) === 0)) {
+    updated = await db.updateLead(lead.id, sanitizeLead({ ...(updated || lead), value: r.value }));
+  }
+  return { lead: updated || lead, ai: r };
 }
 
 // KI-Bewertung / Lead-Scoring
@@ -421,8 +483,7 @@ app.post("/api/leads/:id/score", wrap(async (req, res) => {
   const lead = await db.getLead(req.params.id);
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
   try {
-    const ai = await computeLeadScore(lead);
-    const updated = await db.setLeadAi(lead.id, ai);
+    const { lead: updated } = await applyScore(lead);
     res.json(updated);
   } catch (err) {
     console.error("Scoring-Fehler:", err.message);
@@ -483,6 +544,13 @@ db.init()
       if (saved && isValidModel(saved)) currentModel = saved;
     } catch (err) {
       console.warn("Modell-Einstellung konnte nicht geladen werden:", err.message);
+    }
+    // Gespeicherte Abschlusswahrscheinlichkeiten laden.
+    try {
+      const savedProb = await db.getSetting(STAGE_PROB_SETTING_KEY);
+      if (savedProb) stageProbabilities = sanitizeStageProbabilities(JSON.parse(savedProb));
+    } catch (err) {
+      console.warn("Wahrscheinlichkeiten konnten nicht geladen werden:", err.message);
     }
     app.listen(PORT, () => {
       console.log(`Lead-Management läuft auf http://localhost:${PORT}`);

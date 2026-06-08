@@ -161,24 +161,32 @@ async function setSetting(key, value) {
   );
 }
 
-async function getStats(statuses) {
+// probabilities: { status: Prozent } – gewichtet den offenen Pipeline-Wert nach
+// Abschlusswahrscheinlichkeit (Erwartungswert). Offen = nicht gewonnen/verloren.
+async function getStats(statuses, probabilities = {}) {
   const { rows } = await pool.query(
     "SELECT status, COUNT(*)::int AS count, COALESCE(SUM(value), 0)::float AS sum FROM leads GROUP BY status"
   );
   const byStatus = {};
   for (const s of statuses) byStatus[s] = 0;
   let total = 0;
-  let pipelineValue = 0;
+  let pipelineValue = 0; // roh (ungewichtet)
+  let weightedPipelineValue = 0; // Σ value × Wahrscheinlichkeit
   let wonValue = 0;
   for (const r of rows) {
     byStatus[r.status] = r.count;
     total += r.count;
-    if (r.status === "gewonnen") wonValue += r.sum;
-    else if (r.status !== "verloren") pipelineValue += r.sum;
+    if (r.status === "gewonnen") {
+      wonValue += r.sum;
+    } else if (r.status !== "verloren") {
+      pipelineValue += r.sum;
+      const p = Number(probabilities[r.status]);
+      weightedPipelineValue += r.sum * ((Number.isFinite(p) ? p : 0) / 100);
+    }
   }
   const closed = (byStatus["gewonnen"] || 0) + (byStatus["verloren"] || 0);
   const conversion = closed > 0 ? Math.round(((byStatus["gewonnen"] || 0) / closed) * 100) : 0;
-  return { total, byStatus, pipelineValue, wonValue, conversion };
+  return { total, byStatus, pipelineValue, weightedPipelineValue, wonValue, conversion };
 }
 
 module.exports = {
