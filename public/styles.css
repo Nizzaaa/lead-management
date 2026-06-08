@@ -421,6 +421,33 @@ a { color: inherit; }
 .toast.error { border-color: var(--red); color: #fecaca; }
 .toast.success { border-color: var(--green); color: #bbf7d0; }
 
+/* Dock für laufende Recherche-Jobs (unten rechts) */
+.job-dock {
+  position: fixed; right: 20px; bottom: 20px; z-index: 90;
+  display: flex; flex-direction: column; gap: 8px; max-width: 320px;
+}
+.job-chip {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface); border: 1px solid var(--primary);
+  border-radius: 12px; padding: 10px 14px; cursor: pointer;
+  box-shadow: var(--shadow); color: var(--text);
+  text-align: left; font: inherit;
+  animation: dock-in 0.18s ease-out;
+}
+.job-chip:hover { background: var(--surface-2); }
+.job-chip .spinner { flex-shrink: 0; }
+.job-chip-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.job-chip-title { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.job-chip-step {
+  font-size: 11.5px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px;
+}
+@keyframes dock-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+@media (max-width: 720px) {
+  .job-dock { right: 12px; bottom: 12px; left: 12px; max-width: none; }
+}
+
 .hidden { display: none !important; }
 
 /* Ansichts-Umschalter (Karten / Board) */

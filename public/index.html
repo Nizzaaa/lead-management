@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LeadPilot · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=9" />
+  <link rel="stylesheet" href="styles.css?v=10" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
 </head>
 <body>
@@ -65,7 +65,7 @@
         <label>Unternehmens-Website oder Name
           <input type="text" id="researchInput" placeholder="z. B. muster-gmbh.de oder Muster GmbH" autocomplete="off" />
         </label>
-        <p class="hint">Die KI recherchiert automatisch Stammdaten, Bewertungen, Schwachstellen und FU/GE-Potenziale, ermittelt den KI-Score und legt den Lead an.</p>
+        <p class="hint" id="researchHint">Die KI recherchiert automatisch Stammdaten, Bewertungen, Schwachstellen und FU/GE-Potenziale, ermittelt den KI-Score und legt den Lead an. Du kannst dieses Fenster jederzeit schließen – die Recherche läuft im Hintergrund weiter (unten rechts).</p>
         <div id="researchLoading" class="ai-loading hidden"><span class="spinner"></span> Recherchiere… <span id="researchElapsed" class="elapsed">0:00</span> · meist 1–2 Minuten</div>
         <ul id="researchSteps" class="research-steps hidden"></ul>
         <div class="form-actions">
@@ -137,8 +137,11 @@
     </div>
   </div>
 
+  <!-- Dock für laufende Recherche-Jobs (unten rechts) -->
+  <div id="jobDock" class="job-dock hidden" aria-live="polite"></div>
+
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=9"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>

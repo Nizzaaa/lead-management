@@ -688,6 +688,12 @@ function bindEvents() {
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
   $("#researchForm").addEventListener("submit", submitResearch);
 
+  // Dock: Klick auf einen laufenden Job öffnet wieder das Detail-Modal.
+  $("#jobDock").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-job]");
+    if (b) openJobModal(b.dataset.job);
+  });
+
   $("#settingsBtn").addEventListener("click", openSettingsModal);
   $("#closeSettingsModal").addEventListener("click", closeSettingsModal);
   $("#cancelSettingsBtn").addEventListener("click", closeSettingsModal);
@@ -880,16 +886,42 @@ async function saveSettings(e) {
   }
 }
 
-// --- Lead-Recherche --------------------------------------------------------
+// --- Lead-Recherche (Hintergrund-Jobs + Dock) ------------------------------
+// Laufende Recherche-Jobs: jobId -> { id, label, status, steps, startTs, leadId }
+const jobs = new Map();
+let modalJobId = null; // welchen Job zeigt das Modal gerade (null = frische Eingabe)?
+
+// Öffnet das Modal für eine NEUE Recherche-Eingabe.
 function openResearchModal() {
+  modalJobId = null;
+  stopResearchTimer();
   $("#researchForm").reset();
+  $("#researchInput").disabled = false;
+  $("#researchHint").classList.remove("hidden");
   $("#researchLoading").classList.add("hidden");
+  $("#startResearchBtn").classList.remove("hidden");
+  $("#cancelResearchBtn").textContent = "Abbrechen";
   const steps = $("#researchSteps");
   steps.classList.add("hidden");
   steps.innerHTML = "";
-  setResearchBusy(false);
   $("#researchModal").classList.remove("hidden");
   $("#researchInput").focus();
+}
+
+// Öffnet das Modal als Detailansicht eines bereits laufenden Jobs.
+function openJobModal(jobId) {
+  const job = jobs.get(jobId);
+  if (!job) return;
+  modalJobId = jobId;
+  $("#researchInput").value = job.label;
+  $("#researchInput").disabled = true;
+  $("#researchHint").classList.add("hidden");
+  $("#startResearchBtn").classList.add("hidden");
+  $("#cancelResearchBtn").textContent = "Im Hintergrund weiter ↓";
+  $("#researchLoading").classList.remove("hidden");
+  renderSteps(job.steps, job.status !== "running");
+  startResearchTimer(job.startTs);
+  $("#researchModal").classList.remove("hidden");
 }
 
 // Zeigt die Recherche-Schritte als Timeline. Der jeweils letzte Schritt ist
@@ -908,17 +940,17 @@ function renderSteps(list, finished = false) {
   el.scrollTop = el.scrollHeight;
 }
 
-// Live-Timer für die Recherchedauer (mm:ss).
+// Live-Timer für die Recherchedauer (mm:ss), gerechnet ab Job-Start.
 let researchTimerId = null;
-function startResearchTimer() {
+function fmtElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+function startResearchTimer(startTs) {
   stopResearchTimer();
   const el = $("#researchElapsed");
-  const start = Date.now();
-  const tick = () => {
-    if (!el) return;
-    const s = Math.floor((Date.now() - start) / 1000);
-    el.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-  };
+  const base = startTs || Date.now();
+  const tick = () => { if (el) el.textContent = fmtElapsed(Date.now() - base); };
   tick();
   researchTimerId = setInterval(tick, 1000);
 }
@@ -929,46 +961,84 @@ function stopResearchTimer() {
   }
 }
 
-// Pollt einen Recherche-Job bis er fertig ist und zeigt den Fortschritt an.
-async function trackResearch(jobId, openAfter = false) {
-  renderSteps([]);
+// Modal schließen = minimieren. Der Job läuft serverseitig weiter und bleibt
+// im Dock sichtbar.
+function closeResearchModal() {
+  stopResearchTimer();
+  modalJobId = null;
+  $("#researchModal").classList.add("hidden");
+}
+
+// Job registrieren und Polling starten.
+function addJob(jobId, label) {
+  jobs.set(jobId, { id: jobId, label, status: "running", steps: [], startTs: Date.now(), leadId: null });
+  renderDock();
+  pollJob(jobId);
+}
+
+// Pollt EINEN Job unabhängig vom Modal bis fertig/Fehler.
+async function pollJob(jobId) {
   while (true) {
     await sleep(1500);
+    const job = jobs.get(jobId);
+    if (!job) return; // wurde entfernt
     let data;
     try {
       data = await api(`/api/research/${jobId}`);
     } catch (err) {
-      continue;
+      continue; // einzelne fehlgeschlagene Polls tolerieren
     }
-    renderSteps(data.steps);
+    job.steps = data.steps || job.steps;
+    job.status = data.status;
+    if (data.lead && data.lead.id) job.leadId = data.lead.id;
+    if (modalJobId === jobId) renderSteps(job.steps, data.status !== "running");
+    renderDock();
+
     if (data.status === "done") {
-      renderSteps(data.steps, true);
-      toast("Recherche abgeschlossen", "success");
-      closeResearchModal();
+      const wasOpen = modalJobId === jobId;
+      jobs.delete(jobId);
+      renderDock();
+      toast(`✅ Recherche fertig: ${job.label}`, "success");
       await refresh();
-      if (data.lead && data.lead.id) location.hash = "#/lead/" + encodeURIComponent(data.lead.id);
+      if (wasOpen) {
+        closeResearchModal();
+        if (job.leadId) location.hash = "#/lead/" + encodeURIComponent(job.leadId);
+      }
       return;
     }
     if (data.status === "error") {
-      toast(data.error || "Recherche fehlgeschlagen", "error");
-      setResearchBusy(false);
+      const wasOpen = modalJobId === jobId;
+      jobs.delete(jobId);
+      renderDock();
+      toast(data.error || `Recherche fehlgeschlagen: ${job.label}`, "error");
+      if (wasOpen) closeResearchModal();
       return;
     }
   }
 }
 
-function closeResearchModal() {
-  stopResearchTimer();
-  $("#researchModal").classList.add("hidden");
-}
-
-function setResearchBusy(busy) {
-  $("#startResearchBtn").disabled = busy;
-  $("#cancelResearchBtn").disabled = busy;
-  $("#researchInput").disabled = busy;
-  $("#researchLoading").classList.toggle("hidden", !busy);
-  if (busy) startResearchTimer();
-  else stopResearchTimer();
+// Rendert das Dock laufender Jobs unten rechts.
+function renderDock() {
+  const dock = $("#jobDock");
+  const list = [...jobs.values()];
+  if (!list.length) {
+    dock.classList.add("hidden");
+    dock.innerHTML = "";
+    return;
+  }
+  dock.classList.remove("hidden");
+  dock.innerHTML = list
+    .map((j) => {
+      const last = j.steps && j.steps.length ? j.steps[j.steps.length - 1].text : "Starte…";
+      return `<button class="job-chip" data-job="${esc(j.id)}" title="Recherche-Fortschritt öffnen">
+        <span class="spinner"></span>
+        <span class="job-chip-body">
+          <span class="job-chip-title">🔎 ${esc(j.label)}</span>
+          <span class="job-chip-step">${esc(last)}</span>
+        </span>
+      </button>`;
+    })
+    .join("");
 }
 
 async function submitResearch(e) {
@@ -978,16 +1048,15 @@ async function submitResearch(e) {
     toast("Bitte Website oder Firmennamen eingeben", "error");
     return;
   }
-  setResearchBusy(true);
   try {
     const { jobId } = await api("/api/leads/research", {
       method: "POST",
       body: JSON.stringify({ input }),
     });
-    await trackResearch(jobId, true);
+    addJob(jobId, input);
+    openJobModal(jobId);
   } catch (err) {
     toast(err.message, "error");
-    setResearchBusy(false);
   }
 }
 
@@ -1012,19 +1081,15 @@ async function researchLead(id, btn) {
     body = { input: t };
     label = t;
   }
-  openResearchModal();
-  $("#researchInput").value = label;
-  setResearchBusy(true);
   try {
     const { jobId } = await api(`/api/leads/${id}/research`, {
       method: "POST",
       body: JSON.stringify(body),
     });
-    await trackResearch(jobId);
+    addJob(jobId, label);
+    openJobModal(jobId);
   } catch (err) {
     toast(err.message, "error");
-    setResearchBusy(false);
-    closeResearchModal();
   }
 }
 
