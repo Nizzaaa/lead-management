@@ -229,6 +229,23 @@ app.post("/api/leads", wrap(async (req, res) => {
   res.status(201).json(lead);
 }));
 
+// Ermittelt nach erfolgreicher Recherche automatisch den KI-Score und meldet
+// den Fortschritt. Ein Scoring-Fehler darf die Recherche nicht scheitern lassen.
+async function scoreAfterResearch(lead, onProgress) {
+  if (!lead) return lead;
+  try {
+    onProgress("⚡ Ermittle KI-Score…");
+    const ai = await computeLeadScore(lead);
+    const updated = await db.setLeadAi(lead.id, ai);
+    onProgress(`✅ KI-Score: ${ai.score}/100 (Note ${ai.grade})`);
+    return updated || lead;
+  } catch (err) {
+    console.error("Auto-Score fehlgeschlagen:", err.message);
+    onProgress("⚠️ KI-Score konnte nicht ermittelt werden (später nachholbar).");
+    return lead;
+  }
+}
+
 // Lead per Recherche anlegen: Eingabe = Firmenname ODER Website-URL.
 // Startet einen Hintergrund-Job und liefert sofort eine Job-ID zurück.
 app.post("/api/leads/research", wrap(async (req, res) => {
@@ -240,7 +257,8 @@ app.post("/api/leads/research", wrap(async (req, res) => {
   const job = startResearchJob(async (onProgress) => {
     const research = await researchCompany(anthropic, input, currentModel, onProgress);
     const data = { ...leadFromResearch(research, input), status: "neu", value: 0, notes: "" };
-    return db.createLead(data, research);
+    const lead = await db.createLead(data, research);
+    return scoreAfterResearch(lead, onProgress);
   });
   res.status(202).json({ jobId: job.id });
 }));
@@ -261,7 +279,8 @@ app.post("/api/leads/:id/research", wrap(async (req, res) => {
   const job = startResearchJob(async (onProgress) => {
     const research = await researchCompany(anthropic, input, currentModel, onProgress);
     const data = leadFromResearch(research, input);
-    return db.setLeadResearch(lead.id, research, data);
+    const updated = await db.setLeadResearch(lead.id, research, data);
+    return scoreAfterResearch(updated, onProgress);
   });
   res.status(202).json({ jobId: job.id });
 }));
@@ -377,26 +396,32 @@ function requireAi(res) {
   return true;
 }
 
+// Ermittelt den KI-Score für einen Lead und liefert das ai-Objekt zurück.
+// Wird sowohl vom Score-Endpoint als auch automatisch nach jeder Recherche genutzt.
+async function computeLeadScore(lead) {
+  const raw = await callClaude(
+    "Du bist ein erfahrener B2B-Vertriebsanalyst. Bewerte die Qualität und das Abschlusspotenzial eines Leads. " +
+      "Antworte ausschließlich im geforderten JSON-Format. Halte 'reasoning' und 'nextStep' kurz und auf Deutsch.",
+    `Bewerte diesen Lead von 0 (kalt) bis 100 (sehr heiß) und vergib eine Schulnote A–D.\n\n${leadContext(lead)}`,
+    { json: true }
+  );
+  const result = JSON.parse(raw);
+  return {
+    score: Math.max(0, Math.min(100, Number(result.score) || 0)),
+    grade: result.grade || "C",
+    reasoning: result.reasoning || "",
+    nextStep: result.nextStep || "",
+    scoredAt: new Date().toISOString(),
+  };
+}
+
 // KI-Bewertung / Lead-Scoring
 app.post("/api/leads/:id/score", wrap(async (req, res) => {
   if (!requireAi(res)) return;
   const lead = await db.getLead(req.params.id);
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
   try {
-    const raw = await callClaude(
-      "Du bist ein erfahrener B2B-Vertriebsanalyst. Bewerte die Qualität und das Abschlusspotenzial eines Leads. " +
-        "Antworte ausschließlich im geforderten JSON-Format. Halte 'reasoning' und 'nextStep' kurz und auf Deutsch.",
-      `Bewerte diesen Lead von 0 (kalt) bis 100 (sehr heiß) und vergib eine Schulnote A–D.\n\n${leadContext(lead)}`,
-      { json: true }
-    );
-    const result = JSON.parse(raw);
-    const ai = {
-      score: Math.max(0, Math.min(100, Number(result.score) || 0)),
-      grade: result.grade || "C",
-      reasoning: result.reasoning || "",
-      nextStep: result.nextStep || "",
-      scoredAt: new Date().toISOString(),
-    };
+    const ai = await computeLeadScore(lead);
     const updated = await db.setLeadAi(lead.id, ai);
     res.json(updated);
   } catch (err) {

@@ -863,14 +863,41 @@ function openResearchModal() {
   $("#researchInput").focus();
 }
 
-function renderSteps(list) {
+// Zeigt die Recherche-Schritte als Timeline. Der jeweils letzte Schritt ist
+// „aktiv" (pulsierender Punkt), abgeschlossene Schritte bekommen einen Haken-Punkt.
+function renderSteps(list, finished = false) {
   const el = $("#researchSteps");
   el.classList.remove("hidden");
-  el.innerHTML = (list || [])
-    .slice(-12)
-    .map((s) => `<li>${esc(s.text)}</li>`)
+  const items = (list || []).slice(-20);
+  el.innerHTML = items
+    .map((s, i) => {
+      const isLast = i === items.length - 1;
+      const cls = isLast && !finished ? "active" : "done";
+      return `<li class="${cls}"><span class="step-dot"></span><span class="step-text">${esc(s.text)}</span></li>`;
+    })
     .join("");
   el.scrollTop = el.scrollHeight;
+}
+
+// Live-Timer für die Recherchedauer (mm:ss).
+let researchTimerId = null;
+function startResearchTimer() {
+  stopResearchTimer();
+  const el = $("#researchElapsed");
+  const start = Date.now();
+  const tick = () => {
+    if (!el) return;
+    const s = Math.floor((Date.now() - start) / 1000);
+    el.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  };
+  tick();
+  researchTimerId = setInterval(tick, 1000);
+}
+function stopResearchTimer() {
+  if (researchTimerId) {
+    clearInterval(researchTimerId);
+    researchTimerId = null;
+  }
 }
 
 // Pollt einen Recherche-Job bis er fertig ist und zeigt den Fortschritt an.
@@ -886,6 +913,7 @@ async function trackResearch(jobId, openAfter = false) {
     }
     renderSteps(data.steps);
     if (data.status === "done") {
+      renderSteps(data.steps, true);
       toast("Recherche abgeschlossen", "success");
       closeResearchModal();
       await refresh();
@@ -901,6 +929,7 @@ async function trackResearch(jobId, openAfter = false) {
 }
 
 function closeResearchModal() {
+  stopResearchTimer();
   $("#researchModal").classList.add("hidden");
 }
 
@@ -909,6 +938,8 @@ function setResearchBusy(busy) {
   $("#cancelResearchBtn").disabled = busy;
   $("#researchInput").disabled = busy;
   $("#researchLoading").classList.toggle("hidden", !busy);
+  if (busy) startResearchTimer();
+  else stopResearchTimer();
 }
 
 async function submitResearch(e) {
