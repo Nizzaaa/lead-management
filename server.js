@@ -31,7 +31,11 @@ let anthropic = null;
 try {
   if (process.env.ANTHROPIC_API_KEY) {
     const Anthropic = require("@anthropic-ai/sdk");
-    anthropic = new Anthropic();
+    // maxRetries: das SDK wiederholt 429 (Rate-Limit) automatisch und respektiert
+    // dabei den retry-after-Header; auch abgebrochene Verbindungen ("terminated")
+    // werden erneut versucht. Default ist 2 – wir erhöhen für die langen,
+    // tool-lastigen Recherche-Streams.
+    anthropic = new Anthropic({ maxRetries: 5 });
   }
 } catch (err) {
   console.warn("Anthropic SDK konnte nicht geladen werden:", err.message);

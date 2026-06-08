@@ -17,9 +17,20 @@ function thinkingFor(model) {
 }
 
 // Serverseitige Tools – laufen vollständig auf Anthropic-Infrastruktur.
+// Wichtig für niedrige Nutzungs-Tiers (z. B. Tier 1: nur 30.000 Input-Tokens/min
+// bei Sonnet): Wir begrenzen Anzahl und Größe der Web-Zugriffe, damit eine
+// einzelne Recherche das Minuten-Limit (ITPM) nicht sprengt.
 const WEB_TOOLS = [
-  { type: "web_search_20260209", name: "web_search" },
-  { type: "web_fetch_20260209", name: "web_fetch" },
+  { type: "web_search_20260209", name: "web_search", max_uses: 5 },
+  {
+    type: "web_fetch_20260209",
+    name: "web_fetch",
+    max_uses: 5,
+    // Deckelt die pro Seite/PDF in den Kontext geladenen Tokens. Ohne Limit
+    // kostet eine große Seite schnell ~25.000 und ein PDF ~125.000 Tokens –
+    // das allein überschreitet das Tier-1-Limit.
+    max_content_tokens: 5000,
+  },
 ];
 
 // System-Prompt = der "lead-research"-Skill (Regeln, Quellen-Vorgehen, Struktur).
@@ -150,6 +161,24 @@ const RESEARCH_SCHEMA = {
   additionalProperties: false,
 };
 
+// Setzt genau EINEN rollenden Cache-Breakpoint auf den letzten Content-Block des
+// letzten Messages. Vorherige Breakpoints werden entfernt, damit wir das Limit
+// von 4 Breakpoints pro Anfrage nicht überschreiten (System-Prompt = 1, hier = 1).
+function setRollingCache(messages) {
+  for (const m of messages) {
+    if (Array.isArray(m.content)) {
+      for (const b of m.content) {
+        if (b && typeof b === "object" && b.cache_control) delete b.cache_control;
+      }
+    }
+  }
+  const last = messages[messages.length - 1];
+  if (last && Array.isArray(last.content) && last.content.length) {
+    const block = last.content[last.content.length - 1];
+    if (block && typeof block === "object") block.cache_control = { type: "ephemeral" };
+  }
+}
+
 // Phase 1: agentische Web-Recherche → Markdown-Dossier.
 // Server-Tools laufen in einer serverseitigen Schleife; bei Erreichen des
 // Iterationslimits liefert die API stop_reason "pause_turn" und wir setzen fort.
@@ -168,8 +197,12 @@ async function runResearch(anthropic, input, model, onProgress) {
   for (let i = 0; i < 16; i++) {
     const params = {
       model,
-      max_tokens: 16000,
-      system: RESEARCH_SYSTEM,
+      max_tokens: 8000,
+      // System-Prompt als cachebarer Block: Tools + System werden über die
+      // pause_turn-Fortsetzungen hinweg aus dem Cache gelesen. Cache-Reads
+      // zählen NICHT gegen das ITPM-Limit – das senkt die Last bei jeder
+      // Fortsetzung erheblich.
+      system: [{ type: "text", text: RESEARCH_SYSTEM, cache_control: { type: "ephemeral" } }],
       tools: WEB_TOOLS,
       messages,
     };
@@ -193,6 +226,10 @@ async function runResearch(anthropic, input, model, onProgress) {
       // Server hat das interne Tool-Limit erreicht – Assistant-Turn anhängen
       // und erneut senden, der Server nimmt automatisch wieder auf.
       messages.push({ role: "assistant", content: msg.content });
+      // Rollenden Cache-Breakpoint auf den zuletzt angehängten Turn setzen, damit
+      // der wachsende Verlauf (inkl. der großen Tool-Ergebnisse) bei der nächsten
+      // Anfrage aus dem Cache gelesen wird statt erneut als Input zu zählen.
+      setRollingCache(messages);
       onProgress("… recherchiere weiter");
       continue;
     }
