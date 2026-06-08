@@ -74,6 +74,7 @@ const logger = makeLogger();
 function actorFromRequest(req) {
   const h = req.headers || {};
   const v =
+    h["cf-access-authenticated-user-email"] ||
     h["x-forwarded-email"] ||
     h["x-forwarded-preferred-username"] ||
     h["x-forwarded-user"] ||

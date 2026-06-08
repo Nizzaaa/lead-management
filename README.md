@@ -45,7 +45,7 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 
 **Betrieb & Sicherheit**
 - **Strukturiertes Logging** (JSON-Lines) mit Request-ID, Dauer, Aktor und Redaction sensibler Felder; Level über `LOG_LEVEL`, lesbar mit `LOG_PRETTY=1`
-- **Einbettung in Nextcloud** als iframe inkl. Zugriffsschutz nur für Nextcloud-Benutzer – siehe [`docs/nextcloud-deployment.md`](docs/nextcloud-deployment.md). Der erkannte Benutzer (Proxy-Header) wird als Aktor in Timeline und Aufgaben übernommen.
+- **Einbettung in Nextcloud** als iframe mit SSO über **Cloudflare Access + Zitadel** (oder alternativ eigener `oauth2-proxy`) – siehe [`docs/nextcloud-deployment.md`](docs/nextcloud-deployment.md) und die fertigen Stacks unter [`deploy/`](deploy/). Der authentifizierte Benutzer (`Cf-Access-Authenticated-User-Email` bzw. Proxy-Header) wird als Aktor in Timeline und Aufgaben übernommen.
 
 ## Schnellstart mit Docker Compose (empfohlen)
 
