@@ -82,6 +82,10 @@ function sanitizeLead(body = {}) {
   if (!STATUSES.includes(status)) status = "neu";
   let value = Number(body.value);
   if (!Number.isFinite(value) || value < 0) value = 0;
+  // Wiedervorlage-Datum: ausschließlich YYYY-MM-DD akzeptieren, sonst null.
+  let nextStepAt = null;
+  const ns = clean(body.nextStepAt);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(ns) && !Number.isNaN(new Date(ns).getTime())) nextStepAt = ns;
   return {
     name: clean(body.name),
     company: clean(body.company),
@@ -91,6 +95,8 @@ function sanitizeLead(body = {}) {
     status,
     value,
     notes: clean(body.notes),
+    nextStep: clean(body.nextStep),
+    nextStepAt,
   };
 }
 
@@ -299,6 +305,13 @@ app.post("/api/leads", wrap(async (req, res) => {
   if (!data.name && !data.company) {
     return res.status(400).json({ error: "Name oder Firma ist erforderlich." });
   }
+  // Dublettenprüfung: bei Treffer warnen (außer der Nutzer erzwingt das Anlegen).
+  if (!req.body.force) {
+    const duplicates = await db.findDuplicateLeads({ email: data.email, company: data.company });
+    if (duplicates.length) {
+      return res.status(409).json({ error: "Möglicher Doppeleintrag.", duplicates });
+    }
+  }
   const lead = await db.createLead(data);
   await logActivity(lead.id, { type: "system", title: "Lead manuell angelegt" }, actor(req));
   res.status(201).json(lead);
@@ -407,6 +420,15 @@ app.put("/api/leads/:id", wrap(async (req, res) => {
     }, actor(req));
   }
   res.json(lead);
+}));
+
+// DSGVO-Datenauskunft: alle zu einem Lead gespeicherten Daten (Stammdaten +
+// Aktivitäten) als JSON – erfüllt Auskunft (Art. 15) und Übertragbarkeit (Art. 20).
+app.get("/api/leads/:id/export", wrap(async (req, res) => {
+  const lead = await db.getLead(req.params.id);
+  if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
+  const activities = await db.listActivities(lead.id);
+  res.json({ exportedAt: new Date().toISOString(), lead, activities });
 }));
 
 // Lead löschen
@@ -642,74 +664,6 @@ app.post("/api/leads/:id/activities", wrap(async (req, res) => {
 app.delete("/api/activities/:id", wrap(async (req, res) => {
   const ok = await db.deleteActivity(req.params.id);
   if (!ok) return res.status(404).json({ error: "Aktivität nicht gefunden." });
-  res.status(204).end();
-}));
-
-// --- Aufgaben / Wiedervorlagen ---------------------------------------------
-function sanitizeTask(body = {}) {
-  const clean = (v) => (typeof v === "string" ? v.trim() : "");
-  let dueAt = null;
-  if (body.dueAt) {
-    const d = new Date(body.dueAt);
-    if (!Number.isNaN(d.getTime())) dueAt = d.toISOString();
-  }
-  return { title: clean(body.title), notes: clean(body.notes), dueAt };
-}
-
-// Globale Aufgabenliste. ?status=open|done|all (Default: open).
-app.get("/api/tasks", wrap(async (req, res) => {
-  const status = ["open", "done", "all"].includes(req.query.status) ? req.query.status : "open";
-  res.json(await db.listTasks(status));
-}));
-
-// Aufgaben eines Leads.
-app.get("/api/leads/:id/tasks", wrap(async (req, res) => {
-  res.json(await db.listTasksByLead(req.params.id));
-}));
-
-// Aufgabe anlegen (optional an einen Lead gebunden).
-app.post("/api/tasks", wrap(async (req, res) => {
-  const data = sanitizeTask(req.body);
-  if (!data.title) return res.status(400).json({ error: "Titel ist erforderlich." });
-  let leadId = null;
-  if (req.body.leadId) {
-    const lead = await db.getLead(req.body.leadId);
-    if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
-    leadId = lead.id;
-  }
-  const task = await db.createTask({ ...data, leadId, actor: actor(req) });
-  if (leadId) {
-    const due = task.dueAt ? ` (fällig ${new Date(task.dueAt).toLocaleDateString("de-DE")})` : "";
-    await logActivity(leadId, { type: "system", title: `Aufgabe angelegt: ${task.title}${due}` }, actor(req));
-  }
-  res.status(201).json(task);
-}));
-
-// Aufgabe aktualisieren (erledigen, Titel/Fälligkeit ändern).
-app.put("/api/tasks/:id", wrap(async (req, res) => {
-  const patch = {};
-  if (req.body.title !== undefined) patch.title = String(req.body.title).trim();
-  if (req.body.notes !== undefined) patch.notes = String(req.body.notes).trim();
-  if (req.body.done !== undefined) patch.done = Boolean(req.body.done);
-  if (req.body.dueAt !== undefined) {
-    patch.dueAt = null;
-    if (req.body.dueAt) {
-      const d = new Date(req.body.dueAt);
-      if (!Number.isNaN(d.getTime())) patch.dueAt = d.toISOString();
-    }
-  }
-  const task = await db.updateTask(req.params.id, patch);
-  if (!task) return res.status(404).json({ error: "Aufgabe nicht gefunden." });
-  if (patch.done === true && task.leadId) {
-    await logActivity(task.leadId, { type: "system", title: `Aufgabe erledigt: ${task.title}` }, actor(req));
-  }
-  res.json(task);
-}));
-
-// Aufgabe löschen.
-app.delete("/api/tasks/:id", wrap(async (req, res) => {
-  const ok = await db.deleteTask(req.params.id);
-  if (!ok) return res.status(404).json({ error: "Aufgabe nicht gefunden." });
   res.status(204).end();
 }));
 

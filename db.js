@@ -12,6 +12,17 @@ pool.on("error", (err) => {
   console.error("Unerwarteter Fehler im DB-Pool:", err.message);
 });
 
+// Ein DATE-Wert (next_step_at) als reines "YYYY-MM-DD" – unabhängig davon, ob
+// der Treiber ein Date-Objekt oder bereits einen String liefert (zeitzonensicher).
+function toYMD(d) {
+  if (!d) return null;
+  if (d instanceof Date) {
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+  return String(d).slice(0, 10);
+}
+
 // Wandelt eine DB-Zeile (snake_case) in die vom Frontend erwartete Form (camelCase) um.
 function rowToLead(row) {
   return {
@@ -24,6 +35,8 @@ function rowToLead(row) {
     status: row.status,
     value: Number(row.value),
     notes: row.notes,
+    nextStep: row.next_step || "",
+    nextStepAt: toYMD(row.next_step_at),
     ai: row.ai, // JSONB → bereits als Objekt/null geparst
     research: row.research, // JSONB → strukturierte Lead-Recherche (oder null)
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
@@ -55,9 +68,12 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
           updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
         );
       `);
-      // Spalte für bestehende Datenbanken nachrüsten (idempotent).
+      // Spalten für bestehende Datenbanken nachrüsten (idempotent).
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS research JSONB;");
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_step TEXT NOT NULL DEFAULT '';");
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_step_at DATE;");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_next_step ON leads(next_step_at);");
       // Schlüssel/Wert-Tabelle für App-Einstellungen (z. B. gewähltes KI-Modell).
       await pool.query(`
         CREATE TABLE IF NOT EXISTS app_settings (
@@ -81,22 +97,10 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
         );
       `);
       await pool.query("CREATE INDEX IF NOT EXISTS idx_activities_lead ON activities(lead_id, created_at DESC);");
-      // Aufgaben / Wiedervorlagen: optional an einen Lead gebunden, mit Fälligkeit.
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS tasks (
-          id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          lead_id     UUID        REFERENCES leads(id) ON DELETE CASCADE,
-          title       TEXT        NOT NULL DEFAULT '',
-          notes       TEXT        NOT NULL DEFAULT '',
-          due_at      TIMESTAMPTZ,
-          done        BOOLEAN     NOT NULL DEFAULT false,
-          done_at     TIMESTAMPTZ,
-          actor       TEXT        NOT NULL DEFAULT '',
-          created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-      `);
-      await pool.query("CREATE INDEX IF NOT EXISTS idx_tasks_open ON tasks(done, due_at);");
-      await pool.query("CREATE INDEX IF NOT EXISTS idx_tasks_lead ON tasks(lead_id);");
+      // Aufgaben-Funktion wurde entfernt: Alttabelle und zugehörige
+      // System-Verlaufseinträge idempotent bereinigen.
+      await pool.query("DROP TABLE IF EXISTS tasks;");
+      await pool.query("DELETE FROM activities WHERE type = 'system' AND title LIKE 'Aufgabe %';");
       console.log("Datenbank verbunden, Schema bereit.");
       return;
     } catch (err) {
@@ -122,10 +126,11 @@ async function getLead(id) {
 
 async function createLead(data, research = null) {
   const { rows } = await pool.query(
-    `INSERT INTO leads (id, name, company, email, phone, source, status, value, notes, research)
-     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO leads (id, name, company, email, phone, source, status, value, notes, next_step, next_step_at, research)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING *`,
-    [data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes, research]
+    [data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes,
+     data.nextStep || "", data.nextStepAt || null, research]
   );
   return rowToLead(rows[0]);
 }
@@ -134,12 +139,26 @@ async function updateLead(id, data) {
   const { rows } = await pool.query(
     `UPDATE leads
      SET name = $2, company = $3, email = $4, phone = $5, source = $6,
-         status = $7, value = $8, notes = $9, updated_at = now()
+         status = $7, value = $8, notes = $9, next_step = $10, next_step_at = $11, updated_at = now()
      WHERE id = $1
      RETURNING *`,
-    [id, data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes]
+    [id, data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes,
+     data.nextStep || "", data.nextStepAt || null]
   );
   return rows[0] ? rowToLead(rows[0]) : null;
+}
+
+// Mögliche Dubletten zu E-Mail/Firma (case-insensitiv). Für die Warnung beim
+// manuellen Anlegen. Leere Kriterien werden ignoriert.
+async function findDuplicateLeads({ email = "", company = "" } = {}) {
+  const { rows } = await pool.query(
+    `SELECT * FROM leads
+     WHERE (NULLIF($1,'') IS NOT NULL AND lower(email)   = lower($1))
+        OR (NULLIF($2,'') IS NOT NULL AND lower(company) = lower($2))
+     ORDER BY created_at DESC LIMIT 5`,
+    [email, company]
+  );
+  return rows.map(rowToLead);
 }
 
 async function setLeadAi(id, ai) {
@@ -259,86 +278,6 @@ async function deleteActivity(id) {
   return rowCount > 0;
 }
 
-// --- Aufgaben / Wiedervorlagen ---------------------------------------------
-function rowToTask(row) {
-  return {
-    id: row.id,
-    leadId: row.lead_id,
-    title: row.title,
-    notes: row.notes,
-    dueAt: row.due_at instanceof Date ? row.due_at.toISOString() : row.due_at,
-    done: row.done,
-    doneAt: row.done_at instanceof Date ? row.done_at.toISOString() : row.done_at,
-    actor: row.actor,
-    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
-    // Bei der globalen Liste mitgelieferte Lead-Kurzinfos (per JOIN):
-    leadCompany: row.lead_company !== undefined ? row.lead_company : undefined,
-    leadName: row.lead_name !== undefined ? row.lead_name : undefined,
-  };
-}
-
-async function listTasksByLead(leadId) {
-  const { rows } = await pool.query(
-    "SELECT * FROM tasks WHERE lead_id = $1 ORDER BY done ASC, due_at ASC NULLS LAST, created_at DESC",
-    [leadId]
-  );
-  return rows.map(rowToTask);
-}
-
-// Globale Aufgabenliste mit Lead-Bezug. status: "open" | "done" | "all".
-async function listTasks(status = "open") {
-  let where = "";
-  if (status === "open") where = "WHERE t.done = false";
-  else if (status === "done") where = "WHERE t.done = true";
-  const { rows } = await pool.query(
-    `SELECT t.*, l.company AS lead_company, l.name AS lead_name
-     FROM tasks t LEFT JOIN leads l ON l.id = t.lead_id
-     ${where}
-     ORDER BY t.done ASC, t.due_at ASC NULLS LAST, t.created_at DESC`
-  );
-  return rows.map(rowToTask);
-}
-
-async function createTask(t) {
-  const { rows } = await pool.query(
-    `INSERT INTO tasks (lead_id, title, notes, due_at, actor)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING *`,
-    [t.leadId || null, t.title || "", t.notes || "", t.dueAt || null, t.actor || ""]
-  );
-  return rowToTask(rows[0]);
-}
-
-async function updateTask(id, t) {
-  const { rows } = await pool.query(
-    `UPDATE tasks
-     SET title = COALESCE($2, title),
-         notes = COALESCE($3, notes),
-         due_at = $4,
-         done = COALESCE($5, done),
-         done_at = CASE WHEN $5 IS TRUE THEN now() WHEN $5 IS FALSE THEN NULL ELSE done_at END
-     WHERE id = $1
-     RETURNING *`,
-    [id, t.title ?? null, t.notes ?? null, t.dueAt ?? null, t.done ?? null]
-  );
-  return rows[0] ? rowToTask(rows[0]) : null;
-}
-
-async function deleteTask(id) {
-  const { rowCount } = await pool.query("DELETE FROM tasks WHERE id = $1", [id]);
-  return rowCount > 0;
-}
-
-async function countOpenTasks() {
-  const { rows } = await pool.query(
-    `SELECT
-       COUNT(*)::int AS open,
-       COUNT(*) FILTER (WHERE due_at IS NOT NULL AND due_at < now())::int AS overdue
-     FROM tasks WHERE done = false`
-  );
-  return { open: rows[0].open, overdue: rows[0].overdue };
-}
-
 // --- Reporting -------------------------------------------------------------
 // Liefert die Daten für die Berichte-Seite in einem Rutsch.
 async function getReport(statuses, probabilities = {}) {
@@ -356,15 +295,6 @@ async function getReport(statuses, probabilities = {}) {
     value: (funnelMap[s] && funnelMap[s].value) || 0,
   }));
 
-  // Neue Leads je Monat (letzte 12 Monate, inkl. Lücken).
-  const createdRes = await pool.query(
-    `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS month, COUNT(*)::int AS count
-     FROM leads
-     WHERE created_at >= date_trunc('month', now()) - interval '11 months'
-     GROUP BY 1 ORDER BY 1`
-  );
-  const createdByMonth = fillMonths(createdRes.rows, "count");
-
   // Gewonnener Umsatz je Monat (Status gewonnen; updated_at als Abschlussdatum).
   const wonRes = await pool.query(
     `SELECT to_char(date_trunc('month', updated_at), 'YYYY-MM') AS month, COALESCE(SUM(value),0)::float AS value
@@ -374,26 +304,29 @@ async function getReport(statuses, probabilities = {}) {
   );
   const wonByMonth = fillMonths(wonRes.rows, "value");
 
-  // Quellen-Performance: Anzahl, gewonnen, Gesamtwert je Quelle (Top 8).
-  const sourceRes = await pool.query(
-    `SELECT COALESCE(NULLIF(source,''),'(ohne Quelle)') AS source,
-            COUNT(*)::int AS count,
-            COUNT(*) FILTER (WHERE status = 'gewonnen')::int AS won,
-            COALESCE(SUM(value),0)::float AS value
-     FROM leads GROUP BY 1 ORDER BY count DESC, value DESC LIMIT 8`
+  // Vertriebsaktivität je Monat: Anzahl Touchpoints (letzte 12 Monate, inkl. Lücken).
+  const activityRes = await pool.query(
+    `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS month, COUNT(*)::int AS count
+     FROM activities
+     WHERE created_at >= date_trunc('month', now()) - interval '11 months'
+     GROUP BY 1 ORDER BY 1`
   );
-  const bySource = sourceRes.rows.map((r) => ({
-    source: r.source, count: r.count, won: r.won, value: r.value,
-  }));
+  const activityByMonth = fillMonths(activityRes.rows, "count");
+
+  // Durchschnittlicher Vertriebszyklus in Tagen: Anlage → Abschluss (gewonnen).
+  // Näherung über updated_at als Abschlussdatum.
+  const cycleRes = await pool.query(
+    `SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 86400), 0)::float AS days
+     FROM leads WHERE status = 'gewonnen'`
+  );
+  const avgCycleDays = Math.round(cycleRes.rows[0].days);
 
   // Durchschnittlicher gewonnener Auftragswert.
   const avgWon = stats.byStatus["gewonnen"]
     ? Math.round(stats.wonValue / stats.byStatus["gewonnen"])
     : 0;
 
-  const tasks = await countOpenTasks();
-
-  return { stats, funnel, createdByMonth, wonByMonth, bySource, avgWon, tasks };
+  return { stats, funnel, wonByMonth, activityByMonth, avgWon, avgCycleDays };
 }
 
 // Füllt fehlende Monate der letzten 12 Monate mit 0 auf.
@@ -416,6 +349,7 @@ module.exports = {
   getLead,
   createLead,
   updateLead,
+  findDuplicateLeads,
   setLeadAi,
   setLeadResearch,
   updateLeadResearch,
@@ -426,11 +360,5 @@ module.exports = {
   listActivities,
   createActivity,
   deleteActivity,
-  listTasksByLead,
-  listTasks,
-  createTask,
-  updateTask,
-  deleteTask,
-  countOpenTasks,
   getReport,
 };

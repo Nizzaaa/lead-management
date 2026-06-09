@@ -18,7 +18,6 @@
     </a>
     <div class="topbar-actions">
       <a class="navlink" href="#/" data-nav-link="list">🗂 Leads</a>
-      <a class="navlink" href="#/tasks" data-nav-link="tasks">✅ Aufgaben <span id="taskBadge" class="nav-badge hidden">0</span></a>
       <a class="navlink" href="#/reports" data-nav-link="reports">📊 Berichte</a>
       <span id="aiBadge" class="badge badge-off" title="KI-Status">KI: …</span>
       <button id="settingsBtn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">⚙️</button>
@@ -39,6 +38,7 @@
     <section class="toolbar">
       <input type="search" id="search" class="search" placeholder="🔍 Suche nach Name, Firma, E-Mail…" />
       <div class="filters" id="statusFilters"></div>
+      <button class="chip due-chip" id="dueFilter" title="Nur fällige/überfällige Wiedervorlagen">⏰ Fällig <span id="dueCount" class="due-count hidden">0</span></button>
       <div class="view-toggle" id="viewToggle">
         <button class="chip active" data-view="list" title="Kartenansicht">🗂 Karten</button>
         <button class="chip" data-view="kanban" title="Kanban-Board nach Status">▦ Board</button>
@@ -56,9 +56,6 @@
 
   <!-- ============ DETAIL-ANSICHT (eine Seite pro Lead) ============ -->
   <main class="container hidden" id="detailView" aria-live="polite"></main>
-
-  <!-- ============ AUFGABEN-ANSICHT ============ -->
-  <main class="container hidden" id="tasksView" aria-live="polite"></main>
 
   <!-- ============ BERICHTE-ANSICHT ============ -->
   <main class="container hidden" id="reportsView" aria-live="polite"></main>
@@ -138,9 +135,50 @@
         <label>Status
           <select id="f_status"></select>
         </label>
+        <div class="form-row">
+          <label>Nächster Schritt<input type="text" id="f_next_step" placeholder="z. B. Angebot nachfassen" /></label>
+          <label>Wiedervorlage am<input type="date" id="f_next_step_at" /></label>
+        </div>
         <label>Notizen<textarea id="f_notes" rows="3" placeholder="Bedarf, Gesprächsnotizen, nächste Schritte…"></textarea></label>
         <div class="form-actions">
           <button type="button" class="btn" id="cancelBtn">Abbrechen</button>
+          <button type="submit" class="btn btn-primary">Speichern</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Dubletten-Warnung beim Anlegen -->
+  <div class="modal-overlay hidden" id="dupModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>Möglicher Doppeleintrag</h2>
+        <button class="icon-btn" id="dupClose" aria-label="Schließen">✕</button>
+      </div>
+      <p class="d-muted">Es gibt bereits Leads mit gleicher E-Mail oder Firma:</p>
+      <div id="dupBody"></div>
+      <div class="form-actions">
+        <button type="button" class="btn" id="dupCancel">Abbrechen</button>
+        <button type="button" class="btn" id="dupOpen">Bestehenden öffnen</button>
+        <button type="button" class="btn btn-primary" id="dupForce">Trotzdem anlegen</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Wiedervorlage planen/bearbeiten (eigenes, schlankes Modal) -->
+  <div class="modal-overlay hidden" id="nextStepModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2 id="nsModalTitle">Wiedervorlage planen</h2>
+        <button class="icon-btn" id="nsClose" aria-label="Schließen">✕</button>
+      </div>
+      <form id="nextStepForm" class="form">
+        <input type="hidden" id="ns_lead_id" />
+        <label>Nächster Schritt<input type="text" id="ns_step" placeholder="z. B. Angebot nachfassen" /></label>
+        <label>Wiedervorlage am<input type="date" id="ns_at" /></label>
+        <div class="form-actions">
+          <button type="button" class="btn" id="nsClear">Entfernen</button>
+          <button type="button" class="btn" id="nsCancel">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Speichern</button>
         </div>
       </form>

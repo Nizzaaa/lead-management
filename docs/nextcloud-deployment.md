@@ -81,7 +81,7 @@ Self-hosted*:
 
 Cloudflare reicht die Identität als Header **`Cf-Access-Authenticated-User-Email`**
 an den Origin durch – LeadPilot übernimmt sie automatisch als **Aktor** in
-Aktivitäten-Timeline und Aufgaben.
+der Aktivitäten-Timeline.
 
 ## Schritt 3 – LeadPilot-Stack ausrollen
 

@@ -6,6 +6,7 @@ let statuses = [];
 let aiEnabled = false;
 let activeFilter = "alle";
 let searchTerm = "";
+let dueOnly = false; // Filter: nur fällige/überfällige Wiedervorlagen
 let models = [];
 let currentModel = "";
 let stageProbabilities = {};
@@ -68,7 +69,24 @@ function toLocalInput(iso) {
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
-const isOverdue = (t) => t && !t.done && t.dueAt && new Date(t.dueAt).getTime() < Date.now();
+
+// Heutiges Datum als "YYYY-MM-DD" (lokal) – für Fälligkeitsvergleiche.
+function todayYMD() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// Fälligkeit einer Wiedervorlage (ymd = "YYYY-MM-DD") → Zustand + Label.
+function dueInfo(ymd) {
+  if (!ymd) return null;
+  const today = todayYMD();
+  let state = "future";
+  if (ymd < today) state = "overdue";
+  else if (ymd === today) state = "today";
+  const label = state === "overdue" ? "überfällig" : state === "today" ? "heute" : fmtDate(ymd);
+  return { state, label };
+}
 
 // Felder der Sektion „Allgemeine Infos" (Schlüssel → Label), zentral definiert.
 const RESEARCH_FIELDS = [
@@ -91,7 +109,12 @@ async function api(path, opts = {}) {
   });
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Anfrage fehlgeschlagen");
+  if (!res.ok) {
+    const err = new Error(data.error || "Anfrage fehlgeschlagen");
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 
@@ -149,8 +172,8 @@ function populateStatusSelect() {
     .join("");
 }
 
-// --- Routing (Liste ⇄ Detail ⇄ Aufgaben ⇄ Berichte) ------------------------
-const VIEWS = ["listView", "detailView", "tasksView", "reportsView"];
+// --- Routing (Liste ⇄ Detail ⇄ Berichte) -----------------------------------
+const VIEWS = ["listView", "detailView", "reportsView"];
 function showOnly(viewId) {
   for (const v of VIEWS) $("#" + v).classList.toggle("hidden", v !== viewId);
 }
@@ -163,7 +186,6 @@ function setActiveNav(name) {
 function router() {
   const lead = location.hash.match(/^#\/lead\/(.+)$/);
   if (lead) return showDetail(decodeURIComponent(lead[1]));
-  if (location.hash === "#/tasks") return showTasks();
   if (location.hash === "#/reports") return showReports();
   showList();
 }
@@ -193,14 +215,6 @@ function showDetail(id) {
   window.scrollTo(0, 0);
 }
 
-function showTasks() {
-  detailId = null;
-  showOnly("tasksView");
-  setActiveNav("tasks");
-  renderTasksView();
-  window.scrollTo(0, 0);
-}
-
 function showReports() {
   detailId = null;
   showOnly("reportsView");
@@ -213,27 +227,11 @@ function showReports() {
 async function refresh() {
   leads = await api("/api/leads");
   renderStats(await api("/api/stats"));
-  updateTaskBadge();
   if (detailId) {
     renderDetail();
     loadDetailExtras(detailId);
   } else {
     renderLeads();
-  }
-}
-
-// Zähler offener Aufgaben in der Navigation aktualisieren.
-async function updateTaskBadge() {
-  try {
-    const tasks = await api("/api/tasks?status=open");
-    const badge = $("#taskBadge");
-    const overdue = tasks.filter(isOverdue).length;
-    badge.textContent = tasks.length;
-    badge.classList.toggle("hidden", tasks.length === 0);
-    badge.classList.toggle("overdue", overdue > 0);
-    badge.title = overdue ? `${overdue} überfällig` : `${tasks.length} offen`;
-  } catch (err) {
-    /* Badge ist unkritisch */
   }
 }
 
@@ -249,14 +247,22 @@ function renderStats(stats) {
 }
 
 function filteredLeads() {
+  const today = todayYMD();
   return leads.filter((l) => {
     if (activeFilter !== "alle" && l.status !== activeFilter) return false;
+    if (dueOnly && !(l.nextStepAt && l.nextStepAt <= today)) return false;
     if (searchTerm) {
       const hay = `${l.name} ${l.company} ${l.email} ${l.source}`.toLowerCase();
       if (!hay.includes(searchTerm)) return false;
     }
     return true;
   });
+}
+
+// Anzahl fälliger/überfälliger Wiedervorlagen (für den Toolbar-Chip).
+function dueLeadCount() {
+  const today = todayYMD();
+  return leads.filter((l) => l.nextStepAt && l.nextStepAt <= today).length;
 }
 
 function scoreColor(score) {
@@ -288,6 +294,13 @@ function renderLeads() {
   $("#kanban").classList.toggle("hidden", !isKanban);
   if (isKanban) renderKanban();
   else renderList();
+  // Fälligkeits-Chip mit Anzahl aktualisieren.
+  const n = dueLeadCount();
+  const badge = $("#dueCount");
+  if (badge) {
+    badge.textContent = n;
+    badge.classList.toggle("hidden", n === 0);
+  }
 }
 
 function renderList() {
@@ -375,6 +388,13 @@ function scoreBadge(l, cls) {
   return `<span class="${cls}" style="color:${scoreColor(l.ai.score)};border-color:${scoreColor(l.ai.score)}">★ ${l.ai.score}</span>`;
 }
 
+// Wiedervorlage-Badge für Karten (rot=überfällig, amber=heute, dezent=zukünftig).
+function nextStepBadge(l) {
+  const info = dueInfo(l.nextStepAt);
+  if (!info) return "";
+  return `<span class="next-step-badge ${info.state}" title="${esc(l.nextStep || "Wiedervorlage")}">⏰ ${esc(info.label)}</span>`;
+}
+
 // Kartenansicht: nur Firma, Ansprechpartner, Status, Branche, Wert, KI-Score.
 function leadCard(l) {
   const branche = l.research ? fieldVal(l.research.fields && l.research.fields.branche) : "";
@@ -388,6 +408,7 @@ function leadCard(l) {
       ${branche ? `<span>🏷️ ${esc(branche)}</span>` : ""}
       ${!l.research ? `<span class="muted-note">keine Recherche</span>` : ""}
     </div>
+    ${nextStepBadge(l) ? `<div class="lead-card-next">${nextStepBadge(l)}</div>` : ""}
     <div class="lead-card-foot">
       <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
       ${scoreBadge(l, "score-chip")}
@@ -404,6 +425,7 @@ function kanbanCard(l) {
     ${l.name && l.company ? `<div class="kanban-card-sub">${esc(l.name)}</div>` : ""}
     <div class="kanban-card-foot">
       <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
+      ${nextStepBadge(l)}
     </div>
   </article>`;
 }
@@ -512,17 +534,12 @@ function detailViewHtml(l) {
     </div>`;
   }
 
-  const contact = [
-    l.email ? `<span>✉️ <a href="mailto:${esc(l.email)}">${esc(l.email)}</a></span>` : "",
-    l.phone ? `<span>📞 ${esc(l.phone)}</span>` : "",
-    l.source ? `<span>🌐 ${esc(l.source)}</span>` : "",
-  ].filter(Boolean).join("");
-
   return `
     <div class="detail-bar">
       <a class="btn btn-sm" href="#/">← Zurück</a>
       <div class="detail-bar-actions">
         ${aiEnabled && r ? `<button class="btn btn-sm" data-action="research">🔄 Neu recherchieren</button>` : ""}
+        <button class="btn btn-sm" data-action="export" title="Alle Daten dieses Leads als JSON (DSGVO-Auskunft)">⬇️ Datenauskunft</button>
         <button class="btn btn-sm" data-action="edit">✏️ Bearbeiten</button>
         <button class="btn btn-sm btn-danger" data-action="delete">🗑️ Löschen</button>
       </div>
@@ -532,7 +549,6 @@ function detailViewHtml(l) {
       <div>
         <h1>${esc(l.company) || esc(l.name) || "—"}</h1>
         ${l.company && l.name ? `<p class="detail-sub">👤 ${esc(l.name)}</p>` : ""}
-        <div class="detail-contact">${contact || `<span class="d-muted">Keine Kontaktdaten</span>`}</div>
       </div>
       <div class="detail-hero-right">
         <span class="status-pill s-${l.status}">${l.status}</span>
@@ -541,44 +557,89 @@ function detailViewHtml(l) {
     </header>
 
     <div class="detail-layout">
-      <div class="detail-main">
-        ${l.notes ? `<section class="d-section card"><h3>Notizen</h3><p class="d-text">${esc(l.notes)}</p></section>` : ""}
-        <div class="card">${researchHtml}</div>
-        <section class="card" id="activityPanel">${activityPanelHtml(null)}</section>
-      </div>
       <aside class="detail-side">
+        <section class="card lead-about">
+          <h3>Über</h3>
+          ${leadAboutHtml(l)}
+        </section>
         <section class="card">
           <h3>KI-Bewertung</h3>
           ${aiBox}
           ${aiActions}
         </section>
-        <section class="card" id="taskPanel">${taskPanelHtml(null)}</section>
       </aside>
+
+      <div class="detail-main">
+        <div class="detail-tabs" role="tablist">
+          <button type="button" class="dtab active" data-dtab="activity">📌 Aktivitäten</button>
+          <button type="button" class="dtab" data-dtab="dossier">📋 Dossier</button>
+        </div>
+        <div class="dtab-panel" data-dtab-panel="activity">
+          ${nextStepBannerHtml(l)}
+          <section class="card" id="activityPanel">${activityPanelHtml(null)}</section>
+        </div>
+        <div class="dtab-panel hidden" data-dtab-panel="dossier">
+          ${l.notes ? `<section class="card"><h3>Notizen</h3><p class="d-text">${esc(l.notes)}</p></section>` : ""}
+          <div class="card">${researchHtml}</div>
+        </div>
+      </div>
     </div>
   `;
 }
 
-// --- Detailseite: Aktivitäten-Timeline + Aufgaben --------------------------
+// Kompakte „Über"-Karte (Sidebar): Kontakt- und Stammdaten des Leads.
+function leadAboutHtml(l) {
+  const dt = (iso) => (iso ? new Date(iso).toLocaleDateString("de-DE", { day: "2-digit", month: "short", year: "numeric" }) : "—");
+  const rows = [
+    l.email ? ["E-Mail", `<a href="mailto:${esc(l.email)}">${esc(l.email)}</a>`] : null,
+    l.phone ? ["Telefon", esc(l.phone)] : null,
+    ["Quelle", l.source ? esc(l.source) : "—"],
+    ["Wert", esc(fmtEuro(l.value))],
+    ["Angelegt", esc(dt(l.createdAt))],
+    ["Aktualisiert", esc(dt(l.updatedAt))],
+  ].filter(Boolean);
+  return `<dl class="about-list">${rows.map(([k, val]) => `<div><dt>${esc(k)}</dt><dd>${val}</dd></div>`).join("")}</dl>`;
+}
+
+// Wiedervorlage-Banner oben im Aktivitäten-Tab: nächster Schritt + Fälligkeit.
+function nextStepBannerHtml(l) {
+  const info = dueInfo(l.nextStepAt);
+  if (!l.nextStep && !info) {
+    return `<div class="next-step-banner empty">
+      <span class="ns-text">Kein nächster Schritt geplant.</span>
+      <button type="button" class="btn btn-sm" data-action="next-step-edit">+ Wiedervorlage planen</button>
+    </div>`;
+  }
+  const due = info ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>` : "";
+  return `<div class="next-step-banner ${info ? info.state : ""}">
+    <div class="ns-main">
+      <span class="ns-label">Nächster Schritt</span>
+      <span class="ns-text">${esc(l.nextStep || "—")}</span>
+      ${due}
+    </div>
+    <div class="ns-actions">
+      <button type="button" class="btn btn-sm" data-action="next-step-done">✓ Erledigt</button>
+      <button type="button" class="btn btn-sm" data-action="next-step-edit">Bearbeiten</button>
+    </div>
+  </div>`;
+}
+
+// --- Detailseite: Aktivitäten-Timeline -------------------------------------
 // Diese Daten liegen nicht im leads-Array, sondern werden je Detailseite
-// nachgeladen und in die Platzhalter-Panels gerendert.
+// nachgeladen und in das Platzhalter-Panel gerendert.
 let detailActivities = [];
-let detailTasks = [];
+let composerType = "note";    // aktuell im Composer gewählter Aktivitätstyp
+let activityFilter = "all";   // aktiver Timeline-Filter
 
 async function loadDetailExtras(id) {
   try {
-    const [acts, tasks] = await Promise.all([
-      api(`/api/leads/${id}/activities`),
-      api(`/api/leads/${id}/tasks`),
-    ]);
+    const acts = await api(`/api/leads/${id}/activities`);
     if (detailId !== id) return; // inzwischen weggeblättert
     detailActivities = acts;
-    detailTasks = tasks;
     const ap = $("#activityPanel");
-    const tp = $("#taskPanel");
     if (ap) ap.innerHTML = activityPanelHtml(acts);
-    if (tp) tp.innerHTML = taskPanelHtml(tasks);
   } catch (err) {
-    /* Panels zeigen weiter den Ladezustand */
+    /* Panel zeigt weiter den Ladezustand */
   }
 }
 
@@ -592,86 +653,136 @@ const ACTIVITY_META = {
   system:  { icon: "⚙️", label: "System" },
 };
 
+// --- Composer (Tab-basierte Aktivitätserfassung) ---------------------------
+// Pro Typ: Platzhalter, Button-Text, ob ein Ergebnisfeld gezeigt wird und
+// optionale Schnell-Ergebnisse (für Anrufe).
+const COMPOSER_META = {
+  note:    { ph: "Notiz hinzufügen … Kontext, Vereinbarungen, To-dos", btn: "Notiz speichern", outcome: false, chips: [] },
+  call:    { ph: "Gesprächsnotiz … worüber wurde gesprochen?", btn: "Anruf protokollieren", outcome: true,
+             chips: ["Erreicht", "Mailbox", "Kein Anschluss", "Rückruf vereinbart", "Termin vereinbart", "Kein Interesse"] },
+  email:   { ph: "Worum ging es in der E-Mail?", btn: "E-Mail protokollieren", outcome: false, chips: [] },
+  meeting: { ph: "Termin-Notiz … Teilnehmer, Ergebnis, nächste Schritte", btn: "Termin protokollieren", outcome: true, chips: [] },
+};
+const COMPOSER_TABS = [["note", "📝", "Notiz"], ["call", "📞", "Anruf"], ["email", "✉️", "E-Mail"], ["meeting", "📅", "Termin"]];
+
+function composerHtml() {
+  const c = COMPOSER_META[composerType] || COMPOSER_META.note;
+  const tabs = COMPOSER_TABS.map(([t, ic, lb]) =>
+    `<button type="button" class="act-tab ${t === composerType ? "active" : ""}" data-act-tab="${t}">${ic} ${lb}</button>`
+  ).join("");
+  const chips = c.chips.length
+    ? `<div class="act-chips" id="actChips">${c.chips.map((o) => `<button type="button" class="act-chip" data-outcome="${esc(o)}">${esc(o)}</button>`).join("")}</div>`
+    : "";
+  const outcome = c.outcome
+    ? `<input type="text" id="act_outcome" class="act-outcome-input" placeholder="Ergebnis (optional)" />`
+    : "";
+  return `<div class="act-composer" id="activityComposer">
+    <div class="act-tabs">${tabs}</div>
+    <form id="activityForm">
+      <textarea id="act_body" rows="3" placeholder="${esc(c.ph)}"></textarea>
+      ${chips}
+      <div class="act-composer-foot">
+        ${outcome}
+        <button type="submit" class="btn btn-sm btn-primary" id="actSubmitBtn">${esc(c.btn)}</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+// Composer-Typ wechseln, ohne den bereits eingegebenen Text zu verlieren.
+function setComposerType(type) {
+  if (!COMPOSER_META[type]) return;
+  const prev = $("#act_body") ? $("#act_body").value : "";
+  composerType = type;
+  const host = $("#activityComposer");
+  if (host) host.outerHTML = composerHtml();
+  const ta = $("#act_body");
+  if (ta) { ta.value = prev; ta.focus(); }
+}
+
+// Schnell-Ergebnis-Chip (Anruf) übernimmt seinen Wert in das Ergebnisfeld.
+function applyOutcomeChip(el) {
+  const inp = $("#act_outcome");
+  if (inp) inp.value = el.dataset.outcome;
+  document.querySelectorAll("#actChips .act-chip").forEach((c) => c.classList.toggle("active", c === el));
+}
+
+// --- Timeline (gruppiert nach Datum, mit Typ-Filter) -----------------------
+const FILTER_TYPES = { all: null, note: ["note"], call: ["call"], email: ["email"], meeting: ["meeting"], system: ["status", "ai", "system"] };
+const FILTERS = [["all", "Alle"], ["note", "Notizen"], ["call", "Anrufe"], ["email", "E-Mails"], ["meeting", "Termine"], ["system", "System"]];
+
+function filterActs(acts) {
+  const types = FILTER_TYPES[activityFilter];
+  return types ? acts.filter((a) => types.includes(a.type)) : acts;
+}
+
+function filterBarHtml(acts) {
+  return `<div class="act-filters">${FILTERS.map(([k, lb]) => {
+    const types = FILTER_TYPES[k];
+    const n = types ? acts.filter((a) => types.includes(a.type)).length : acts.length;
+    return `<button type="button" class="act-filter ${k === activityFilter ? "active" : ""}" data-filter="${k}">${esc(lb)}<span class="act-filter-n">${n}</span></button>`;
+  }).join("")}</div>`;
+}
+
+function setActivityFilter(f) {
+  if (!FILTER_TYPES[f]) return;
+  activityFilter = f;
+  document.querySelectorAll("[data-filter]").forEach((b) => b.classList.toggle("active", b.dataset.filter === f));
+  const list = $("#activityList");
+  if (list) list.innerHTML = timelineHtml(filterActs(detailActivities));
+}
+
+// Datums-Gruppe für eine Aktivität: Heute / Gestern / Diese Woche / Datum.
+function dateBucket(iso) {
+  const d = new Date(iso), now = new Date();
+  const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((startOf(now) - startOf(d)) / 86400000);
+  if (diff <= 0) return "Heute";
+  if (diff === 1) return "Gestern";
+  if (diff < 7) return "Diese Woche";
+  return d.toLocaleDateString("de-DE", { day: "numeric", month: "long", year: "numeric" });
+}
+
 function activityItem(a) {
   const m = ACTIVITY_META[a.type] || ACTIVITY_META.note;
   const who = a.actor && a.actor !== "—" ? ` · ${esc(a.actor)}` : "";
   const canDelete = ["note", "call", "email", "meeting"].includes(a.type);
+  const title = a.title ? esc(a.title) : esc(m.label);
   return `<li class="act-item act-${a.type}">
-    <span class="act-icon" title="${esc(m.label)}">${m.icon}</span>
-    <div class="act-body">
+    <span class="act-dot" title="${esc(m.label)}">${m.icon}</span>
+    <div class="act-card">
       <div class="act-head">
-        ${a.title ? `<strong>${esc(a.title)}</strong>` : `<strong>${esc(m.label)}</strong>`}
+        <strong>${title}</strong>
         <span class="act-time" title="${esc(fmtDateTime(a.createdAt))}">${esc(relTime(a.createdAt))}${who}</span>
         ${canDelete ? `<button class="icon-btn act-del" data-del-act="${a.id}" title="Löschen">🗑️</button>` : ""}
       </div>
       ${a.body ? `<p class="act-text">${esc(a.body)}</p>` : ""}
-      ${a.outcome ? `<p class="act-outcome">➡️ ${esc(a.outcome)}</p>` : ""}
+      ${a.outcome ? `<span class="act-outcome-chip">${esc(a.outcome)}</span>` : ""}
     </div>
   </li>`;
+}
+
+function timelineHtml(acts) {
+  if (acts == null) return `<p class="d-muted">Lädt…</p>`;
+  if (!acts.length) return `<p class="act-empty">Keine Aktivitäten in dieser Ansicht.</p>`;
+  let out = `<ul class="act-timeline">`;
+  let bucket = null;
+  for (const a of acts) {
+    const b = dateBucket(a.createdAt);
+    if (b !== bucket) { out += `<li class="act-date">${esc(b)}</li>`; bucket = b; }
+    out += activityItem(a);
+  }
+  return out + `</ul>`;
 }
 
 function activityPanelHtml(acts) {
-  const form = `
-    <form class="act-form" id="activityForm">
-      <div class="act-form-row">
-        <select id="act_type">
-          <option value="note">📝 Notiz</option>
-          <option value="call">📞 Anruf</option>
-          <option value="email">✉️ E-Mail</option>
-          <option value="meeting">📅 Termin</option>
-        </select>
-        <input type="text" id="act_outcome" placeholder="Ergebnis (optional, z. B. Rückruf vereinbart)" />
-      </div>
-      <textarea id="act_body" rows="2" placeholder="Was ist passiert? (Gesprächsnotiz, Vereinbarung …)"></textarea>
-      <div class="act-form-actions">
-        <button type="submit" class="btn btn-sm btn-primary">+ Aktivität festhalten</button>
-      </div>
-    </form>`;
-
-  let list;
-  if (acts == null) {
-    list = `<p class="d-muted">Lädt…</p>`;
-  } else if (!acts.length) {
-    list = `<p class="d-muted">Noch keine Aktivitäten. Halte den ersten Kontakt fest.</p>`;
-  } else {
-    list = `<ul class="act-list">${acts.map(activityItem).join("")}</ul>`;
-  }
-  return `<h3>Aktivitäten</h3>${form}${list}`;
-}
-
-function taskItem(t) {
-  const over = isOverdue(t);
-  const due = t.dueAt
-    ? `<span class="task-due ${over ? "overdue" : ""}" title="${esc(fmtDateTime(t.dueAt))}">📅 ${esc(over ? "überfällig · " : "")}${esc(relTime(t.dueAt))}</span>`
-    : "";
-  return `<li class="task-item ${t.done ? "done" : ""}">
-    <input type="checkbox" class="task-check" data-task-toggle="${t.id}" ${t.done ? "checked" : ""} />
-    <div class="task-body">
-      <span class="task-title">${esc(t.title)}</span>
-      ${due}
-    </div>
-    <button class="icon-btn task-del" data-del-task="${t.id}" title="Löschen">🗑️</button>
-  </li>`;
-}
-
-function taskPanelHtml(tasks) {
-  const form = `
-    <form class="task-form" id="taskForm">
-      <input type="text" id="task_title" placeholder="Neue Aufgabe / Wiedervorlage…" />
-      <div class="task-form-row">
-        <input type="datetime-local" id="task_due" />
-        <button type="submit" class="btn btn-sm btn-primary">+ Aufgabe</button>
-      </div>
-    </form>`;
-  let list;
-  if (tasks == null) {
-    list = `<p class="d-muted">Lädt…</p>`;
-  } else if (!tasks.length) {
-    list = `<p class="d-muted">Keine Aufgaben.</p>`;
-  } else {
-    list = `<ul class="task-list">${tasks.map(taskItem).join("")}</ul>`;
-  }
-  return `<h3>Aufgaben / Wiedervorlagen</h3>${form}${list}`;
+  composerType = "note";   // frischer Composer bei jedem (Neu-)Aufbau
+  activityFilter = "all";
+  const filters = acts && acts.length ? filterBarHtml(acts) : "";
+  return `<div class="act-panel-head"><h3>Aktivitäten</h3></div>
+    ${composerHtml()}
+    ${filters}
+    <div id="activityList">${timelineHtml(acts)}</div>`;
 }
 
 // --- Detailseite: Bearbeiten-Modus ----------------------------------------
@@ -763,6 +874,10 @@ function detailEditHtml(l) {
           ${input("ed_value", "Geschätzter Wert (€)", l.value, "number")}
         </div>
         <label>Status<select id="ed_status">${statusOpts}</select></label>
+        <div class="form-row">
+          ${input("ed_next_step", "Nächster Schritt", l.nextStep || "")}
+          ${input("ed_next_step_at", "Wiedervorlage am", l.nextStepAt || "", "date")}
+        </div>
         ${textarea("ed_notes", "Notizen", l.notes)}
       </div>
       ${researchEdit}
@@ -781,6 +896,8 @@ function collectStammdaten() {
     source: g("ed_source"),
     value: g("ed_value"),
     status: g("ed_status"),
+    nextStep: g("ed_next_step"),
+    nextStepAt: g("ed_next_step_at"),
     notes: g("ed_notes"),
   };
 }
@@ -844,10 +961,16 @@ function onDetailClick(e) {
     e.target.closest(".pot-row").remove();
     return;
   }
+  const dtab = e.target.closest("[data-dtab]");
+  if (dtab) { switchDetailTab(dtab.dataset.dtab); return; }
+  const atab = e.target.closest("[data-act-tab]");
+  if (atab) { setComposerType(atab.dataset.actTab); return; }
+  const chip = e.target.closest("[data-outcome]");
+  if (chip) { applyOutcomeChip(chip); return; }
+  const fil = e.target.closest("[data-filter]");
+  if (fil) { setActivityFilter(fil.dataset.filter); return; }
   const delAct = e.target.closest("[data-del-act]");
   if (delAct) { removeActivity(delAct.dataset.delAct); return; }
-  const delTask = e.target.closest("[data-del-task]");
-  if (delTask) { removeTask(delTask.dataset.delTask, detailId); return; }
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
   const action = btn.dataset.action;
@@ -872,6 +995,15 @@ function onDetailClick(e) {
     case "delete":
       deleteLead(id, true);
       break;
+    case "export":
+      exportLead(id);
+      break;
+    case "next-step-done":
+      completeNextStep(id);
+      break;
+    case "next-step-edit":
+      openNextStepModal(id);
+      break;
     case "research":
       researchLead(id, btn);
       break;
@@ -890,6 +1022,18 @@ function bindEvents() {
   $("#closeModal").addEventListener("click", closeLeadModal);
   $("#cancelBtn").addEventListener("click", closeLeadModal);
   $("#leadForm").addEventListener("submit", saveLead);
+
+  $("#dueFilter").addEventListener("click", () => {
+    dueOnly = !dueOnly;
+    $("#dueFilter").classList.toggle("active", dueOnly);
+    renderLeads();
+  });
+  $("#dupClose").addEventListener("click", closeDupModal);
+  $("#dupCancel").addEventListener("click", closeDupModal);
+  $("#nsClose").addEventListener("click", closeNextStepModal);
+  $("#nsCancel").addEventListener("click", closeNextStepModal);
+  $("#nsClear").addEventListener("click", () => saveNextStep(null, true));
+  $("#nextStepForm").addEventListener("submit", saveNextStep);
 
   $("#closeResearchModal").addEventListener("click", closeResearchModal);
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
@@ -951,25 +1095,10 @@ function bindEvents() {
 
   // Detailseite: ein delegierter Handler für alle Aktionen.
   $("#detailView").addEventListener("click", onDetailClick);
-  // Formulare (Aktivität/Aufgabe) und Checkbox-Umschalten – delegiert, da die
-  // Panels per innerHTML neu aufgebaut werden.
+  // Aktivitäten-Formular – delegiert, da das Panel per innerHTML neu
+  // aufgebaut wird.
   $("#detailView").addEventListener("submit", (e) => {
     if (e.target.id === "activityForm") { e.preventDefault(); addDetailActivity(); }
-    if (e.target.id === "taskForm") { e.preventDefault(); addDetailTask(); }
-  });
-  $("#detailView").addEventListener("change", (e) => {
-    const cb = e.target.closest("[data-task-toggle]");
-    if (cb) toggleTask(cb.dataset.taskToggle, cb.checked, detailId);
-  });
-
-  // Aufgaben-Ansicht (global): delegierte Handler.
-  $("#tasksView").addEventListener("click", onTasksViewClick);
-  $("#tasksView").addEventListener("change", (e) => {
-    const cb = e.target.closest("[data-task-toggle]");
-    if (cb) toggleTask(cb.dataset.taskToggle, cb.checked, null);
-  });
-  $("#tasksView").addEventListener("submit", (e) => {
-    if (e.target.id === "globalTaskForm") { e.preventDefault(); addGlobalTask(); }
   });
 
   // Schließen per Klick auf Overlay
@@ -996,6 +1125,8 @@ function openLeadModal(id) {
     $("#f_source").value = l.source;
     $("#f_value").value = l.value;
     $("#f_status").value = l.status;
+    $("#f_next_step").value = l.nextStep || "";
+    $("#f_next_step_at").value = l.nextStepAt || "";
     $("#f_notes").value = l.notes;
   } else {
     $("#modalTitle").textContent = "Neuer Lead";
@@ -1021,22 +1152,143 @@ async function saveLead(e) {
     source: $("#f_source").value,
     value: $("#f_value").value,
     status: $("#f_status").value,
+    nextStep: $("#f_next_step").value,
+    nextStepAt: $("#f_next_step_at").value,
     notes: $("#f_notes").value,
   };
   try {
     if (id) {
       await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify(payload) });
       toast("Lead aktualisiert", "success");
-    } else {
-      const created = await api("/api/leads", { method: "POST", body: JSON.stringify(payload) });
-      toast("Lead angelegt", "success");
       closeLeadModal();
       await refresh();
-      if (created && created.id) location.hash = "#/lead/" + encodeURIComponent(created.id);
+    } else {
+      await createLeadFromPayload(payload);
+    }
+  } catch (err) {
+    // Dublettenwarnung (409) → Dialog statt Toast.
+    if (err.status === 409 && err.data && err.data.duplicates) {
+      showDuplicateDialog(err.data.duplicates, payload);
       return;
     }
+    toast(err.message, "error");
+  }
+}
+
+// Legt einen neuen Lead an (optional mit force, um Dubletten zu übergehen).
+async function createLeadFromPayload(payload) {
+  const created = await api("/api/leads", { method: "POST", body: JSON.stringify(payload) });
+  toast("Lead angelegt", "success");
+  closeLeadModal();
+  await refresh();
+  if (created && created.id) location.hash = "#/lead/" + encodeURIComponent(created.id);
+}
+
+// Dubletten-Dialog: bestehenden Lead öffnen ODER trotzdem anlegen.
+function showDuplicateDialog(duplicates, payload) {
+  const body = $("#dupBody");
+  body.innerHTML = duplicates.map((d) => `
+    <div class="dup-item">
+      <div>
+        <strong>${esc(d.company || d.name || "—")}</strong>
+        <span class="d-muted">${esc([d.email, d.name && d.company ? d.name : ""].filter(Boolean).join(" · "))}</span>
+      </div>
+      <span class="status-pill s-${d.status}">${esc(d.status)}</span>
+    </div>`).join("");
+  const open = $("#dupOpen");
+  open.onclick = () => {
+    closeDupModal();
     closeLeadModal();
+    location.hash = "#/lead/" + encodeURIComponent(duplicates[0].id);
+  };
+  $("#dupForce").onclick = async () => {
+    closeDupModal();
+    try {
+      await createLeadFromPayload({ ...payload, force: true });
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  };
+  $("#dupModal").classList.remove("hidden");
+}
+
+function closeDupModal() {
+  $("#dupModal").classList.add("hidden");
+}
+
+// Wiedervorlage als erledigt markieren: nächsten Schritt leeren + protokollieren
+// (inkl. Grund der Wiedervorlage im Aktivitäts-Log).
+async function completeNextStep(id) {
+  const l = getLead(id);
+  const step = l && l.nextStep ? l.nextStep : "";
+  try {
+    await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ nextStep: "", nextStepAt: null }) });
+    await api(`/api/leads/${id}/activities`, {
+      method: "POST",
+      body: JSON.stringify({
+        type: "system",
+        title: step ? `Wiedervorlage erledigt: ${step}` : "Wiedervorlage erledigt",
+      }),
+    });
+    toast("Wiedervorlage erledigt", "success");
     await refresh();
+    renderDetail();
+    loadDetailExtras(id);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// Eigenes, schlankes Modal zum Planen/Bearbeiten der Wiedervorlage.
+function openNextStepModal(id) {
+  const l = getLead(id);
+  if (!l) return;
+  $("#ns_lead_id").value = id;
+  $("#ns_step").value = l.nextStep || "";
+  $("#ns_at").value = l.nextStepAt || "";
+  const planned = l.nextStep || l.nextStepAt;
+  $("#nsModalTitle").textContent = planned ? "Wiedervorlage bearbeiten" : "Wiedervorlage planen";
+  $("#nsClear").classList.toggle("hidden", !planned);
+  $("#nextStepModal").classList.remove("hidden");
+  $("#ns_step").focus();
+}
+
+function closeNextStepModal() {
+  $("#nextStepModal").classList.add("hidden");
+}
+
+async function saveNextStep(e, clear = false) {
+  if (e) e.preventDefault();
+  const id = $("#ns_lead_id").value;
+  const payload = clear
+    ? { nextStep: "", nextStepAt: null }
+    : { nextStep: $("#ns_step").value, nextStepAt: $("#ns_at").value };
+  try {
+    await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+    toast(clear ? "Wiedervorlage entfernt" : "Wiedervorlage gespeichert", "success");
+    closeNextStepModal();
+    await refresh();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// DSGVO-Datenauskunft: alle Daten des Leads als JSON herunterladen.
+async function exportLead(id) {
+  try {
+    const data = await api(`/api/leads/${id}/export`);
+    const l = data.lead || {};
+    const slug = (l.company || l.name || "lead").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `lead-${slug || "export"}-${todayYMD()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast("Datenauskunft heruntergeladen", "success");
   } catch (err) {
     toast(err.message, "error");
   }
@@ -1044,7 +1296,8 @@ async function saveLead(e) {
 
 async function deleteLead(id, fromDetail = false) {
   const l = getLead(id);
-  if (!confirm(`Lead "${l?.company || l?.name || "—"}" wirklich löschen?`)) return;
+  const name = l?.company || l?.name || "—";
+  if (!confirm(`Lead "${name}" und alle zugehörigen Aktivitäten endgültig löschen?\n\nDies entspricht einer DSGVO-Löschung (Art. 17) und kann nicht rückgängig gemacht werden.`)) return;
   try {
     await api(`/api/leads/${id}`, { method: "DELETE" });
     toast("Lead gelöscht", "success");
@@ -1449,13 +1702,20 @@ async function runAi(action, id, btn) {
   }
 }
 
-// --- Detailseite: Aktivitäten & Aufgaben (Aktionen) ------------------------
+// --- Detailseite: Tab-Umschaltung + Aktivitäten (Aktionen) -----------------
+function switchDetailTab(name) {
+  document.querySelectorAll("[data-dtab]").forEach((b) => b.classList.toggle("active", b.dataset.dtab === name));
+  document.querySelectorAll("[data-dtab-panel]").forEach((p) => p.classList.toggle("hidden", p.dataset.dtabPanel !== name));
+}
+
 async function addDetailActivity() {
-  const type = $("#act_type").value;
-  const body = $("#act_body").value.trim();
-  const outcome = $("#act_outcome").value.trim();
+  const type = composerType;
+  const bodyEl = $("#act_body");
+  const body = bodyEl ? bodyEl.value.trim() : "";
+  const outEl = $("#act_outcome");
+  const outcome = outEl ? outEl.value.trim() : "";
   if (!body && !outcome) {
-    toast("Bitte einen Text eingeben", "error");
+    toast("Bitte etwas eingeben", "error");
     return;
   }
   try {
@@ -1475,142 +1735,6 @@ async function removeActivity(actId) {
   try {
     await api(`/api/activities/${actId}`, { method: "DELETE" });
     loadDetailExtras(detailId);
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-
-async function addDetailTask() {
-  const title = $("#task_title").value.trim();
-  const due = $("#task_due").value;
-  if (!title) {
-    toast("Bitte einen Titel eingeben", "error");
-    return;
-  }
-  try {
-    await api("/api/tasks", {
-      method: "POST",
-      body: JSON.stringify({ title, dueAt: due ? new Date(due).toISOString() : null, leadId: detailId }),
-    });
-    toast("Aufgabe angelegt", "success");
-    loadDetailExtras(detailId);
-    updateTaskBadge();
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-
-async function toggleTask(taskId, done, leadId) {
-  try {
-    await api(`/api/tasks/${taskId}`, { method: "PUT", body: JSON.stringify({ done }) });
-    updateTaskBadge();
-    if (leadId) loadDetailExtras(leadId);
-    else renderTasksView();
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-
-async function removeTask(taskId, leadId) {
-  if (!confirm("Diese Aufgabe löschen?")) return;
-  try {
-    await api(`/api/tasks/${taskId}`, { method: "DELETE" });
-    updateTaskBadge();
-    if (leadId) loadDetailExtras(leadId);
-    else renderTasksView();
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-
-// --- Globale Aufgaben-Ansicht ----------------------------------------------
-let tasksShowDone = false;
-
-async function renderTasksView() {
-  const v = $("#tasksView");
-  v.innerHTML = `<div class="view-head"><h2>✅ Aufgaben & Wiedervorlagen</h2></div><p class="d-muted">Lädt…</p>`;
-  let tasks;
-  try {
-    tasks = await api(`/api/tasks?status=${tasksShowDone ? "all" : "open"}`);
-  } catch (err) {
-    v.innerHTML = `<p class="warn">Fehler: ${esc(err.message)}</p>`;
-    return;
-  }
-
-  const leadOpts = leads
-    .map((l) => `<option value="${esc(l.id)}">${esc(l.company || l.name || "—")}</option>`)
-    .join("");
-
-  const open = tasks.filter((t) => !t.done);
-  const overdue = open.filter(isOverdue);
-
-  const rows = tasks.length
-    ? tasks.map(globalTaskRow).join("")
-    : `<p class="d-muted">Keine Aufgaben.</p>`;
-
-  v.innerHTML = `
-    <div class="view-head">
-      <h2>✅ Aufgaben & Wiedervorlagen</h2>
-      <label class="toggle-done"><input type="checkbox" id="toggleShowDone" ${tasksShowDone ? "checked" : ""}/> Erledigte zeigen</label>
-    </div>
-    <div class="task-summary">
-      <span class="chip-stat">${open.length} offen</span>
-      <span class="chip-stat ${overdue.length ? "overdue" : ""}">${overdue.length} überfällig</span>
-    </div>
-    <form class="task-form global" id="globalTaskForm">
-      <input type="text" id="gt_title" placeholder="Neue Aufgabe…" />
-      <select id="gt_lead"><option value="">— ohne Lead —</option>${leadOpts}</select>
-      <input type="datetime-local" id="gt_due" />
-      <button type="submit" class="btn btn-sm btn-primary">+ Aufgabe</button>
-    </form>
-    <ul class="task-list global">${rows}</ul>
-  `;
-  $("#toggleShowDone").addEventListener("change", (e) => {
-    tasksShowDone = e.target.checked;
-    renderTasksView();
-  });
-}
-
-function globalTaskRow(t) {
-  const over = isOverdue(t);
-  const leadLabel = t.leadCompany || t.leadName || "";
-  const leadLink = t.leadId
-    ? `<a class="task-lead" href="#/lead/${encodeURIComponent(t.leadId)}">🔗 ${esc(leadLabel || "Lead")}</a>`
-    : "";
-  const due = t.dueAt
-    ? `<span class="task-due ${over ? "overdue" : ""}">📅 ${esc(over ? "überfällig · " : "")}${esc(fmtDateTime(t.dueAt))}</span>`
-    : `<span class="task-due muted">ohne Termin</span>`;
-  return `<li class="task-item ${t.done ? "done" : ""}">
-    <input type="checkbox" class="task-check" data-task-toggle="${t.id}" ${t.done ? "checked" : ""} />
-    <div class="task-body">
-      <span class="task-title">${esc(t.title)}</span>
-      <span class="task-meta">${due} ${leadLink}</span>
-    </div>
-    <button class="icon-btn task-del" data-del-task="${t.id}" title="Löschen">🗑️</button>
-  </li>`;
-}
-
-function onTasksViewClick(e) {
-  const del = e.target.closest("[data-del-task]");
-  if (del) { removeTask(del.dataset.delTask, null); return; }
-}
-
-async function addGlobalTask() {
-  const title = $("#gt_title").value.trim();
-  const leadId = $("#gt_lead").value || null;
-  const due = $("#gt_due").value;
-  if (!title) {
-    toast("Bitte einen Titel eingeben", "error");
-    return;
-  }
-  try {
-    await api("/api/tasks", {
-      method: "POST",
-      body: JSON.stringify({ title, leadId, dueAt: due ? new Date(due).toISOString() : null }),
-    });
-    toast("Aufgabe angelegt", "success");
-    updateTaskBadge();
-    renderTasksView();
   } catch (err) {
     toast(err.message, "error");
   }
@@ -1645,16 +1769,58 @@ function barChart(series, { format = (v) => v, color = "var(--primary)" } = {}) 
   return `<svg viewBox="0 0 ${W} ${H}" class="bar-chart" preserveAspectRatio="xMidYMid meet">${bars}</svg>`;
 }
 
+// Kräftige (dunklere) Status-Farben – guter Kontrast zu weißer Schrift im Trichter.
+const FUNNEL_COLORS = {
+  neu: "#64748b",
+  kontaktiert: "#0891b2",
+  qualifiziert: "#6366f1",
+  angebot: "#d97706",
+  gewonnen: "#16a34a",
+};
+
+// Echter, sich verjüngender SVG-Trichter. Stufen = Pipeline ohne "verloren".
+// Zwischen den Stufen wird die Konversionsrate zur nächsten Stufe gezeigt.
 function funnelHtml(funnel) {
-  const max = Math.max(1, ...funnel.map((f) => f.count));
-  return `<div class="funnel">${funnel.map((f) => {
-    const pct = Math.round((f.count / max) * 100);
-    return `<div class="funnel-row">
-      <span class="funnel-label status-pill s-${f.status}">${esc(f.status)}</span>
-      <div class="funnel-bar-wrap"><div class="funnel-bar" style="width:${pct}%"></div></div>
-      <span class="funnel-count">${f.count} · ${fmtEuro(Math.round(f.value))}</span>
-    </div>`;
-  }).join("")}</div>`;
+  const stages = funnel.filter((f) => f.status !== "verloren");
+  const total = stages.reduce((a, f) => a + f.count, 0);
+  if (!total) return `<p class="d-muted">Noch keine Leads in der Pipeline.</p>`;
+
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const W = 720, segH = 72, gap = 4, padTop = 8;
+  const H = padTop + stages.length * segH + (stages.length - 1) * gap + 8;
+  const cx = W * 0.42;            // Trichter etwas links, rechts Platz für Konversionswerte
+  const maxW = W * 0.62, minW = 120;
+  const maxCount = Math.max(1, ...stages.map((s) => s.count));
+  const widthFor = (c) => minW + (c / maxCount) * (maxW - minW);
+
+  let y = padTop;
+  const segs = stages.map((s, i) => {
+    const next = stages[i + 1];
+    const topW = widthFor(s.count);
+    const botW = next ? widthFor(next.count) : topW * 0.82;
+    const yTop = y, yBot = y + segH, mid = (yTop + yBot) / 2;
+    const pts = `${cx - topW / 2},${yTop} ${cx + topW / 2},${yTop} ${cx + botW / 2},${yBot} ${cx - botW / 2},${yBot}`;
+    const color = FUNNEL_COLORS[s.status] || "var(--primary)";
+
+    let conv = "";
+    if (next) {
+      const pct = s.count ? Math.round((next.count / s.count) * 100) : 0;
+      conv = `<g>
+        <line x1="${cx + botW / 2}" y1="${yBot}" x2="${W - 160}" y2="${yBot}" class="funnel-guide" />
+        <text x="${W - 152}" y="${yBot - 3}" class="funnel-conv-pct">${pct} %</text>
+        <text x="${W - 152}" y="${yBot + 13}" class="funnel-conv-cap">${esc(cap(s.status))} → ${esc(next.status)}</text>
+      </g>`;
+    }
+    y = yBot + gap;
+    return `<g>
+      <polygon points="${pts}" fill="${color}" fill-opacity="0.92" stroke="${color}" />
+      <text x="${cx}" y="${mid - 4}" class="funnel-name">${esc(cap(s.status))}</text>
+      <text x="${cx}" y="${mid + 15}" class="funnel-sub">${s.count} · ${esc(fmtEuro(Math.round(s.value)))}</text>
+      ${conv}
+    </g>`;
+  }).join("");
+
+  return `<svg viewBox="0 0 ${W} ${H}" class="funnel-chart" preserveAspectRatio="xMidYMid meet">${segs}</svg>`;
 }
 
 async function renderReportsView() {
@@ -1676,44 +1842,44 @@ async function renderReportsView() {
     ["Gewonnen", eur(s.wonValue)],
     ["Abschlussquote", s.conversion + " %"],
     ["Ø Auftragswert", eur(r.avgWon)],
-    ["Offene Aufgaben", `${r.tasks.open}${r.tasks.overdue ? ` · ${r.tasks.overdue} überfällig` : ""}`],
+    ["Ø Vertriebszyklus", r.avgCycleDays ? r.avgCycleDays + " Tage" : "—"],
   ].map(([label, val]) => `<div class="stat-card"><span class="stat-value">${esc(String(val))}</span><span class="stat-label">${esc(label)}</span></div>`).join("");
 
-  const created = r.createdByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
   const won = r.wonByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
+  const activity = r.activityByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
 
-  const sourceRows = r.bySource.length
-    ? r.bySource.map((x) => `<tr>
-        <td>${esc(x.source)}</td>
-        <td class="num">${x.count}</td>
-        <td class="num">${x.won}</td>
-        <td class="num">${eur(x.value)}</td>
-      </tr>`).join("")
-    : `<tr><td colspan="4" class="d-muted">Keine Daten.</td></tr>`;
+  // Verlust-Übersicht: Anzahl, Wert und Verlustquote (gegen abgeschlossene Deals).
+  const lost = r.funnel.find((f) => f.status === "verloren") || { count: 0, value: 0 };
+  const won_n = s.byStatus["gewonnen"] || 0;
+  const decided = won_n + lost.count;
+  const lostRate = decided ? Math.round((lost.count / decided) * 100) : 0;
 
   v.innerHTML = `
     <div class="view-head"><h2>📊 Berichte</h2></div>
+
+    <section class="card report-funnel">
+      <h3>Pipeline-Trichter</h3>
+      ${funnelHtml(r.funnel)}
+    </section>
+
     <section class="stats report-kpis">${kpis}</section>
 
     <div class="report-grid">
-      <section class="card">
-        <h3>Pipeline-Trichter</h3>
-        ${funnelHtml(r.funnel)}
-      </section>
-      <section class="card">
-        <h3>Neue Leads je Monat</h3>
-        ${barChart(created, { color: "var(--primary)" })}
-      </section>
       <section class="card">
         <h3>Gewonnener Umsatz je Monat</h3>
         ${barChart(won, { color: "var(--green)", format: (val) => (val >= 1000 ? Math.round(val / 1000) + "k" : val) })}
       </section>
       <section class="card">
-        <h3>Quellen-Performance</h3>
-        <table class="report-table">
-          <thead><tr><th>Quelle</th><th class="num">Leads</th><th class="num">Gewonnen</th><th class="num">Wert</th></tr></thead>
-          <tbody>${sourceRows}</tbody>
-        </table>
+        <h3>Vertriebsaktivität je Monat</h3>
+        ${barChart(activity, { color: "var(--accent)" })}
+      </section>
+      <section class="card">
+        <h3>Verlust-Übersicht</h3>
+        <div class="mini-stats">
+          <div><span class="mini-val">${lost.count}</span><span class="mini-lbl">Verlorene Leads</span></div>
+          <div><span class="mini-val">${esc(eur(lost.value))}</span><span class="mini-lbl">Verlorener Wert</span></div>
+          <div><span class="mini-val">${lostRate} %</span><span class="mini-lbl">Verlustquote</span></div>
+        </div>
       </section>
     </div>
   `;

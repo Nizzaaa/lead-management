@@ -19,6 +19,9 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 - **Detailseite pro Lead** mit Inline-Bearbeitung von **allem**: Stammdaten *und* sämtliche Recherche-Inhalte (Felder inkl. Quellen, Texte, Potenziale)
 - Pipeline-Status: `neu → kontaktiert → qualifiziert → angebot → gewonnen / verloren`
 - Manuelles Bearbeiten (Status, Wert, Notizen, Stammdaten), Live-Suche und Status-Filter
+- **Wiedervorlage / nächster Schritt** je Lead (Datum) – mit farbigem Banner auf der Detailseite, Fälligkeits-Badge auf den Karten und Toolbar-Filter „⏰ Fällig"
+- **Dublettenprüfung** beim Anlegen (gleiche E-Mail/Firma) – warnt mit Hinweis und lässt „bestehenden öffnen" oder „trotzdem anlegen" zu
+- **DSGVO**: Datenauskunft-Export pro Lead als JSON (Art. 15/20); Löschung entfernt Lead inkl. aller Aktivitäten (Art. 17)
 - Dashboard mit Kennzahlen: Anzahl Leads, **gewichteter Pipeline-Wert** (Erwartungswert = Σ Wert × Abschlusswahrscheinlichkeit je Status, in den Einstellungen anpassbar), gewonnener Umsatz, Abschlussquote
 
 **KI-Funktionen** – nutzen das Recherche-Dossier als Grundlage
@@ -29,23 +32,20 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 > Die Web-Recherche läuft über die serverseitigen Anthropic-Tools `web_search` und `web_fetch`
 > und benötigt daher einen gesetzten `ANTHROPIC_API_KEY`.
 
-**Aktivitäten-Timeline** (je Lead)
-- Jeder Touchpoint wird festgehalten: **Notiz, Anruf, E-Mail, Termin** (mit Ergebnis)
+**Aktivitäten-Timeline** (je Lead, prominent auf der Detailseite)
+- **Tab-Composer** zum Erfassen von **Notiz, Anruf, E-Mail, Termin**; für Anrufe Schnell-Ergebnisse (z. B. „Erreicht", „Rückruf vereinbart")
+- **Vertikale Timeline** mit farbcodierten Typ-Icons, Datums-Gruppierung (Heute/Gestern/…) und **Filter nach Typ**
 - **Automatische Einträge** für Systemereignisse: Anlage, Recherche, KI-Score, Status­wechsel, KI-E-Mail/Empfehlung – chronologisch mit Zeit und Aktor
 
-**Aufgaben / Wiedervorlagen**
-- Aufgaben mit **Fälligkeit** anlegen – direkt am Lead oder in der globalen Ansicht
-- **Überfällige** Aufgaben sind hervorgehoben; ein **Zähler in der Navigation** zeigt offene/überfällige Aufgaben
-- Erledigen per Häkchen; erledigte Aufgaben optional einblendbar
-
 **Berichte** (📊)
-- KPIs (Leads, gewichtete Pipeline, gewonnen, Abschlussquote, Ø Auftragswert, offene Aufgaben)
-- **Pipeline-Trichter**, **neue Leads je Monat**, **gewonnener Umsatz je Monat** (abhängigkeitsfreie SVG-Charts)
-- **Quellen-Performance** (Leads/Gewonnen/Wert je Quelle)
+- KPIs (Leads, gewichtete Pipeline, gewonnen, Abschlussquote, Ø Auftragswert, Ø Vertriebszyklus)
+- **Echter Pipeline-Trichter** mit Stufen-Konversion (abhängigkeitsfreie SVG-Charts)
+- **Gewonnener Umsatz je Monat** und **Vertriebsaktivität je Monat**
+- **Verlust-Übersicht** (Anzahl, Wert und Verlustquote)
 
 **Betrieb & Sicherheit**
 - **Strukturiertes Logging** (JSON-Lines) mit Request-ID, Dauer, Aktor und Redaction sensibler Felder; Level über `LOG_LEVEL`, lesbar mit `LOG_PRETTY=1`
-- **Einbettung in Nextcloud** als iframe mit SSO über **Cloudflare Access + Zitadel** (oder alternativ eigener `oauth2-proxy`) – siehe [`docs/nextcloud-deployment.md`](docs/nextcloud-deployment.md) und die fertigen Stacks unter [`deploy/`](deploy/). Der authentifizierte Benutzer (`Cf-Access-Authenticated-User-Email` bzw. Proxy-Header) wird als Aktor in Timeline und Aufgaben übernommen.
+- **Einbettung in Nextcloud** als iframe mit SSO über **Cloudflare Access + Zitadel** (oder alternativ eigener `oauth2-proxy`) – siehe [`docs/nextcloud-deployment.md`](docs/nextcloud-deployment.md) und die fertigen Stacks unter [`deploy/`](deploy/). Der authentifizierte Benutzer (`Cf-Access-Authenticated-User-Email` bzw. Proxy-Header) wird als Aktor in der Timeline übernommen.
 
 ## Schnellstart mit Docker Compose (empfohlen)
 
