@@ -264,15 +264,6 @@ async function getReport(statuses, probabilities = {}) {
     value: (funnelMap[s] && funnelMap[s].value) || 0,
   }));
 
-  // Neue Leads je Monat (letzte 12 Monate, inkl. Lücken).
-  const createdRes = await pool.query(
-    `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS month, COUNT(*)::int AS count
-     FROM leads
-     WHERE created_at >= date_trunc('month', now()) - interval '11 months'
-     GROUP BY 1 ORDER BY 1`
-  );
-  const createdByMonth = fillMonths(createdRes.rows, "count");
-
   // Gewonnener Umsatz je Monat (Status gewonnen; updated_at als Abschlussdatum).
   const wonRes = await pool.query(
     `SELECT to_char(date_trunc('month', updated_at), 'YYYY-MM') AS month, COALESCE(SUM(value),0)::float AS value
@@ -282,24 +273,29 @@ async function getReport(statuses, probabilities = {}) {
   );
   const wonByMonth = fillMonths(wonRes.rows, "value");
 
-  // Quellen-Performance: Anzahl, gewonnen, Gesamtwert je Quelle (Top 8).
-  const sourceRes = await pool.query(
-    `SELECT COALESCE(NULLIF(source,''),'(ohne Quelle)') AS source,
-            COUNT(*)::int AS count,
-            COUNT(*) FILTER (WHERE status = 'gewonnen')::int AS won,
-            COALESCE(SUM(value),0)::float AS value
-     FROM leads GROUP BY 1 ORDER BY count DESC, value DESC LIMIT 8`
+  // Vertriebsaktivität je Monat: Anzahl Touchpoints (letzte 12 Monate, inkl. Lücken).
+  const activityRes = await pool.query(
+    `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS month, COUNT(*)::int AS count
+     FROM activities
+     WHERE created_at >= date_trunc('month', now()) - interval '11 months'
+     GROUP BY 1 ORDER BY 1`
   );
-  const bySource = sourceRes.rows.map((r) => ({
-    source: r.source, count: r.count, won: r.won, value: r.value,
-  }));
+  const activityByMonth = fillMonths(activityRes.rows, "count");
+
+  // Durchschnittlicher Vertriebszyklus in Tagen: Anlage → Abschluss (gewonnen).
+  // Näherung über updated_at als Abschlussdatum.
+  const cycleRes = await pool.query(
+    `SELECT COALESCE(AVG(EXTRACT(EPOCH FROM (updated_at - created_at)) / 86400), 0)::float AS days
+     FROM leads WHERE status = 'gewonnen'`
+  );
+  const avgCycleDays = Math.round(cycleRes.rows[0].days);
 
   // Durchschnittlicher gewonnener Auftragswert.
   const avgWon = stats.byStatus["gewonnen"]
     ? Math.round(stats.wonValue / stats.byStatus["gewonnen"])
     : 0;
 
-  return { stats, funnel, createdByMonth, wonByMonth, bySource, avgWon };
+  return { stats, funnel, wonByMonth, activityByMonth, avgWon, avgCycleDays };
 }
 
 // Füllt fehlende Monate der letzten 12 Monate mit 0 auf.

@@ -1423,16 +1423,58 @@ function barChart(series, { format = (v) => v, color = "var(--primary)" } = {}) 
   return `<svg viewBox="0 0 ${W} ${H}" class="bar-chart" preserveAspectRatio="xMidYMid meet">${bars}</svg>`;
 }
 
+// Kräftige (dunklere) Status-Farben – guter Kontrast zu weißer Schrift im Trichter.
+const FUNNEL_COLORS = {
+  neu: "#64748b",
+  kontaktiert: "#0891b2",
+  qualifiziert: "#6366f1",
+  angebot: "#d97706",
+  gewonnen: "#16a34a",
+};
+
+// Echter, sich verjüngender SVG-Trichter. Stufen = Pipeline ohne "verloren".
+// Zwischen den Stufen wird die Konversionsrate zur nächsten Stufe gezeigt.
 function funnelHtml(funnel) {
-  const max = Math.max(1, ...funnel.map((f) => f.count));
-  return `<div class="funnel">${funnel.map((f) => {
-    const pct = Math.round((f.count / max) * 100);
-    return `<div class="funnel-row">
-      <span class="funnel-label status-pill s-${f.status}">${esc(f.status)}</span>
-      <div class="funnel-bar-wrap"><div class="funnel-bar" style="width:${pct}%"></div></div>
-      <span class="funnel-count">${f.count} · ${fmtEuro(Math.round(f.value))}</span>
-    </div>`;
-  }).join("")}</div>`;
+  const stages = funnel.filter((f) => f.status !== "verloren");
+  const total = stages.reduce((a, f) => a + f.count, 0);
+  if (!total) return `<p class="d-muted">Noch keine Leads in der Pipeline.</p>`;
+
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const W = 720, segH = 72, gap = 4, padTop = 8;
+  const H = padTop + stages.length * segH + (stages.length - 1) * gap + 8;
+  const cx = W * 0.42;            // Trichter etwas links, rechts Platz für Konversionswerte
+  const maxW = W * 0.62, minW = 120;
+  const maxCount = Math.max(1, ...stages.map((s) => s.count));
+  const widthFor = (c) => minW + (c / maxCount) * (maxW - minW);
+
+  let y = padTop;
+  const segs = stages.map((s, i) => {
+    const next = stages[i + 1];
+    const topW = widthFor(s.count);
+    const botW = next ? widthFor(next.count) : topW * 0.82;
+    const yTop = y, yBot = y + segH, mid = (yTop + yBot) / 2;
+    const pts = `${cx - topW / 2},${yTop} ${cx + topW / 2},${yTop} ${cx + botW / 2},${yBot} ${cx - botW / 2},${yBot}`;
+    const color = FUNNEL_COLORS[s.status] || "var(--primary)";
+
+    let conv = "";
+    if (next) {
+      const pct = s.count ? Math.round((next.count / s.count) * 100) : 0;
+      conv = `<g>
+        <line x1="${cx + botW / 2}" y1="${yBot}" x2="${W - 160}" y2="${yBot}" class="funnel-guide" />
+        <text x="${W - 152}" y="${yBot - 3}" class="funnel-conv-pct">${pct} %</text>
+        <text x="${W - 152}" y="${yBot + 13}" class="funnel-conv-cap">${esc(cap(s.status))} → ${esc(next.status)}</text>
+      </g>`;
+    }
+    y = yBot + gap;
+    return `<g>
+      <polygon points="${pts}" fill="${color}" fill-opacity="0.92" stroke="${color}" />
+      <text x="${cx}" y="${mid - 4}" class="funnel-name">${esc(cap(s.status))}</text>
+      <text x="${cx}" y="${mid + 15}" class="funnel-sub">${s.count} · ${esc(fmtEuro(Math.round(s.value)))}</text>
+      ${conv}
+    </g>`;
+  }).join("");
+
+  return `<svg viewBox="0 0 ${W} ${H}" class="funnel-chart" preserveAspectRatio="xMidYMid meet">${segs}</svg>`;
 }
 
 async function renderReportsView() {
@@ -1454,43 +1496,44 @@ async function renderReportsView() {
     ["Gewonnen", eur(s.wonValue)],
     ["Abschlussquote", s.conversion + " %"],
     ["Ø Auftragswert", eur(r.avgWon)],
+    ["Ø Vertriebszyklus", r.avgCycleDays ? r.avgCycleDays + " Tage" : "—"],
   ].map(([label, val]) => `<div class="stat-card"><span class="stat-value">${esc(String(val))}</span><span class="stat-label">${esc(label)}</span></div>`).join("");
 
-  const created = r.createdByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
   const won = r.wonByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
+  const activity = r.activityByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
 
-  const sourceRows = r.bySource.length
-    ? r.bySource.map((x) => `<tr>
-        <td>${esc(x.source)}</td>
-        <td class="num">${x.count}</td>
-        <td class="num">${x.won}</td>
-        <td class="num">${eur(x.value)}</td>
-      </tr>`).join("")
-    : `<tr><td colspan="4" class="d-muted">Keine Daten.</td></tr>`;
+  // Verlust-Übersicht: Anzahl, Wert und Verlustquote (gegen abgeschlossene Deals).
+  const lost = r.funnel.find((f) => f.status === "verloren") || { count: 0, value: 0 };
+  const won_n = s.byStatus["gewonnen"] || 0;
+  const decided = won_n + lost.count;
+  const lostRate = decided ? Math.round((lost.count / decided) * 100) : 0;
 
   v.innerHTML = `
     <div class="view-head"><h2>📊 Berichte</h2></div>
+
+    <section class="card report-funnel">
+      <h3>Pipeline-Trichter</h3>
+      ${funnelHtml(r.funnel)}
+    </section>
+
     <section class="stats report-kpis">${kpis}</section>
 
     <div class="report-grid">
-      <section class="card">
-        <h3>Pipeline-Trichter</h3>
-        ${funnelHtml(r.funnel)}
-      </section>
-      <section class="card">
-        <h3>Neue Leads je Monat</h3>
-        ${barChart(created, { color: "var(--primary)" })}
-      </section>
       <section class="card">
         <h3>Gewonnener Umsatz je Monat</h3>
         ${barChart(won, { color: "var(--green)", format: (val) => (val >= 1000 ? Math.round(val / 1000) + "k" : val) })}
       </section>
       <section class="card">
-        <h3>Quellen-Performance</h3>
-        <table class="report-table">
-          <thead><tr><th>Quelle</th><th class="num">Leads</th><th class="num">Gewonnen</th><th class="num">Wert</th></tr></thead>
-          <tbody>${sourceRows}</tbody>
-        </table>
+        <h3>Vertriebsaktivität je Monat</h3>
+        ${barChart(activity, { color: "var(--accent)" })}
+      </section>
+      <section class="card">
+        <h3>Verlust-Übersicht</h3>
+        <div class="mini-stats">
+          <div><span class="mini-val">${lost.count}</span><span class="mini-lbl">Verlorene Leads</span></div>
+          <div><span class="mini-val">${esc(eur(lost.value))}</span><span class="mini-lbl">Verlorener Wert</span></div>
+          <div><span class="mini-val">${lostRate} %</span><span class="mini-lbl">Verlustquote</span></div>
+        </div>
       </section>
     </div>
   `;

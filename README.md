@@ -34,9 +34,10 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 - **Automatische Einträge** für Systemereignisse: Anlage, Recherche, KI-Score, Status­wechsel, KI-E-Mail/Empfehlung – chronologisch mit Zeit und Aktor
 
 **Berichte** (📊)
-- KPIs (Leads, gewichtete Pipeline, gewonnen, Abschlussquote, Ø Auftragswert)
-- **Pipeline-Trichter**, **neue Leads je Monat**, **gewonnener Umsatz je Monat** (abhängigkeitsfreie SVG-Charts)
-- **Quellen-Performance** (Leads/Gewonnen/Wert je Quelle)
+- KPIs (Leads, gewichtete Pipeline, gewonnen, Abschlussquote, Ø Auftragswert, Ø Vertriebszyklus)
+- **Echter Pipeline-Trichter** mit Stufen-Konversion (abhängigkeitsfreie SVG-Charts)
+- **Gewonnener Umsatz je Monat** und **Vertriebsaktivität je Monat**
+- **Verlust-Übersicht** (Anzahl, Wert und Verlustquote)
 
 **Betrieb & Sicherheit**
 - **Strukturiertes Logging** (JSON-Lines) mit Request-ID, Dauer, Aktor und Redaction sensibler Felder; Level über `LOG_LEVEL`, lesbar mit `LOG_PRETTY=1`
