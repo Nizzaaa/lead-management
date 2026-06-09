@@ -33,19 +33,14 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 - Jeder Touchpoint wird festgehalten: **Notiz, Anruf, E-Mail, Termin** (mit Ergebnis)
 - **Automatische Einträge** für Systemereignisse: Anlage, Recherche, KI-Score, Status­wechsel, KI-E-Mail/Empfehlung – chronologisch mit Zeit und Aktor
 
-**Aufgaben / Wiedervorlagen**
-- Aufgaben mit **Fälligkeit** anlegen – direkt am Lead oder in der globalen Ansicht
-- **Überfällige** Aufgaben sind hervorgehoben; ein **Zähler in der Navigation** zeigt offene/überfällige Aufgaben
-- Erledigen per Häkchen; erledigte Aufgaben optional einblendbar
-
 **Berichte** (📊)
-- KPIs (Leads, gewichtete Pipeline, gewonnen, Abschlussquote, Ø Auftragswert, offene Aufgaben)
+- KPIs (Leads, gewichtete Pipeline, gewonnen, Abschlussquote, Ø Auftragswert)
 - **Pipeline-Trichter**, **neue Leads je Monat**, **gewonnener Umsatz je Monat** (abhängigkeitsfreie SVG-Charts)
 - **Quellen-Performance** (Leads/Gewonnen/Wert je Quelle)
 
 **Betrieb & Sicherheit**
 - **Strukturiertes Logging** (JSON-Lines) mit Request-ID, Dauer, Aktor und Redaction sensibler Felder; Level über `LOG_LEVEL`, lesbar mit `LOG_PRETTY=1`
-- **Einbettung in Nextcloud** als iframe mit SSO über **Cloudflare Access + Zitadel** (oder alternativ eigener `oauth2-proxy`) – siehe [`docs/nextcloud-deployment.md`](docs/nextcloud-deployment.md) und die fertigen Stacks unter [`deploy/`](deploy/). Der authentifizierte Benutzer (`Cf-Access-Authenticated-User-Email` bzw. Proxy-Header) wird als Aktor in Timeline und Aufgaben übernommen.
+- **Einbettung in Nextcloud** als iframe mit SSO über **Cloudflare Access + Zitadel** (oder alternativ eigener `oauth2-proxy`) – siehe [`docs/nextcloud-deployment.md`](docs/nextcloud-deployment.md) und die fertigen Stacks unter [`deploy/`](deploy/). Der authentifizierte Benutzer (`Cf-Access-Authenticated-User-Email` bzw. Proxy-Header) wird als Aktor in der Timeline übernommen.
 
 ## Schnellstart mit Docker Compose (empfohlen)
 

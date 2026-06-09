@@ -68,7 +68,6 @@ function toLocalInput(iso) {
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
-const isOverdue = (t) => t && !t.done && t.dueAt && new Date(t.dueAt).getTime() < Date.now();
 
 // Felder der Sektion „Allgemeine Infos" (Schlüssel → Label), zentral definiert.
 const RESEARCH_FIELDS = [
@@ -149,8 +148,8 @@ function populateStatusSelect() {
     .join("");
 }
 
-// --- Routing (Liste ⇄ Detail ⇄ Aufgaben ⇄ Berichte) ------------------------
-const VIEWS = ["listView", "detailView", "tasksView", "reportsView"];
+// --- Routing (Liste ⇄ Detail ⇄ Berichte) -----------------------------------
+const VIEWS = ["listView", "detailView", "reportsView"];
 function showOnly(viewId) {
   for (const v of VIEWS) $("#" + v).classList.toggle("hidden", v !== viewId);
 }
@@ -163,7 +162,6 @@ function setActiveNav(name) {
 function router() {
   const lead = location.hash.match(/^#\/lead\/(.+)$/);
   if (lead) return showDetail(decodeURIComponent(lead[1]));
-  if (location.hash === "#/tasks") return showTasks();
   if (location.hash === "#/reports") return showReports();
   showList();
 }
@@ -193,14 +191,6 @@ function showDetail(id) {
   window.scrollTo(0, 0);
 }
 
-function showTasks() {
-  detailId = null;
-  showOnly("tasksView");
-  setActiveNav("tasks");
-  renderTasksView();
-  window.scrollTo(0, 0);
-}
-
 function showReports() {
   detailId = null;
   showOnly("reportsView");
@@ -213,27 +203,11 @@ function showReports() {
 async function refresh() {
   leads = await api("/api/leads");
   renderStats(await api("/api/stats"));
-  updateTaskBadge();
   if (detailId) {
     renderDetail();
     loadDetailExtras(detailId);
   } else {
     renderLeads();
-  }
-}
-
-// Zähler offener Aufgaben in der Navigation aktualisieren.
-async function updateTaskBadge() {
-  try {
-    const tasks = await api("/api/tasks?status=open");
-    const badge = $("#taskBadge");
-    const overdue = tasks.filter(isOverdue).length;
-    badge.textContent = tasks.length;
-    badge.classList.toggle("hidden", tasks.length === 0);
-    badge.classList.toggle("overdue", overdue > 0);
-    badge.title = overdue ? `${overdue} überfällig` : `${tasks.length} offen`;
-  } catch (err) {
-    /* Badge ist unkritisch */
   }
 }
 
@@ -552,33 +526,25 @@ function detailViewHtml(l) {
           ${aiBox}
           ${aiActions}
         </section>
-        <section class="card" id="taskPanel">${taskPanelHtml(null)}</section>
       </aside>
     </div>
   `;
 }
 
-// --- Detailseite: Aktivitäten-Timeline + Aufgaben --------------------------
+// --- Detailseite: Aktivitäten-Timeline -------------------------------------
 // Diese Daten liegen nicht im leads-Array, sondern werden je Detailseite
-// nachgeladen und in die Platzhalter-Panels gerendert.
+// nachgeladen und in das Platzhalter-Panel gerendert.
 let detailActivities = [];
-let detailTasks = [];
 
 async function loadDetailExtras(id) {
   try {
-    const [acts, tasks] = await Promise.all([
-      api(`/api/leads/${id}/activities`),
-      api(`/api/leads/${id}/tasks`),
-    ]);
+    const acts = await api(`/api/leads/${id}/activities`);
     if (detailId !== id) return; // inzwischen weggeblättert
     detailActivities = acts;
-    detailTasks = tasks;
     const ap = $("#activityPanel");
-    const tp = $("#taskPanel");
     if (ap) ap.innerHTML = activityPanelHtml(acts);
-    if (tp) tp.innerHTML = taskPanelHtml(tasks);
   } catch (err) {
-    /* Panels zeigen weiter den Ladezustand */
+    /* Panel zeigt weiter den Ladezustand */
   }
 }
 
@@ -637,41 +603,6 @@ function activityPanelHtml(acts) {
     list = `<ul class="act-list">${acts.map(activityItem).join("")}</ul>`;
   }
   return `<h3>Aktivitäten</h3>${form}${list}`;
-}
-
-function taskItem(t) {
-  const over = isOverdue(t);
-  const due = t.dueAt
-    ? `<span class="task-due ${over ? "overdue" : ""}" title="${esc(fmtDateTime(t.dueAt))}">📅 ${esc(over ? "überfällig · " : "")}${esc(relTime(t.dueAt))}</span>`
-    : "";
-  return `<li class="task-item ${t.done ? "done" : ""}">
-    <input type="checkbox" class="task-check" data-task-toggle="${t.id}" ${t.done ? "checked" : ""} />
-    <div class="task-body">
-      <span class="task-title">${esc(t.title)}</span>
-      ${due}
-    </div>
-    <button class="icon-btn task-del" data-del-task="${t.id}" title="Löschen">🗑️</button>
-  </li>`;
-}
-
-function taskPanelHtml(tasks) {
-  const form = `
-    <form class="task-form" id="taskForm">
-      <input type="text" id="task_title" placeholder="Neue Aufgabe / Wiedervorlage…" />
-      <div class="task-form-row">
-        <input type="datetime-local" id="task_due" />
-        <button type="submit" class="btn btn-sm btn-primary">+ Aufgabe</button>
-      </div>
-    </form>`;
-  let list;
-  if (tasks == null) {
-    list = `<p class="d-muted">Lädt…</p>`;
-  } else if (!tasks.length) {
-    list = `<p class="d-muted">Keine Aufgaben.</p>`;
-  } else {
-    list = `<ul class="task-list">${tasks.map(taskItem).join("")}</ul>`;
-  }
-  return `<h3>Aufgaben / Wiedervorlagen</h3>${form}${list}`;
 }
 
 // --- Detailseite: Bearbeiten-Modus ----------------------------------------
@@ -846,8 +777,6 @@ function onDetailClick(e) {
   }
   const delAct = e.target.closest("[data-del-act]");
   if (delAct) { removeActivity(delAct.dataset.delAct); return; }
-  const delTask = e.target.closest("[data-del-task]");
-  if (delTask) { removeTask(delTask.dataset.delTask, detailId); return; }
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
   const action = btn.dataset.action;
@@ -951,25 +880,10 @@ function bindEvents() {
 
   // Detailseite: ein delegierter Handler für alle Aktionen.
   $("#detailView").addEventListener("click", onDetailClick);
-  // Formulare (Aktivität/Aufgabe) und Checkbox-Umschalten – delegiert, da die
-  // Panels per innerHTML neu aufgebaut werden.
+  // Aktivitäten-Formular – delegiert, da das Panel per innerHTML neu
+  // aufgebaut wird.
   $("#detailView").addEventListener("submit", (e) => {
     if (e.target.id === "activityForm") { e.preventDefault(); addDetailActivity(); }
-    if (e.target.id === "taskForm") { e.preventDefault(); addDetailTask(); }
-  });
-  $("#detailView").addEventListener("change", (e) => {
-    const cb = e.target.closest("[data-task-toggle]");
-    if (cb) toggleTask(cb.dataset.taskToggle, cb.checked, detailId);
-  });
-
-  // Aufgaben-Ansicht (global): delegierte Handler.
-  $("#tasksView").addEventListener("click", onTasksViewClick);
-  $("#tasksView").addEventListener("change", (e) => {
-    const cb = e.target.closest("[data-task-toggle]");
-    if (cb) toggleTask(cb.dataset.taskToggle, cb.checked, null);
-  });
-  $("#tasksView").addEventListener("submit", (e) => {
-    if (e.target.id === "globalTaskForm") { e.preventDefault(); addGlobalTask(); }
   });
 
   // Schließen per Klick auf Overlay
@@ -1449,7 +1363,7 @@ async function runAi(action, id, btn) {
   }
 }
 
-// --- Detailseite: Aktivitäten & Aufgaben (Aktionen) ------------------------
+// --- Detailseite: Aktivitäten (Aktionen) -----------------------------------
 async function addDetailActivity() {
   const type = $("#act_type").value;
   const body = $("#act_body").value.trim();
@@ -1475,142 +1389,6 @@ async function removeActivity(actId) {
   try {
     await api(`/api/activities/${actId}`, { method: "DELETE" });
     loadDetailExtras(detailId);
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-
-async function addDetailTask() {
-  const title = $("#task_title").value.trim();
-  const due = $("#task_due").value;
-  if (!title) {
-    toast("Bitte einen Titel eingeben", "error");
-    return;
-  }
-  try {
-    await api("/api/tasks", {
-      method: "POST",
-      body: JSON.stringify({ title, dueAt: due ? new Date(due).toISOString() : null, leadId: detailId }),
-    });
-    toast("Aufgabe angelegt", "success");
-    loadDetailExtras(detailId);
-    updateTaskBadge();
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-
-async function toggleTask(taskId, done, leadId) {
-  try {
-    await api(`/api/tasks/${taskId}`, { method: "PUT", body: JSON.stringify({ done }) });
-    updateTaskBadge();
-    if (leadId) loadDetailExtras(leadId);
-    else renderTasksView();
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-
-async function removeTask(taskId, leadId) {
-  if (!confirm("Diese Aufgabe löschen?")) return;
-  try {
-    await api(`/api/tasks/${taskId}`, { method: "DELETE" });
-    updateTaskBadge();
-    if (leadId) loadDetailExtras(leadId);
-    else renderTasksView();
-  } catch (err) {
-    toast(err.message, "error");
-  }
-}
-
-// --- Globale Aufgaben-Ansicht ----------------------------------------------
-let tasksShowDone = false;
-
-async function renderTasksView() {
-  const v = $("#tasksView");
-  v.innerHTML = `<div class="view-head"><h2>✅ Aufgaben & Wiedervorlagen</h2></div><p class="d-muted">Lädt…</p>`;
-  let tasks;
-  try {
-    tasks = await api(`/api/tasks?status=${tasksShowDone ? "all" : "open"}`);
-  } catch (err) {
-    v.innerHTML = `<p class="warn">Fehler: ${esc(err.message)}</p>`;
-    return;
-  }
-
-  const leadOpts = leads
-    .map((l) => `<option value="${esc(l.id)}">${esc(l.company || l.name || "—")}</option>`)
-    .join("");
-
-  const open = tasks.filter((t) => !t.done);
-  const overdue = open.filter(isOverdue);
-
-  const rows = tasks.length
-    ? tasks.map(globalTaskRow).join("")
-    : `<p class="d-muted">Keine Aufgaben.</p>`;
-
-  v.innerHTML = `
-    <div class="view-head">
-      <h2>✅ Aufgaben & Wiedervorlagen</h2>
-      <label class="toggle-done"><input type="checkbox" id="toggleShowDone" ${tasksShowDone ? "checked" : ""}/> Erledigte zeigen</label>
-    </div>
-    <div class="task-summary">
-      <span class="chip-stat">${open.length} offen</span>
-      <span class="chip-stat ${overdue.length ? "overdue" : ""}">${overdue.length} überfällig</span>
-    </div>
-    <form class="task-form global" id="globalTaskForm">
-      <input type="text" id="gt_title" placeholder="Neue Aufgabe…" />
-      <select id="gt_lead"><option value="">— ohne Lead —</option>${leadOpts}</select>
-      <input type="datetime-local" id="gt_due" />
-      <button type="submit" class="btn btn-sm btn-primary">+ Aufgabe</button>
-    </form>
-    <ul class="task-list global">${rows}</ul>
-  `;
-  $("#toggleShowDone").addEventListener("change", (e) => {
-    tasksShowDone = e.target.checked;
-    renderTasksView();
-  });
-}
-
-function globalTaskRow(t) {
-  const over = isOverdue(t);
-  const leadLabel = t.leadCompany || t.leadName || "";
-  const leadLink = t.leadId
-    ? `<a class="task-lead" href="#/lead/${encodeURIComponent(t.leadId)}">🔗 ${esc(leadLabel || "Lead")}</a>`
-    : "";
-  const due = t.dueAt
-    ? `<span class="task-due ${over ? "overdue" : ""}">📅 ${esc(over ? "überfällig · " : "")}${esc(fmtDateTime(t.dueAt))}</span>`
-    : `<span class="task-due muted">ohne Termin</span>`;
-  return `<li class="task-item ${t.done ? "done" : ""}">
-    <input type="checkbox" class="task-check" data-task-toggle="${t.id}" ${t.done ? "checked" : ""} />
-    <div class="task-body">
-      <span class="task-title">${esc(t.title)}</span>
-      <span class="task-meta">${due} ${leadLink}</span>
-    </div>
-    <button class="icon-btn task-del" data-del-task="${t.id}" title="Löschen">🗑️</button>
-  </li>`;
-}
-
-function onTasksViewClick(e) {
-  const del = e.target.closest("[data-del-task]");
-  if (del) { removeTask(del.dataset.delTask, null); return; }
-}
-
-async function addGlobalTask() {
-  const title = $("#gt_title").value.trim();
-  const leadId = $("#gt_lead").value || null;
-  const due = $("#gt_due").value;
-  if (!title) {
-    toast("Bitte einen Titel eingeben", "error");
-    return;
-  }
-  try {
-    await api("/api/tasks", {
-      method: "POST",
-      body: JSON.stringify({ title, leadId, dueAt: due ? new Date(due).toISOString() : null }),
-    });
-    toast("Aufgabe angelegt", "success");
-    updateTaskBadge();
-    renderTasksView();
   } catch (err) {
     toast(err.message, "error");
   }
@@ -1676,7 +1454,6 @@ async function renderReportsView() {
     ["Gewonnen", eur(s.wonValue)],
     ["Abschlussquote", s.conversion + " %"],
     ["Ø Auftragswert", eur(r.avgWon)],
-    ["Offene Aufgaben", `${r.tasks.open}${r.tasks.overdue ? ` · ${r.tasks.overdue} überfällig` : ""}`],
   ].map(([label, val]) => `<div class="stat-card"><span class="stat-value">${esc(String(val))}</span><span class="stat-label">${esc(label)}</span></div>`).join("");
 
   const created = r.createdByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));

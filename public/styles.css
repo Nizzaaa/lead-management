@@ -524,16 +524,6 @@ a { color: inherit; }
 }
 .navlink:hover { background: var(--surface-2); color: var(--text); }
 .navlink.active { background: var(--surface-2); color: var(--text); }
-.nav-badge {
-  background: var(--primary);
-  color: #fff;
-  border-radius: 999px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  padding: 1px 7px;
-  line-height: 1.4;
-}
-.nav-badge.overdue { background: var(--red); }
 
 /* ===== View-Kopf ===== */
 .view-head {
@@ -545,7 +535,6 @@ a { color: inherit; }
   margin-bottom: 16px;
 }
 .view-head h2 { margin: 0; font-size: 1.4rem; }
-.toggle-done { color: var(--muted); font-size: 0.9rem; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 
 /* ===== Aktivitäten-Timeline ===== */
 #activityPanel .act-form { margin-bottom: 16px; }
@@ -582,47 +571,6 @@ a { color: inherit; }
 .act-outcome { margin: 4px 0 0; color: var(--accent); font-size: 0.84rem; }
 .act-ai .act-icon, .act-system .act-icon { background: rgba(99,102,241,0.18); }
 .act-status .act-icon { background: rgba(34,211,238,0.16); }
-
-/* ===== Aufgaben ===== */
-.task-form { margin-bottom: 14px; }
-.task-form input[type="text"] { width: 100%; margin-bottom: 8px; }
-.task-form-row { display: flex; gap: 8px; }
-.task-form-row input { flex: 1; }
-.task-form.global { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.task-form.global input[type="text"] { flex: 2; min-width: 200px; margin-bottom: 0; }
-.task-form.global select { flex: 1; min-width: 140px; }
-
-.task-list { list-style: none; margin: 0; padding: 0; }
-.task-list.global { margin-top: 16px; }
-.task-item {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--border);
-}
-.task-item:last-child { border-bottom: none; }
-.task-check { margin-top: 3px; width: 16px; height: 16px; flex: 0 0 auto; cursor: pointer; }
-.task-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-.task-title { font-size: 0.92rem; }
-.task-item.done .task-title { text-decoration: line-through; color: var(--muted); }
-.task-meta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-.task-due { color: var(--muted); font-size: 0.8rem; }
-.task-due.overdue { color: var(--red); font-weight: 600; }
-.task-due.muted { opacity: 0.6; }
-.task-lead { color: var(--accent); font-size: 0.8rem; text-decoration: none; }
-.task-lead:hover { text-decoration: underline; }
-.task-del { opacity: 0; transition: opacity 0.15s; }
-.task-item:hover .task-del { opacity: 0.7; }
-.task-summary { display: flex; gap: 10px; margin-bottom: 14px; }
-.chip-stat {
-  background: var(--surface-2);
-  border-radius: 999px;
-  padding: 4px 12px;
-  font-size: 0.82rem;
-  font-weight: 600;
-}
-.chip-stat.overdue { background: rgba(239,68,68,0.18); color: #fca5a5; }
 
 /* ===== Berichte ===== */
 .report-kpis { margin-bottom: 20px; }

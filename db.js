@@ -81,22 +81,10 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
         );
       `);
       await pool.query("CREATE INDEX IF NOT EXISTS idx_activities_lead ON activities(lead_id, created_at DESC);");
-      // Aufgaben / Wiedervorlagen: optional an einen Lead gebunden, mit Fälligkeit.
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS tasks (
-          id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          lead_id     UUID        REFERENCES leads(id) ON DELETE CASCADE,
-          title       TEXT        NOT NULL DEFAULT '',
-          notes       TEXT        NOT NULL DEFAULT '',
-          due_at      TIMESTAMPTZ,
-          done        BOOLEAN     NOT NULL DEFAULT false,
-          done_at     TIMESTAMPTZ,
-          actor       TEXT        NOT NULL DEFAULT '',
-          created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-      `);
-      await pool.query("CREATE INDEX IF NOT EXISTS idx_tasks_open ON tasks(done, due_at);");
-      await pool.query("CREATE INDEX IF NOT EXISTS idx_tasks_lead ON tasks(lead_id);");
+      // Aufgaben-Funktion wurde entfernt: Alttabelle und zugehörige
+      // System-Verlaufseinträge idempotent bereinigen.
+      await pool.query("DROP TABLE IF EXISTS tasks;");
+      await pool.query("DELETE FROM activities WHERE type = 'system' AND title LIKE 'Aufgabe %';");
       console.log("Datenbank verbunden, Schema bereit.");
       return;
     } catch (err) {
@@ -259,86 +247,6 @@ async function deleteActivity(id) {
   return rowCount > 0;
 }
 
-// --- Aufgaben / Wiedervorlagen ---------------------------------------------
-function rowToTask(row) {
-  return {
-    id: row.id,
-    leadId: row.lead_id,
-    title: row.title,
-    notes: row.notes,
-    dueAt: row.due_at instanceof Date ? row.due_at.toISOString() : row.due_at,
-    done: row.done,
-    doneAt: row.done_at instanceof Date ? row.done_at.toISOString() : row.done_at,
-    actor: row.actor,
-    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
-    // Bei der globalen Liste mitgelieferte Lead-Kurzinfos (per JOIN):
-    leadCompany: row.lead_company !== undefined ? row.lead_company : undefined,
-    leadName: row.lead_name !== undefined ? row.lead_name : undefined,
-  };
-}
-
-async function listTasksByLead(leadId) {
-  const { rows } = await pool.query(
-    "SELECT * FROM tasks WHERE lead_id = $1 ORDER BY done ASC, due_at ASC NULLS LAST, created_at DESC",
-    [leadId]
-  );
-  return rows.map(rowToTask);
-}
-
-// Globale Aufgabenliste mit Lead-Bezug. status: "open" | "done" | "all".
-async function listTasks(status = "open") {
-  let where = "";
-  if (status === "open") where = "WHERE t.done = false";
-  else if (status === "done") where = "WHERE t.done = true";
-  const { rows } = await pool.query(
-    `SELECT t.*, l.company AS lead_company, l.name AS lead_name
-     FROM tasks t LEFT JOIN leads l ON l.id = t.lead_id
-     ${where}
-     ORDER BY t.done ASC, t.due_at ASC NULLS LAST, t.created_at DESC`
-  );
-  return rows.map(rowToTask);
-}
-
-async function createTask(t) {
-  const { rows } = await pool.query(
-    `INSERT INTO tasks (lead_id, title, notes, due_at, actor)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING *`,
-    [t.leadId || null, t.title || "", t.notes || "", t.dueAt || null, t.actor || ""]
-  );
-  return rowToTask(rows[0]);
-}
-
-async function updateTask(id, t) {
-  const { rows } = await pool.query(
-    `UPDATE tasks
-     SET title = COALESCE($2, title),
-         notes = COALESCE($3, notes),
-         due_at = $4,
-         done = COALESCE($5, done),
-         done_at = CASE WHEN $5 IS TRUE THEN now() WHEN $5 IS FALSE THEN NULL ELSE done_at END
-     WHERE id = $1
-     RETURNING *`,
-    [id, t.title ?? null, t.notes ?? null, t.dueAt ?? null, t.done ?? null]
-  );
-  return rows[0] ? rowToTask(rows[0]) : null;
-}
-
-async function deleteTask(id) {
-  const { rowCount } = await pool.query("DELETE FROM tasks WHERE id = $1", [id]);
-  return rowCount > 0;
-}
-
-async function countOpenTasks() {
-  const { rows } = await pool.query(
-    `SELECT
-       COUNT(*)::int AS open,
-       COUNT(*) FILTER (WHERE due_at IS NOT NULL AND due_at < now())::int AS overdue
-     FROM tasks WHERE done = false`
-  );
-  return { open: rows[0].open, overdue: rows[0].overdue };
-}
-
 // --- Reporting -------------------------------------------------------------
 // Liefert die Daten für die Berichte-Seite in einem Rutsch.
 async function getReport(statuses, probabilities = {}) {
@@ -391,9 +299,7 @@ async function getReport(statuses, probabilities = {}) {
     ? Math.round(stats.wonValue / stats.byStatus["gewonnen"])
     : 0;
 
-  const tasks = await countOpenTasks();
-
-  return { stats, funnel, createdByMonth, wonByMonth, bySource, avgWon, tasks };
+  return { stats, funnel, createdByMonth, wonByMonth, bySource, avgWon };
 }
 
 // Füllt fehlende Monate der letzten 12 Monate mit 0 auf.
@@ -426,11 +332,5 @@ module.exports = {
   listActivities,
   createActivity,
   deleteActivity,
-  listTasksByLead,
-  listTasks,
-  createTask,
-  updateTask,
-  deleteTask,
-  countOpenTasks,
   getReport,
 };
