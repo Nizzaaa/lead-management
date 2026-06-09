@@ -486,12 +486,6 @@ function detailViewHtml(l) {
     </div>`;
   }
 
-  const contact = [
-    l.email ? `<span>✉️ <a href="mailto:${esc(l.email)}">${esc(l.email)}</a></span>` : "",
-    l.phone ? `<span>📞 ${esc(l.phone)}</span>` : "",
-    l.source ? `<span>🌐 ${esc(l.source)}</span>` : "",
-  ].filter(Boolean).join("");
-
   return `
     <div class="detail-bar">
       <a class="btn btn-sm" href="#/">← Zurück</a>
@@ -506,7 +500,6 @@ function detailViewHtml(l) {
       <div>
         <h1>${esc(l.company) || esc(l.name) || "—"}</h1>
         ${l.company && l.name ? `<p class="detail-sub">👤 ${esc(l.name)}</p>` : ""}
-        <div class="detail-contact">${contact || `<span class="d-muted">Keine Kontaktdaten</span>`}</div>
       </div>
       <div class="detail-hero-right">
         <span class="status-pill s-${l.status}">${l.status}</span>
@@ -515,26 +508,55 @@ function detailViewHtml(l) {
     </header>
 
     <div class="detail-layout">
-      <div class="detail-main">
-        ${l.notes ? `<section class="d-section card"><h3>Notizen</h3><p class="d-text">${esc(l.notes)}</p></section>` : ""}
-        <div class="card">${researchHtml}</div>
-        <section class="card" id="activityPanel">${activityPanelHtml(null)}</section>
-      </div>
       <aside class="detail-side">
+        <section class="card lead-about">
+          <h3>Über</h3>
+          ${leadAboutHtml(l)}
+        </section>
         <section class="card">
           <h3>KI-Bewertung</h3>
           ${aiBox}
           ${aiActions}
         </section>
       </aside>
+
+      <div class="detail-main">
+        <div class="detail-tabs" role="tablist">
+          <button type="button" class="dtab active" data-dtab="activity">📌 Aktivitäten</button>
+          <button type="button" class="dtab" data-dtab="dossier">📋 Dossier</button>
+        </div>
+        <div class="dtab-panel" data-dtab-panel="activity">
+          <section class="card" id="activityPanel">${activityPanelHtml(null)}</section>
+        </div>
+        <div class="dtab-panel hidden" data-dtab-panel="dossier">
+          ${l.notes ? `<section class="card"><h3>Notizen</h3><p class="d-text">${esc(l.notes)}</p></section>` : ""}
+          <div class="card">${researchHtml}</div>
+        </div>
+      </div>
     </div>
   `;
+}
+
+// Kompakte „Über"-Karte (Sidebar): Kontakt- und Stammdaten des Leads.
+function leadAboutHtml(l) {
+  const dt = (iso) => (iso ? new Date(iso).toLocaleDateString("de-DE", { day: "2-digit", month: "short", year: "numeric" }) : "—");
+  const rows = [
+    l.email ? ["E-Mail", `<a href="mailto:${esc(l.email)}">${esc(l.email)}</a>`] : null,
+    l.phone ? ["Telefon", esc(l.phone)] : null,
+    ["Quelle", l.source ? esc(l.source) : "—"],
+    ["Wert", esc(fmtEuro(l.value))],
+    ["Angelegt", esc(dt(l.createdAt))],
+    ["Aktualisiert", esc(dt(l.updatedAt))],
+  ].filter(Boolean);
+  return `<dl class="about-list">${rows.map(([k, val]) => `<div><dt>${esc(k)}</dt><dd>${val}</dd></div>`).join("")}</dl>`;
 }
 
 // --- Detailseite: Aktivitäten-Timeline -------------------------------------
 // Diese Daten liegen nicht im leads-Array, sondern werden je Detailseite
 // nachgeladen und in das Platzhalter-Panel gerendert.
 let detailActivities = [];
+let composerType = "note";    // aktuell im Composer gewählter Aktivitätstyp
+let activityFilter = "all";   // aktiver Timeline-Filter
 
 async function loadDetailExtras(id) {
   try {
@@ -558,51 +580,136 @@ const ACTIVITY_META = {
   system:  { icon: "⚙️", label: "System" },
 };
 
+// --- Composer (Tab-basierte Aktivitätserfassung) ---------------------------
+// Pro Typ: Platzhalter, Button-Text, ob ein Ergebnisfeld gezeigt wird und
+// optionale Schnell-Ergebnisse (für Anrufe).
+const COMPOSER_META = {
+  note:    { ph: "Notiz hinzufügen … Kontext, Vereinbarungen, To-dos", btn: "Notiz speichern", outcome: false, chips: [] },
+  call:    { ph: "Gesprächsnotiz … worüber wurde gesprochen?", btn: "Anruf protokollieren", outcome: true,
+             chips: ["Erreicht", "Mailbox", "Kein Anschluss", "Rückruf vereinbart", "Termin vereinbart", "Kein Interesse"] },
+  email:   { ph: "Worum ging es in der E-Mail?", btn: "E-Mail protokollieren", outcome: false, chips: [] },
+  meeting: { ph: "Termin-Notiz … Teilnehmer, Ergebnis, nächste Schritte", btn: "Termin protokollieren", outcome: true, chips: [] },
+};
+const COMPOSER_TABS = [["note", "📝", "Notiz"], ["call", "📞", "Anruf"], ["email", "✉️", "E-Mail"], ["meeting", "📅", "Termin"]];
+
+function composerHtml() {
+  const c = COMPOSER_META[composerType] || COMPOSER_META.note;
+  const tabs = COMPOSER_TABS.map(([t, ic, lb]) =>
+    `<button type="button" class="act-tab ${t === composerType ? "active" : ""}" data-act-tab="${t}">${ic} ${lb}</button>`
+  ).join("");
+  const chips = c.chips.length
+    ? `<div class="act-chips" id="actChips">${c.chips.map((o) => `<button type="button" class="act-chip" data-outcome="${esc(o)}">${esc(o)}</button>`).join("")}</div>`
+    : "";
+  const outcome = c.outcome
+    ? `<input type="text" id="act_outcome" class="act-outcome-input" placeholder="Ergebnis (optional)" />`
+    : "";
+  return `<div class="act-composer" id="activityComposer">
+    <div class="act-tabs">${tabs}</div>
+    <form id="activityForm">
+      <textarea id="act_body" rows="3" placeholder="${esc(c.ph)}"></textarea>
+      ${chips}
+      <div class="act-composer-foot">
+        ${outcome}
+        <button type="submit" class="btn btn-sm btn-primary" id="actSubmitBtn">${esc(c.btn)}</button>
+      </div>
+    </form>
+  </div>`;
+}
+
+// Composer-Typ wechseln, ohne den bereits eingegebenen Text zu verlieren.
+function setComposerType(type) {
+  if (!COMPOSER_META[type]) return;
+  const prev = $("#act_body") ? $("#act_body").value : "";
+  composerType = type;
+  const host = $("#activityComposer");
+  if (host) host.outerHTML = composerHtml();
+  const ta = $("#act_body");
+  if (ta) { ta.value = prev; ta.focus(); }
+}
+
+// Schnell-Ergebnis-Chip (Anruf) übernimmt seinen Wert in das Ergebnisfeld.
+function applyOutcomeChip(el) {
+  const inp = $("#act_outcome");
+  if (inp) inp.value = el.dataset.outcome;
+  document.querySelectorAll("#actChips .act-chip").forEach((c) => c.classList.toggle("active", c === el));
+}
+
+// --- Timeline (gruppiert nach Datum, mit Typ-Filter) -----------------------
+const FILTER_TYPES = { all: null, note: ["note"], call: ["call"], email: ["email"], meeting: ["meeting"], system: ["status", "ai", "system"] };
+const FILTERS = [["all", "Alle"], ["note", "Notizen"], ["call", "Anrufe"], ["email", "E-Mails"], ["meeting", "Termine"], ["system", "System"]];
+
+function filterActs(acts) {
+  const types = FILTER_TYPES[activityFilter];
+  return types ? acts.filter((a) => types.includes(a.type)) : acts;
+}
+
+function filterBarHtml(acts) {
+  return `<div class="act-filters">${FILTERS.map(([k, lb]) => {
+    const types = FILTER_TYPES[k];
+    const n = types ? acts.filter((a) => types.includes(a.type)).length : acts.length;
+    return `<button type="button" class="act-filter ${k === activityFilter ? "active" : ""}" data-filter="${k}">${esc(lb)}<span class="act-filter-n">${n}</span></button>`;
+  }).join("")}</div>`;
+}
+
+function setActivityFilter(f) {
+  if (!FILTER_TYPES[f]) return;
+  activityFilter = f;
+  document.querySelectorAll("[data-filter]").forEach((b) => b.classList.toggle("active", b.dataset.filter === f));
+  const list = $("#activityList");
+  if (list) list.innerHTML = timelineHtml(filterActs(detailActivities));
+}
+
+// Datums-Gruppe für eine Aktivität: Heute / Gestern / Diese Woche / Datum.
+function dateBucket(iso) {
+  const d = new Date(iso), now = new Date();
+  const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((startOf(now) - startOf(d)) / 86400000);
+  if (diff <= 0) return "Heute";
+  if (diff === 1) return "Gestern";
+  if (diff < 7) return "Diese Woche";
+  return d.toLocaleDateString("de-DE", { day: "numeric", month: "long", year: "numeric" });
+}
+
 function activityItem(a) {
   const m = ACTIVITY_META[a.type] || ACTIVITY_META.note;
   const who = a.actor && a.actor !== "—" ? ` · ${esc(a.actor)}` : "";
   const canDelete = ["note", "call", "email", "meeting"].includes(a.type);
+  const title = a.title ? esc(a.title) : esc(m.label);
   return `<li class="act-item act-${a.type}">
-    <span class="act-icon" title="${esc(m.label)}">${m.icon}</span>
-    <div class="act-body">
+    <span class="act-dot" title="${esc(m.label)}">${m.icon}</span>
+    <div class="act-card">
       <div class="act-head">
-        ${a.title ? `<strong>${esc(a.title)}</strong>` : `<strong>${esc(m.label)}</strong>`}
+        <strong>${title}</strong>
         <span class="act-time" title="${esc(fmtDateTime(a.createdAt))}">${esc(relTime(a.createdAt))}${who}</span>
         ${canDelete ? `<button class="icon-btn act-del" data-del-act="${a.id}" title="Löschen">🗑️</button>` : ""}
       </div>
       ${a.body ? `<p class="act-text">${esc(a.body)}</p>` : ""}
-      ${a.outcome ? `<p class="act-outcome">➡️ ${esc(a.outcome)}</p>` : ""}
+      ${a.outcome ? `<span class="act-outcome-chip">${esc(a.outcome)}</span>` : ""}
     </div>
   </li>`;
 }
 
-function activityPanelHtml(acts) {
-  const form = `
-    <form class="act-form" id="activityForm">
-      <div class="act-form-row">
-        <select id="act_type">
-          <option value="note">📝 Notiz</option>
-          <option value="call">📞 Anruf</option>
-          <option value="email">✉️ E-Mail</option>
-          <option value="meeting">📅 Termin</option>
-        </select>
-        <input type="text" id="act_outcome" placeholder="Ergebnis (optional, z. B. Rückruf vereinbart)" />
-      </div>
-      <textarea id="act_body" rows="2" placeholder="Was ist passiert? (Gesprächsnotiz, Vereinbarung …)"></textarea>
-      <div class="act-form-actions">
-        <button type="submit" class="btn btn-sm btn-primary">+ Aktivität festhalten</button>
-      </div>
-    </form>`;
-
-  let list;
-  if (acts == null) {
-    list = `<p class="d-muted">Lädt…</p>`;
-  } else if (!acts.length) {
-    list = `<p class="d-muted">Noch keine Aktivitäten. Halte den ersten Kontakt fest.</p>`;
-  } else {
-    list = `<ul class="act-list">${acts.map(activityItem).join("")}</ul>`;
+function timelineHtml(acts) {
+  if (acts == null) return `<p class="d-muted">Lädt…</p>`;
+  if (!acts.length) return `<p class="act-empty">Keine Aktivitäten in dieser Ansicht.</p>`;
+  let out = `<ul class="act-timeline">`;
+  let bucket = null;
+  for (const a of acts) {
+    const b = dateBucket(a.createdAt);
+    if (b !== bucket) { out += `<li class="act-date">${esc(b)}</li>`; bucket = b; }
+    out += activityItem(a);
   }
-  return `<h3>Aktivitäten</h3>${form}${list}`;
+  return out + `</ul>`;
+}
+
+function activityPanelHtml(acts) {
+  composerType = "note";   // frischer Composer bei jedem (Neu-)Aufbau
+  activityFilter = "all";
+  const filters = acts && acts.length ? filterBarHtml(acts) : "";
+  return `<div class="act-panel-head"><h3>Aktivitäten</h3></div>
+    ${composerHtml()}
+    ${filters}
+    <div id="activityList">${timelineHtml(acts)}</div>`;
 }
 
 // --- Detailseite: Bearbeiten-Modus ----------------------------------------
@@ -775,6 +882,14 @@ function onDetailClick(e) {
     e.target.closest(".pot-row").remove();
     return;
   }
+  const dtab = e.target.closest("[data-dtab]");
+  if (dtab) { switchDetailTab(dtab.dataset.dtab); return; }
+  const atab = e.target.closest("[data-act-tab]");
+  if (atab) { setComposerType(atab.dataset.actTab); return; }
+  const chip = e.target.closest("[data-outcome]");
+  if (chip) { applyOutcomeChip(chip); return; }
+  const fil = e.target.closest("[data-filter]");
+  if (fil) { setActivityFilter(fil.dataset.filter); return; }
   const delAct = e.target.closest("[data-del-act]");
   if (delAct) { removeActivity(delAct.dataset.delAct); return; }
   const btn = e.target.closest("[data-action]");
@@ -1363,13 +1478,20 @@ async function runAi(action, id, btn) {
   }
 }
 
-// --- Detailseite: Aktivitäten (Aktionen) -----------------------------------
+// --- Detailseite: Tab-Umschaltung + Aktivitäten (Aktionen) -----------------
+function switchDetailTab(name) {
+  document.querySelectorAll("[data-dtab]").forEach((b) => b.classList.toggle("active", b.dataset.dtab === name));
+  document.querySelectorAll("[data-dtab-panel]").forEach((p) => p.classList.toggle("hidden", p.dataset.dtabPanel !== name));
+}
+
 async function addDetailActivity() {
-  const type = $("#act_type").value;
-  const body = $("#act_body").value.trim();
-  const outcome = $("#act_outcome").value.trim();
+  const type = composerType;
+  const bodyEl = $("#act_body");
+  const body = bodyEl ? bodyEl.value.trim() : "";
+  const outEl = $("#act_outcome");
+  const outcome = outEl ? outEl.value.trim() : "";
   if (!body && !outcome) {
-    toast("Bitte einen Text eingeben", "error");
+    toast("Bitte etwas eingeben", "error");
     return;
   }
   try {

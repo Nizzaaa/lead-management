@@ -29,8 +29,9 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 > Die Web-Recherche läuft über die serverseitigen Anthropic-Tools `web_search` und `web_fetch`
 > und benötigt daher einen gesetzten `ANTHROPIC_API_KEY`.
 
-**Aktivitäten-Timeline** (je Lead)
-- Jeder Touchpoint wird festgehalten: **Notiz, Anruf, E-Mail, Termin** (mit Ergebnis)
+**Aktivitäten-Timeline** (je Lead, prominent auf der Detailseite)
+- **Tab-Composer** zum Erfassen von **Notiz, Anruf, E-Mail, Termin**; für Anrufe Schnell-Ergebnisse (z. B. „Erreicht", „Rückruf vereinbart")
+- **Vertikale Timeline** mit farbcodierten Typ-Icons, Datums-Gruppierung (Heute/Gestern/…) und **Filter nach Typ**
 - **Automatische Einträge** für Systemereignisse: Anlage, Recherche, KI-Score, Status­wechsel, KI-E-Mail/Empfehlung – chronologisch mit Zeit und Aktor
 
 **Berichte** (📊)
