@@ -12,6 +12,17 @@ pool.on("error", (err) => {
   console.error("Unerwarteter Fehler im DB-Pool:", err.message);
 });
 
+// Ein DATE-Wert (next_step_at) als reines "YYYY-MM-DD" – unabhängig davon, ob
+// der Treiber ein Date-Objekt oder bereits einen String liefert (zeitzonensicher).
+function toYMD(d) {
+  if (!d) return null;
+  if (d instanceof Date) {
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+  return String(d).slice(0, 10);
+}
+
 // Wandelt eine DB-Zeile (snake_case) in die vom Frontend erwartete Form (camelCase) um.
 function rowToLead(row) {
   return {
@@ -24,6 +35,8 @@ function rowToLead(row) {
     status: row.status,
     value: Number(row.value),
     notes: row.notes,
+    nextStep: row.next_step || "",
+    nextStepAt: toYMD(row.next_step_at),
     ai: row.ai, // JSONB → bereits als Objekt/null geparst
     research: row.research, // JSONB → strukturierte Lead-Recherche (oder null)
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
@@ -55,9 +68,12 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
           updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
         );
       `);
-      // Spalte für bestehende Datenbanken nachrüsten (idempotent).
+      // Spalten für bestehende Datenbanken nachrüsten (idempotent).
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS research JSONB;");
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_step TEXT NOT NULL DEFAULT '';");
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_step_at DATE;");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_next_step ON leads(next_step_at);");
       // Schlüssel/Wert-Tabelle für App-Einstellungen (z. B. gewähltes KI-Modell).
       await pool.query(`
         CREATE TABLE IF NOT EXISTS app_settings (
@@ -110,10 +126,11 @@ async function getLead(id) {
 
 async function createLead(data, research = null) {
   const { rows } = await pool.query(
-    `INSERT INTO leads (id, name, company, email, phone, source, status, value, notes, research)
-     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `INSERT INTO leads (id, name, company, email, phone, source, status, value, notes, next_step, next_step_at, research)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
      RETURNING *`,
-    [data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes, research]
+    [data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes,
+     data.nextStep || "", data.nextStepAt || null, research]
   );
   return rowToLead(rows[0]);
 }
@@ -122,12 +139,26 @@ async function updateLead(id, data) {
   const { rows } = await pool.query(
     `UPDATE leads
      SET name = $2, company = $3, email = $4, phone = $5, source = $6,
-         status = $7, value = $8, notes = $9, updated_at = now()
+         status = $7, value = $8, notes = $9, next_step = $10, next_step_at = $11, updated_at = now()
      WHERE id = $1
      RETURNING *`,
-    [id, data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes]
+    [id, data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes,
+     data.nextStep || "", data.nextStepAt || null]
   );
   return rows[0] ? rowToLead(rows[0]) : null;
+}
+
+// Mögliche Dubletten zu E-Mail/Firma (case-insensitiv). Für die Warnung beim
+// manuellen Anlegen. Leere Kriterien werden ignoriert.
+async function findDuplicateLeads({ email = "", company = "" } = {}) {
+  const { rows } = await pool.query(
+    `SELECT * FROM leads
+     WHERE (NULLIF($1,'') IS NOT NULL AND lower(email)   = lower($1))
+        OR (NULLIF($2,'') IS NOT NULL AND lower(company) = lower($2))
+     ORDER BY created_at DESC LIMIT 5`,
+    [email, company]
+  );
+  return rows.map(rowToLead);
 }
 
 async function setLeadAi(id, ai) {
@@ -318,6 +349,7 @@ module.exports = {
   getLead,
   createLead,
   updateLead,
+  findDuplicateLeads,
   setLeadAi,
   setLeadResearch,
   updateLeadResearch,

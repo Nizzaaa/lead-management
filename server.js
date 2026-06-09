@@ -82,6 +82,10 @@ function sanitizeLead(body = {}) {
   if (!STATUSES.includes(status)) status = "neu";
   let value = Number(body.value);
   if (!Number.isFinite(value) || value < 0) value = 0;
+  // Wiedervorlage-Datum: ausschließlich YYYY-MM-DD akzeptieren, sonst null.
+  let nextStepAt = null;
+  const ns = clean(body.nextStepAt);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(ns) && !Number.isNaN(new Date(ns).getTime())) nextStepAt = ns;
   return {
     name: clean(body.name),
     company: clean(body.company),
@@ -91,6 +95,8 @@ function sanitizeLead(body = {}) {
     status,
     value,
     notes: clean(body.notes),
+    nextStep: clean(body.nextStep),
+    nextStepAt,
   };
 }
 
@@ -299,6 +305,13 @@ app.post("/api/leads", wrap(async (req, res) => {
   if (!data.name && !data.company) {
     return res.status(400).json({ error: "Name oder Firma ist erforderlich." });
   }
+  // Dublettenprüfung: bei Treffer warnen (außer der Nutzer erzwingt das Anlegen).
+  if (!req.body.force) {
+    const duplicates = await db.findDuplicateLeads({ email: data.email, company: data.company });
+    if (duplicates.length) {
+      return res.status(409).json({ error: "Möglicher Doppeleintrag.", duplicates });
+    }
+  }
   const lead = await db.createLead(data);
   await logActivity(lead.id, { type: "system", title: "Lead manuell angelegt" }, actor(req));
   res.status(201).json(lead);
@@ -407,6 +420,15 @@ app.put("/api/leads/:id", wrap(async (req, res) => {
     }, actor(req));
   }
   res.json(lead);
+}));
+
+// DSGVO-Datenauskunft: alle zu einem Lead gespeicherten Daten (Stammdaten +
+// Aktivitäten) als JSON – erfüllt Auskunft (Art. 15) und Übertragbarkeit (Art. 20).
+app.get("/api/leads/:id/export", wrap(async (req, res) => {
+  const lead = await db.getLead(req.params.id);
+  if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
+  const activities = await db.listActivities(lead.id);
+  res.json({ exportedAt: new Date().toISOString(), lead, activities });
 }));
 
 // Lead löschen

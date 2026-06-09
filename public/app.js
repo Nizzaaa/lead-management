@@ -6,6 +6,7 @@ let statuses = [];
 let aiEnabled = false;
 let activeFilter = "alle";
 let searchTerm = "";
+let dueOnly = false; // Filter: nur fällige/überfällige Wiedervorlagen
 let models = [];
 let currentModel = "";
 let stageProbabilities = {};
@@ -69,6 +70,24 @@ function toLocalInput(iso) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// Heutiges Datum als "YYYY-MM-DD" (lokal) – für Fälligkeitsvergleiche.
+function todayYMD() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// Fälligkeit einer Wiedervorlage (ymd = "YYYY-MM-DD") → Zustand + Label.
+function dueInfo(ymd) {
+  if (!ymd) return null;
+  const today = todayYMD();
+  let state = "future";
+  if (ymd < today) state = "overdue";
+  else if (ymd === today) state = "today";
+  const label = state === "overdue" ? "überfällig" : state === "today" ? "heute" : fmtDate(ymd);
+  return { state, label };
+}
+
 // Felder der Sektion „Allgemeine Infos" (Schlüssel → Label), zentral definiert.
 const RESEARCH_FIELDS = [
   ["branche", "Branche"],
@@ -90,7 +109,12 @@ async function api(path, opts = {}) {
   });
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Anfrage fehlgeschlagen");
+  if (!res.ok) {
+    const err = new Error(data.error || "Anfrage fehlgeschlagen");
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 
@@ -223,14 +247,22 @@ function renderStats(stats) {
 }
 
 function filteredLeads() {
+  const today = todayYMD();
   return leads.filter((l) => {
     if (activeFilter !== "alle" && l.status !== activeFilter) return false;
+    if (dueOnly && !(l.nextStepAt && l.nextStepAt <= today)) return false;
     if (searchTerm) {
       const hay = `${l.name} ${l.company} ${l.email} ${l.source}`.toLowerCase();
       if (!hay.includes(searchTerm)) return false;
     }
     return true;
   });
+}
+
+// Anzahl fälliger/überfälliger Wiedervorlagen (für den Toolbar-Chip).
+function dueLeadCount() {
+  const today = todayYMD();
+  return leads.filter((l) => l.nextStepAt && l.nextStepAt <= today).length;
 }
 
 function scoreColor(score) {
@@ -262,6 +294,13 @@ function renderLeads() {
   $("#kanban").classList.toggle("hidden", !isKanban);
   if (isKanban) renderKanban();
   else renderList();
+  // Fälligkeits-Chip mit Anzahl aktualisieren.
+  const n = dueLeadCount();
+  const badge = $("#dueCount");
+  if (badge) {
+    badge.textContent = n;
+    badge.classList.toggle("hidden", n === 0);
+  }
 }
 
 function renderList() {
@@ -349,6 +388,13 @@ function scoreBadge(l, cls) {
   return `<span class="${cls}" style="color:${scoreColor(l.ai.score)};border-color:${scoreColor(l.ai.score)}">★ ${l.ai.score}</span>`;
 }
 
+// Wiedervorlage-Badge für Karten (rot=überfällig, amber=heute, dezent=zukünftig).
+function nextStepBadge(l) {
+  const info = dueInfo(l.nextStepAt);
+  if (!info) return "";
+  return `<span class="next-step-badge ${info.state}" title="${esc(l.nextStep || "Wiedervorlage")}">⏰ ${esc(info.label)}</span>`;
+}
+
 // Kartenansicht: nur Firma, Ansprechpartner, Status, Branche, Wert, KI-Score.
 function leadCard(l) {
   const branche = l.research ? fieldVal(l.research.fields && l.research.fields.branche) : "";
@@ -362,6 +408,7 @@ function leadCard(l) {
       ${branche ? `<span>🏷️ ${esc(branche)}</span>` : ""}
       ${!l.research ? `<span class="muted-note">keine Recherche</span>` : ""}
     </div>
+    ${nextStepBadge(l) ? `<div class="lead-card-next">${nextStepBadge(l)}</div>` : ""}
     <div class="lead-card-foot">
       <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
       ${scoreBadge(l, "score-chip")}
@@ -378,6 +425,7 @@ function kanbanCard(l) {
     ${l.name && l.company ? `<div class="kanban-card-sub">${esc(l.name)}</div>` : ""}
     <div class="kanban-card-foot">
       <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
+      ${nextStepBadge(l)}
     </div>
   </article>`;
 }
@@ -491,6 +539,7 @@ function detailViewHtml(l) {
       <a class="btn btn-sm" href="#/">← Zurück</a>
       <div class="detail-bar-actions">
         ${aiEnabled && r ? `<button class="btn btn-sm" data-action="research">🔄 Neu recherchieren</button>` : ""}
+        <button class="btn btn-sm" data-action="export" title="Alle Daten dieses Leads als JSON (DSGVO-Auskunft)">⬇️ Datenauskunft</button>
         <button class="btn btn-sm" data-action="edit">✏️ Bearbeiten</button>
         <button class="btn btn-sm btn-danger" data-action="delete">🗑️ Löschen</button>
       </div>
@@ -526,6 +575,7 @@ function detailViewHtml(l) {
           <button type="button" class="dtab" data-dtab="dossier">📋 Dossier</button>
         </div>
         <div class="dtab-panel" data-dtab-panel="activity">
+          ${nextStepBannerHtml(l)}
           <section class="card" id="activityPanel">${activityPanelHtml(null)}</section>
         </div>
         <div class="dtab-panel hidden" data-dtab-panel="dossier">
@@ -549,6 +599,29 @@ function leadAboutHtml(l) {
     ["Aktualisiert", esc(dt(l.updatedAt))],
   ].filter(Boolean);
   return `<dl class="about-list">${rows.map(([k, val]) => `<div><dt>${esc(k)}</dt><dd>${val}</dd></div>`).join("")}</dl>`;
+}
+
+// Wiedervorlage-Banner oben im Aktivitäten-Tab: nächster Schritt + Fälligkeit.
+function nextStepBannerHtml(l) {
+  const info = dueInfo(l.nextStepAt);
+  if (!l.nextStep && !info) {
+    return `<div class="next-step-banner empty">
+      <span class="ns-text">Kein nächster Schritt geplant.</span>
+      <button type="button" class="btn btn-sm" data-action="next-step-edit">+ Wiedervorlage planen</button>
+    </div>`;
+  }
+  const due = info ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>` : "";
+  return `<div class="next-step-banner ${info ? info.state : ""}">
+    <div class="ns-main">
+      <span class="ns-label">Nächster Schritt</span>
+      <span class="ns-text">${esc(l.nextStep || "—")}</span>
+      ${due}
+    </div>
+    <div class="ns-actions">
+      <button type="button" class="btn btn-sm" data-action="next-step-done">✓ Erledigt</button>
+      <button type="button" class="btn btn-sm" data-action="next-step-edit">Bearbeiten</button>
+    </div>
+  </div>`;
 }
 
 // --- Detailseite: Aktivitäten-Timeline -------------------------------------
@@ -801,6 +874,10 @@ function detailEditHtml(l) {
           ${input("ed_value", "Geschätzter Wert (€)", l.value, "number")}
         </div>
         <label>Status<select id="ed_status">${statusOpts}</select></label>
+        <div class="form-row">
+          ${input("ed_next_step", "Nächster Schritt", l.nextStep || "")}
+          ${input("ed_next_step_at", "Wiedervorlage am", l.nextStepAt || "", "date")}
+        </div>
         ${textarea("ed_notes", "Notizen", l.notes)}
       </div>
       ${researchEdit}
@@ -819,6 +896,8 @@ function collectStammdaten() {
     source: g("ed_source"),
     value: g("ed_value"),
     status: g("ed_status"),
+    nextStep: g("ed_next_step"),
+    nextStepAt: g("ed_next_step_at"),
     notes: g("ed_notes"),
   };
 }
@@ -916,6 +995,15 @@ function onDetailClick(e) {
     case "delete":
       deleteLead(id, true);
       break;
+    case "export":
+      exportLead(id);
+      break;
+    case "next-step-done":
+      completeNextStep(id);
+      break;
+    case "next-step-edit":
+      openLeadModal(id);
+      break;
     case "research":
       researchLead(id, btn);
       break;
@@ -934,6 +1022,14 @@ function bindEvents() {
   $("#closeModal").addEventListener("click", closeLeadModal);
   $("#cancelBtn").addEventListener("click", closeLeadModal);
   $("#leadForm").addEventListener("submit", saveLead);
+
+  $("#dueFilter").addEventListener("click", () => {
+    dueOnly = !dueOnly;
+    $("#dueFilter").classList.toggle("active", dueOnly);
+    renderLeads();
+  });
+  $("#dupClose").addEventListener("click", closeDupModal);
+  $("#dupCancel").addEventListener("click", closeDupModal);
 
   $("#closeResearchModal").addEventListener("click", closeResearchModal);
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
@@ -1025,6 +1121,8 @@ function openLeadModal(id) {
     $("#f_source").value = l.source;
     $("#f_value").value = l.value;
     $("#f_status").value = l.status;
+    $("#f_next_step").value = l.nextStep || "";
+    $("#f_next_step_at").value = l.nextStepAt || "";
     $("#f_notes").value = l.notes;
   } else {
     $("#modalTitle").textContent = "Neuer Lead";
@@ -1050,22 +1148,103 @@ async function saveLead(e) {
     source: $("#f_source").value,
     value: $("#f_value").value,
     status: $("#f_status").value,
+    nextStep: $("#f_next_step").value,
+    nextStepAt: $("#f_next_step_at").value,
     notes: $("#f_notes").value,
   };
   try {
     if (id) {
       await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify(payload) });
       toast("Lead aktualisiert", "success");
-    } else {
-      const created = await api("/api/leads", { method: "POST", body: JSON.stringify(payload) });
-      toast("Lead angelegt", "success");
       closeLeadModal();
       await refresh();
-      if (created && created.id) location.hash = "#/lead/" + encodeURIComponent(created.id);
+    } else {
+      await createLeadFromPayload(payload);
+    }
+  } catch (err) {
+    // Dublettenwarnung (409) → Dialog statt Toast.
+    if (err.status === 409 && err.data && err.data.duplicates) {
+      showDuplicateDialog(err.data.duplicates, payload);
       return;
     }
+    toast(err.message, "error");
+  }
+}
+
+// Legt einen neuen Lead an (optional mit force, um Dubletten zu übergehen).
+async function createLeadFromPayload(payload) {
+  const created = await api("/api/leads", { method: "POST", body: JSON.stringify(payload) });
+  toast("Lead angelegt", "success");
+  closeLeadModal();
+  await refresh();
+  if (created && created.id) location.hash = "#/lead/" + encodeURIComponent(created.id);
+}
+
+// Dubletten-Dialog: bestehenden Lead öffnen ODER trotzdem anlegen.
+function showDuplicateDialog(duplicates, payload) {
+  const body = $("#dupBody");
+  body.innerHTML = duplicates.map((d) => `
+    <div class="dup-item">
+      <div>
+        <strong>${esc(d.company || d.name || "—")}</strong>
+        <span class="d-muted">${esc([d.email, d.name && d.company ? d.name : ""].filter(Boolean).join(" · "))}</span>
+      </div>
+      <span class="status-pill s-${d.status}">${esc(d.status)}</span>
+    </div>`).join("");
+  const open = $("#dupOpen");
+  open.onclick = () => {
+    closeDupModal();
     closeLeadModal();
+    location.hash = "#/lead/" + encodeURIComponent(duplicates[0].id);
+  };
+  $("#dupForce").onclick = async () => {
+    closeDupModal();
+    try {
+      await createLeadFromPayload({ ...payload, force: true });
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  };
+  $("#dupModal").classList.remove("hidden");
+}
+
+function closeDupModal() {
+  $("#dupModal").classList.add("hidden");
+}
+
+// Wiedervorlage als erledigt markieren: nächsten Schritt leeren + protokollieren.
+async function completeNextStep(id) {
+  try {
+    await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ nextStep: "", nextStepAt: null }) });
+    await api(`/api/leads/${id}/activities`, {
+      method: "POST",
+      body: JSON.stringify({ type: "system", title: "Wiedervorlage erledigt" }),
+    });
+    toast("Wiedervorlage erledigt", "success");
     await refresh();
+    renderDetail();
+    loadDetailExtras(id);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// DSGVO-Datenauskunft: alle Daten des Leads als JSON herunterladen.
+async function exportLead(id) {
+  try {
+    const data = await api(`/api/leads/${id}/export`);
+    const l = data.lead || {};
+    const slug = (l.company || l.name || "lead").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `lead-${slug || "export"}-${todayYMD()}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast("Datenauskunft heruntergeladen", "success");
   } catch (err) {
     toast(err.message, "error");
   }
@@ -1073,7 +1252,8 @@ async function saveLead(e) {
 
 async function deleteLead(id, fromDetail = false) {
   const l = getLead(id);
-  if (!confirm(`Lead "${l?.company || l?.name || "—"}" wirklich löschen?`)) return;
+  const name = l?.company || l?.name || "—";
+  if (!confirm(`Lead "${name}" und alle zugehörigen Aktivitäten endgültig löschen?\n\nDies entspricht einer DSGVO-Löschung (Art. 17) und kann nicht rückgängig gemacht werden.`)) return;
   try {
     await api(`/api/leads/${id}`, { method: "DELETE" });
     toast("Lead gelöscht", "success");

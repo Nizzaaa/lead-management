@@ -38,6 +38,7 @@
     <section class="toolbar">
       <input type="search" id="search" class="search" placeholder="🔍 Suche nach Name, Firma, E-Mail…" />
       <div class="filters" id="statusFilters"></div>
+      <button class="chip due-chip" id="dueFilter" title="Nur fällige/überfällige Wiedervorlagen">⏰ Fällig <span id="dueCount" class="due-count hidden">0</span></button>
       <div class="view-toggle" id="viewToggle">
         <button class="chip active" data-view="list" title="Kartenansicht">🗂 Karten</button>
         <button class="chip" data-view="kanban" title="Kanban-Board nach Status">▦ Board</button>
@@ -134,12 +135,33 @@
         <label>Status
           <select id="f_status"></select>
         </label>
+        <div class="form-row">
+          <label>Nächster Schritt<input type="text" id="f_next_step" placeholder="z. B. Angebot nachfassen" /></label>
+          <label>Wiedervorlage am<input type="date" id="f_next_step_at" /></label>
+        </div>
         <label>Notizen<textarea id="f_notes" rows="3" placeholder="Bedarf, Gesprächsnotizen, nächste Schritte…"></textarea></label>
         <div class="form-actions">
           <button type="button" class="btn" id="cancelBtn">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Speichern</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Dubletten-Warnung beim Anlegen -->
+  <div class="modal-overlay hidden" id="dupModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>Möglicher Doppeleintrag</h2>
+        <button class="icon-btn" id="dupClose" aria-label="Schließen">✕</button>
+      </div>
+      <p class="d-muted">Es gibt bereits Leads mit gleicher E-Mail oder Firma:</p>
+      <div id="dupBody"></div>
+      <div class="form-actions">
+        <button type="button" class="btn" id="dupCancel">Abbrechen</button>
+        <button type="button" class="btn" id="dupOpen">Bestehenden öffnen</button>
+        <button type="button" class="btn btn-primary" id="dupForce">Trotzdem anlegen</button>
+      </div>
     </div>
   </div>
 

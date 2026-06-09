@@ -19,6 +19,9 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 - **Detailseite pro Lead** mit Inline-Bearbeitung von **allem**: Stammdaten *und* sämtliche Recherche-Inhalte (Felder inkl. Quellen, Texte, Potenziale)
 - Pipeline-Status: `neu → kontaktiert → qualifiziert → angebot → gewonnen / verloren`
 - Manuelles Bearbeiten (Status, Wert, Notizen, Stammdaten), Live-Suche und Status-Filter
+- **Wiedervorlage / nächster Schritt** je Lead (Datum) – mit farbigem Banner auf der Detailseite, Fälligkeits-Badge auf den Karten und Toolbar-Filter „⏰ Fällig"
+- **Dublettenprüfung** beim Anlegen (gleiche E-Mail/Firma) – warnt mit Hinweis und lässt „bestehenden öffnen" oder „trotzdem anlegen" zu
+- **DSGVO**: Datenauskunft-Export pro Lead als JSON (Art. 15/20); Löschung entfernt Lead inkl. aller Aktivitäten (Art. 17)
 - Dashboard mit Kennzahlen: Anzahl Leads, **gewichteter Pipeline-Wert** (Erwartungswert = Σ Wert × Abschlusswahrscheinlichkeit je Status, in den Einstellungen anpassbar), gewonnener Umsatz, Abschlussquote
 
 **KI-Funktionen** – nutzen das Recherche-Dossier als Grundlage
