@@ -165,6 +165,26 @@
     </div>
   </div>
 
+  <!-- Wiedervorlage planen/bearbeiten (eigenes, schlankes Modal) -->
+  <div class="modal-overlay hidden" id="nextStepModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2 id="nsModalTitle">Wiedervorlage planen</h2>
+        <button class="icon-btn" id="nsClose" aria-label="Schließen">✕</button>
+      </div>
+      <form id="nextStepForm" class="form">
+        <input type="hidden" id="ns_lead_id" />
+        <label>Nächster Schritt<input type="text" id="ns_step" placeholder="z. B. Angebot nachfassen" /></label>
+        <label>Wiedervorlage am<input type="date" id="ns_at" /></label>
+        <div class="form-actions">
+          <button type="button" class="btn" id="nsClear">Entfernen</button>
+          <button type="button" class="btn" id="nsCancel">Abbrechen</button>
+          <button type="submit" class="btn btn-primary">Speichern</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- Dock für laufende Recherche-Jobs (unten rechts) -->
   <div id="jobDock" class="job-dock hidden" aria-live="polite"></div>
 

@@ -1002,7 +1002,7 @@ function onDetailClick(e) {
       completeNextStep(id);
       break;
     case "next-step-edit":
-      openLeadModal(id);
+      openNextStepModal(id);
       break;
     case "research":
       researchLead(id, btn);
@@ -1030,6 +1030,10 @@ function bindEvents() {
   });
   $("#dupClose").addEventListener("click", closeDupModal);
   $("#dupCancel").addEventListener("click", closeDupModal);
+  $("#nsClose").addEventListener("click", closeNextStepModal);
+  $("#nsCancel").addEventListener("click", closeNextStepModal);
+  $("#nsClear").addEventListener("click", () => saveNextStep(null, true));
+  $("#nextStepForm").addEventListener("submit", saveNextStep);
 
   $("#closeResearchModal").addEventListener("click", closeResearchModal);
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
@@ -1212,18 +1216,58 @@ function closeDupModal() {
   $("#dupModal").classList.add("hidden");
 }
 
-// Wiedervorlage als erledigt markieren: nächsten Schritt leeren + protokollieren.
+// Wiedervorlage als erledigt markieren: nächsten Schritt leeren + protokollieren
+// (inkl. Grund der Wiedervorlage im Aktivitäts-Log).
 async function completeNextStep(id) {
+  const l = getLead(id);
+  const step = l && l.nextStep ? l.nextStep : "";
   try {
     await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ nextStep: "", nextStepAt: null }) });
     await api(`/api/leads/${id}/activities`, {
       method: "POST",
-      body: JSON.stringify({ type: "system", title: "Wiedervorlage erledigt" }),
+      body: JSON.stringify({
+        type: "system",
+        title: step ? `Wiedervorlage erledigt: ${step}` : "Wiedervorlage erledigt",
+      }),
     });
     toast("Wiedervorlage erledigt", "success");
     await refresh();
     renderDetail();
     loadDetailExtras(id);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// Eigenes, schlankes Modal zum Planen/Bearbeiten der Wiedervorlage.
+function openNextStepModal(id) {
+  const l = getLead(id);
+  if (!l) return;
+  $("#ns_lead_id").value = id;
+  $("#ns_step").value = l.nextStep || "";
+  $("#ns_at").value = l.nextStepAt || "";
+  const planned = l.nextStep || l.nextStepAt;
+  $("#nsModalTitle").textContent = planned ? "Wiedervorlage bearbeiten" : "Wiedervorlage planen";
+  $("#nsClear").classList.toggle("hidden", !planned);
+  $("#nextStepModal").classList.remove("hidden");
+  $("#ns_step").focus();
+}
+
+function closeNextStepModal() {
+  $("#nextStepModal").classList.add("hidden");
+}
+
+async function saveNextStep(e, clear = false) {
+  if (e) e.preventDefault();
+  const id = $("#ns_lead_id").value;
+  const payload = clear
+    ? { nextStep: "", nextStepAt: null }
+    : { nextStep: $("#ns_step").value, nextStepAt: $("#ns_at").value };
+  try {
+    await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+    toast(clear ? "Wiedervorlage entfernt" : "Wiedervorlage gespeichert", "success");
+    closeNextStepModal();
+    await refresh();
   } catch (err) {
     toast(err.message, "error");
   }
