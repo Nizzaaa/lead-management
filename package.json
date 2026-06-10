@@ -11,13 +11,13 @@
     "dev": "nodemon server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.19.0"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.69.0",
     "express": "^4.21.2",
     "pg": "^8.13.1",
-    "undici": "^7.27.2"
+    "undici": "^8.4.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"
