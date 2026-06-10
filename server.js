@@ -37,26 +37,37 @@ let currentModel = DEFAULT_MODEL;
 const isValidModel = (m) => AVAILABLE_MODELS.some((x) => x.id === m);
 
 let anthropic = null;
+// Optionaler Custom-fetch mit Keepalive/langem Body-Timeout für die langen
+// Recherche-Streams. Bewusst entkoppelt: Schlägt undici (z. B. wegen Node-
+// Version) fehl, bleibt die KI aktiv und nutzt das eingebaute fetch – nur ohne
+// dieses Tuning. So legt ein undici-Problem nie die ganze KI lahm.
+let aiFetch;
+try {
+  const { Agent, fetch: undiciFetch } = require("undici");
+  // Die agentische Recherche hält lange Streaming-Verbindungen; während der
+  // server-seitigen web_search/web_fetch-Schritte fließen teils minutenlang
+  // keine Bytes. undicis Default-bodyTimeout (300 s) bricht solche idle
+  // Verbindungen sonst ab ("terminated") – der ~5-Min-Abbruch hinter Proxys/NAT.
+  const aiDispatcher = new Agent({
+    headersTimeout: 600000,                                      // 10 Min bis zum ersten Byte
+    bodyTimeout: 0,                                              // kein Idle-Read-Timeout für lange Streams
+    connect: { keepAlive: true, keepAliveInitialDelay: 30000 }, // TCP-Keepalive gegen Idle-Drop
+  });
+  aiFetch = (url, init) => undiciFetch(url, { ...init, dispatcher: aiDispatcher });
+} catch (err) {
+  logger.warn("undici_keepalive_unavailable", { error: err.message });
+}
+
 try {
   if (process.env.ANTHROPIC_API_KEY) {
     const Anthropic = require("@anthropic-ai/sdk");
-    const { Agent, fetch: undiciFetch } = require("undici");
-    // Die agentische Recherche hält lange Streaming-Verbindungen; während der
-    // server-seitigen web_search/web_fetch-Schritte fließen teils minutenlang
-    // keine Bytes. undicis Default-bodyTimeout (300 s) bricht solche idle
-    // Verbindungen sonst ab ("terminated") – genau der ~5-Min-Abbruch, der
-    // hinter Proxys/NAT (Cloudflare) auf langsameren Pfaden auftritt.
-    const aiDispatcher = new Agent({
-      headersTimeout: 600000,                                      // 10 Min bis zum ersten Byte
-      bodyTimeout: 0,                                              // kein Idle-Read-Timeout für lange Streams
-      connect: { keepAlive: true, keepAliveInitialDelay: 30000 }, // TCP-Keepalive gegen Idle-Drop
-    });
-    const aiFetch = (url, init) => undiciFetch(url, { ...init, dispatcher: aiDispatcher });
     // maxRetries: das SDK wiederholt 429 (Rate-Limit) automatisch und respektiert
     // dabei den retry-after-Header; auch abgebrochene Verbindungen ("terminated")
     // werden erneut versucht. Default ist 2 – wir erhöhen für die langen,
     // tool-lastigen Recherche-Streams. timeout deckelt einen Einzel-Call.
-    anthropic = new Anthropic({ maxRetries: 5, timeout: 900000, fetch: aiFetch });
+    const opts = { maxRetries: 5, timeout: 900000 };
+    if (aiFetch) opts.fetch = aiFetch;
+    anthropic = new Anthropic(opts);
   }
 } catch (err) {
   logger.warn("anthropic_sdk_load_failed", { error: err.message });
