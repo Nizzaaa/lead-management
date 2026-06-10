@@ -403,6 +403,13 @@ a { color: inherit; }
 .form .form-actions { padding: 4px 0 0; }
 
 .hint { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+/* Daten-Import & -Export (Einstellungen) */
+.settings-section { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 4px; display: flex; flex-direction: column; gap: 8px; }
+.settings-section h3 { margin: 0; font-size: 14px; }
+.io-row { display: flex; flex-wrap: wrap; gap: 10px; }
+.io-import { gap: 6px; }
+.io-import input[type="file"] { font-size: 13px; }
 .elapsed { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 700; }
 
 .research-steps {

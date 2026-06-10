@@ -5,6 +5,7 @@ const path = require("path");
 const crypto = require("crypto");
 const db = require("./db");
 const { researchCompany } = require("./research");
+const { leadsToCsv, parseCsv, csvRowsToLeads, parseNumber, leadsToXlsxXml } = require("./exporters");
 const { logger, httpLogger } = require("./logger");
 
 const PORT = process.env.PORT || 3000;
@@ -332,6 +333,69 @@ app.get("/api/leads", wrap(async (req, res) => {
 // Statistiken für das Dashboard
 app.get("/api/stats", wrap(async (req, res) => {
   res.json(await db.getStats(STATUSES, stageProbabilities));
+}));
+
+// Dateinamen-Datum (YYYY-MM-DD) für Downloads.
+function ymd() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// CSV-Export aller Leads. Mit UTF-8-BOM, damit Excel Umlaute korrekt anzeigt.
+app.get("/api/leads/export.csv", wrap(async (req, res) => {
+  const leads = await db.listLeads();
+  const csv = leadsToCsv(leads);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="leads-${ymd()}.csv"`);
+  res.send("﻿" + csv);
+}));
+
+// Excel-Export aller Leads (SpreadsheetML, von Excel/LibreOffice direkt lesbar).
+app.get("/api/leads/export.xlsx", wrap(async (req, res) => {
+  const leads = await db.listLeads();
+  const xml = leadsToXlsxXml(leads);
+  res.setHeader("Content-Type", "application/vnd.ms-excel; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="leads-${ymd()}.xls"`);
+  res.send(xml);
+}));
+
+// CSV-Import: legt aus einer hochgeladenen CSV neue Leads an. Mögliche Dubletten
+// (gleiche E-Mail oder Firma) werden übersprungen, sofern nicht force=true.
+app.post("/api/leads/import", wrap(async (req, res) => {
+  const text = typeof req.body.csv === "string" ? req.body.csv : "";
+  if (!text.trim()) {
+    return res.status(400).json({ error: "Keine CSV-Daten erhalten." });
+  }
+  const force = Boolean(req.body.force);
+  const { leads: rows, recognized } = csvRowsToLeads(parseCsv(text));
+  if (!recognized.length) {
+    return res.status(400).json({
+      error: "Keine bekannten Spalten gefunden. Erwartet werden u. a. Name, Firma, E-Mail, Telefon, Quelle, Status, Wert.",
+    });
+  }
+
+  let created = 0;
+  let skippedDuplicate = 0;
+  let skippedEmpty = 0;
+  const errors = [];
+
+  for (let idx = 0; idx < rows.length; idx++) {
+    const raw = rows[idx];
+    try {
+      const data = sanitizeLead({ ...raw, value: parseNumber(raw.value) });
+      if (!data.name && !data.company) { skippedEmpty++; continue; }
+      if (!force) {
+        const dup = await db.findDuplicateLeads({ email: data.email, company: data.company });
+        if (dup.length) { skippedDuplicate++; continue; }
+      }
+      const lead = await db.createLead(data);
+      await logActivity(lead.id, { type: "system", title: "Per CSV-Import angelegt" }, actor(req));
+      created++;
+    } catch (err) {
+      errors.push({ row: idx + 2, error: err.message }); // +2: Kopfzeile + 1-basiert
+    }
+  }
+
+  res.json({ created, skippedDuplicate, skippedEmpty, errors, recognized, total: rows.length });
 }));
 
 // Lead anlegen
