@@ -1,5 +1,5 @@
 {
-  "watch": ["server.js", "db.js", "research.js"],
+  "watch": ["server.js", "db.js", "research.js", "exporters.js", "logger.js"],
   "ext": "js",
   "ignore": ["public/**"],
   "delay": 300
