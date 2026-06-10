@@ -289,24 +289,94 @@ async function runResearch(anthropic, input, model, onProgress, signal) {
 }
 
 // Phase 2: Felder aus dem Dossier in striktes JSON extrahieren.
-async function extractFields(anthropic, input, dossier, model, signal) {
+const EXTRACT_SYSTEM =
+  "Du extrahierst Felder aus einem bereits erstellten Cold-Call-Dossier in das " +
+  "geforderte JSON-Format. Übernimm ausschließlich, was im Dossier steht. " +
+  "Wenn ein Feld im Dossier 'k.A.' ist oder fehlt, trage 'k.A.' (bzw. leere Quelle) ein. " +
+  "Erfinde nichts hinzu.";
+
+// Robustes Parsen: entfernt ```-Codefences und reduziert notfalls auf das
+// äußerste {...}-Objekt. Gibt null zurück, wenn nichts Gültiges gefunden wird.
+function parseJsonLoose(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  let s = raw.trim();
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) s = fence[1].trim();
+  try { return JSON.parse(s); } catch {}
+  const a = s.indexOf("{"), b = s.lastIndexOf("}");
+  if (a !== -1 && b > a) {
+    try { return JSON.parse(s.slice(a, b + 1)); } catch {}
+  }
+  return null;
+}
+
+// Liest die JSON-Antwort eines Extraktions-Calls defensiv aus. Wirft mit klarer
+// Meldung statt still ein leeres Objekt zu liefern (sonst: leeres Dossier).
+function readExtractionJson(msg, label) {
+  if (msg.stop_reason === "max_tokens") {
+    throw new Error(`${label} wurde abgeschnitten (max_tokens) – Dossier zu groß.`);
+  }
+  const raw = (msg.content || [])
+    .filter((b) => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+  const parsed = parseJsonLoose(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${label} lieferte kein gültiges JSON.`);
+  }
+  return parsed;
+}
+
+// Versuch via Structured Outputs (json_schema erzwingt valides JSON).
+async function extractStructured(anthropic, input, dossier, model, signal) {
   const msg = await anthropic.messages.create({
     model,
-    max_tokens: 8000,
-    system:
-      "Du extrahierst Felder aus einem bereits erstellten Cold-Call-Dossier in das " +
-      "geforderte JSON-Format. Übernimm ausschließlich, was im Dossier steht. " +
-      "Wenn ein Feld im Dossier 'k.A.' ist oder fehlt, trage 'k.A.' (bzw. leere Quelle) ein. " +
-      "Erfinde nichts hinzu.",
-    messages: [
-      { role: "user", content: `Input: ${input}\n\nDossier:\n\n${dossier}` },
-    ],
-    output_config: {
-      format: { type: "json_schema", schema: RESEARCH_SCHEMA },
-    },
+    max_tokens: 16000,
+    system: EXTRACT_SYSTEM,
+    messages: [{ role: "user", content: `Input: ${input}\n\nDossier:\n\n${dossier}` }],
+    output_config: { format: { type: "json_schema", schema: RESEARCH_SCHEMA } },
   }, { signal });
-  const text = msg.content.find((b) => b.type === "text");
-  return JSON.parse(text ? text.text : "{}");
+  return readExtractionJson(msg, "Strukturierte Extraktion");
+}
+
+// Fallback ohne Structured Outputs: explizite JSON-Anweisung + defensives Parsen.
+// Greift, falls die json_schema-Ausgabe in der Umgebung nicht greift.
+async function extractPlain(anthropic, input, dossier, model, signal) {
+  const msg = await anthropic.messages.create({
+    model,
+    max_tokens: 16000,
+    system:
+      EXTRACT_SYSTEM +
+      " Antworte AUSSCHLIESSLICH mit einem einzigen JSON-Objekt nach diesem Schema " +
+      "(keine Erklärungen, kein Markdown, keine Codefences):\n" +
+      JSON.stringify(RESEARCH_SCHEMA),
+    messages: [{ role: "user", content: `Input: ${input}\n\nDossier:\n\n${dossier}` }],
+  }, { signal });
+  return readExtractionJson(msg, "JSON-Extraktion");
+}
+
+// Extraktion mit Wiederholungen: zweimal strukturiert, dann der Klartext-Fallback.
+// Schlägt erst nach allen Versuchen fehl – verhindert ein still leeres Dossier.
+async function extractFields(anthropic, input, dossier, model, signal) {
+  const attempts = [
+    () => extractStructured(anthropic, input, dossier, model, signal),
+    () => extractStructured(anthropic, input, dossier, model, signal),
+    () => extractPlain(anthropic, input, dossier, model, signal),
+  ];
+  let lastErr;
+  for (const attempt of attempts) {
+    if (signal && signal.aborted) throw new Error("Recherche abgebrochen.");
+    try {
+      return await attempt();
+    } catch (err) {
+      if (signal && signal.aborted) throw err;
+      lastErr = err;
+    }
+  }
+  throw new Error(
+    `Feld-Extraktion fehlgeschlagen: ${lastErr ? lastErr.message : "unbekannt"}`
+  );
 }
 
 // Öffentliche API: vollständige Recherche → strukturiertes Objekt inkl. Markdown.

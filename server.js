@@ -40,11 +40,23 @@ let anthropic = null;
 try {
   if (process.env.ANTHROPIC_API_KEY) {
     const Anthropic = require("@anthropic-ai/sdk");
+    const { Agent, fetch: undiciFetch } = require("undici");
+    // Die agentische Recherche hält lange Streaming-Verbindungen; während der
+    // server-seitigen web_search/web_fetch-Schritte fließen teils minutenlang
+    // keine Bytes. undicis Default-bodyTimeout (300 s) bricht solche idle
+    // Verbindungen sonst ab ("terminated") – genau der ~5-Min-Abbruch, der
+    // hinter Proxys/NAT (Cloudflare) auf langsameren Pfaden auftritt.
+    const aiDispatcher = new Agent({
+      headersTimeout: 600000,                                      // 10 Min bis zum ersten Byte
+      bodyTimeout: 0,                                              // kein Idle-Read-Timeout für lange Streams
+      connect: { keepAlive: true, keepAliveInitialDelay: 30000 }, // TCP-Keepalive gegen Idle-Drop
+    });
+    const aiFetch = (url, init) => undiciFetch(url, { ...init, dispatcher: aiDispatcher });
     // maxRetries: das SDK wiederholt 429 (Rate-Limit) automatisch und respektiert
     // dabei den retry-after-Header; auch abgebrochene Verbindungen ("terminated")
     // werden erneut versucht. Default ist 2 – wir erhöhen für die langen,
-    // tool-lastigen Recherche-Streams.
-    anthropic = new Anthropic({ maxRetries: 5 });
+    // tool-lastigen Recherche-Streams. timeout deckelt einen Einzel-Call.
+    anthropic = new Anthropic({ maxRetries: 5, timeout: 900000, fetch: aiFetch });
   }
 } catch (err) {
   logger.warn("anthropic_sdk_load_failed", { error: err.message });
@@ -174,6 +186,22 @@ function leadFromResearch(research, input) {
 // Hintergrund-Job; das Frontend pollt Status + Fortschritt.
 const researchJobs = new Map();
 
+// Übersetzt technische SDK-Fehler in verständliche, handlungsleitende Meldungen.
+function friendlyResearchError(raw) {
+  const msg = (raw && raw.message) ? String(raw.message) : "";
+  const status = raw && raw.status;
+  if (status === 429 || /rate.?limit|429/i.test(msg)) {
+    return "Rate-Limit erreicht – das API-Kontingent ist gerade ausgeschöpft. Bitte in 1–2 Minuten erneut versuchen (oder in den Einstellungen ein anderes Modell wählen).";
+  }
+  if (status === 529 || /overloaded|529/i.test(msg)) {
+    return "Die KI-API ist momentan überlastet. Bitte kurz warten und erneut versuchen.";
+  }
+  if (status === 401 || /authentication|invalid x-api-key|401/i.test(msg)) {
+    return "API-Schlüssel ungültig oder fehlt. Bitte ANTHROPIC_API_KEY prüfen.";
+  }
+  return msg ? `Recherche fehlgeschlagen: ${msg.slice(0, 300)}` : "Recherche fehlgeschlagen. Bitte erneut versuchen.";
+}
+
 function startResearchJob(runner) {
   const id = crypto.randomUUID();
   const controller = new AbortController();
@@ -196,12 +224,8 @@ function startResearchJob(runner) {
         job.error = "Recherche abgebrochen.";
       } else {
         logger.error("research_failed", { error: err.message });
-        // Eigene, verständliche Fehlermeldungen durchreichen; technische
-        // SDK-Meldungen (z. B. lange 429-Texte) kürzen.
-        const msg = (err && err.message) ? String(err.message) : "";
-        job.error = msg
-          ? `Recherche fehlgeschlagen: ${msg.slice(0, 300)}`
-          : "Recherche fehlgeschlagen. Bitte erneut versuchen.";
+        // Technische SDK-Meldungen in verständliche Hinweise übersetzen.
+        job.error = friendlyResearchError(err);
         job.status = "error";
       }
     } finally {
