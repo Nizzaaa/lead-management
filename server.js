@@ -174,6 +174,22 @@ function leadFromResearch(research, input) {
 // Hintergrund-Job; das Frontend pollt Status + Fortschritt.
 const researchJobs = new Map();
 
+// Übersetzt technische SDK-Fehler in verständliche, handlungsleitende Meldungen.
+function friendlyResearchError(raw) {
+  const msg = (raw && raw.message) ? String(raw.message) : "";
+  const status = raw && raw.status;
+  if (status === 429 || /rate.?limit|429/i.test(msg)) {
+    return "Rate-Limit erreicht – das API-Kontingent ist gerade ausgeschöpft. Bitte in 1–2 Minuten erneut versuchen (oder in den Einstellungen ein anderes Modell wählen).";
+  }
+  if (status === 529 || /overloaded|529/i.test(msg)) {
+    return "Die KI-API ist momentan überlastet. Bitte kurz warten und erneut versuchen.";
+  }
+  if (status === 401 || /authentication|invalid x-api-key|401/i.test(msg)) {
+    return "API-Schlüssel ungültig oder fehlt. Bitte ANTHROPIC_API_KEY prüfen.";
+  }
+  return msg ? `Recherche fehlgeschlagen: ${msg.slice(0, 300)}` : "Recherche fehlgeschlagen. Bitte erneut versuchen.";
+}
+
 function startResearchJob(runner) {
   const id = crypto.randomUUID();
   const controller = new AbortController();
@@ -196,12 +212,8 @@ function startResearchJob(runner) {
         job.error = "Recherche abgebrochen.";
       } else {
         logger.error("research_failed", { error: err.message });
-        // Eigene, verständliche Fehlermeldungen durchreichen; technische
-        // SDK-Meldungen (z. B. lange 429-Texte) kürzen.
-        const msg = (err && err.message) ? String(err.message) : "";
-        job.error = msg
-          ? `Recherche fehlgeschlagen: ${msg.slice(0, 300)}`
-          : "Recherche fehlgeschlagen. Bitte erneut versuchen.";
+        // Technische SDK-Meldungen in verständliche Hinweise übersetzen.
+        job.error = friendlyResearchError(err);
         job.status = "error";
       }
     } finally {
