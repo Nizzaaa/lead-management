@@ -17,7 +17,7 @@
     "@anthropic-ai/sdk": "^0.69.0",
     "express": "^4.21.2",
     "pg": "^8.13.1",
-    "undici": "^8.4.1"
+    "undici": "^7.27.2"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"
