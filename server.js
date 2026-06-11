@@ -594,21 +594,24 @@ async function callClaude(system, userText, { json = false } = {}) {
         schema: {
           type: "object",
           properties: {
-            score: { type: "integer" },
+            score: { type: "integer", description: "0 (kalt) bis 100 (sehr heiß)." },
             grade: { type: "string", enum: ["A", "B", "C", "D"] },
-            reasoning: { type: "string" },
-            nextStep: { type: "string" },
+            reasoning: {
+              type: "string",
+              description:
+                "Knappe Begründung des Scores: 1–2 kurze Sätze, max. ~240 Zeichen. KEINE Handlungsempfehlung oder Cold-Call-Strategie (steht bereits im Dossier).",
+            },
             value: {
               type: "integer",
               description:
-                "Geschätzter Auftragswert in EUR (Einmalprojekt; bei laufenden/SaaS-Erlösen den 12-Monats-Wert). 0, wenn nicht seriös schätzbar.",
+                "Geschätzter Auftragswert in EUR auf 12-Monats-Basis: Einmalprojekt = Projektwert; laufende/SaaS-Erlöse (z. B. TelKI) = Summe der ersten 12 Monate. 0, wenn nicht seriös schätzbar.",
             },
             valueReasoning: {
               type: "string",
-              description: "Kurze Begründung der Wertschätzung (Signale, angenommene Leistung).",
+              description: "Sehr kurze Begründung der 12-Monats-Wertschätzung (1 Satz).",
             },
           },
-          required: ["score", "grade", "reasoning", "nextStep", "value", "valueReasoning"],
+          required: ["score", "grade", "reasoning", "value", "valueReasoning"],
           additionalProperties: false,
         },
       },
@@ -633,12 +636,14 @@ function requireAi(res) {
 async function computeLeadScore(lead) {
   const raw = await callClaude(
     "Du bist ein erfahrener B2B-Vertriebsanalyst für FU/GE Solutions (Integration & Entwicklung " +
-      "individueller KI-Systeme im Mittelstand/Handwerk). Bewerte Qualität und Abschlusspotenzial eines Leads " +
-      "und schätze den realistischen Auftragswert in EUR. Leite den Wert aus belegten Signalen ab " +
+      "individueller KI-Systeme im Mittelstand/Handwerk). Bewerte knapp Qualität und Abschlusspotenzial eines Leads " +
+      "und schätze den realistischen Auftragswert in EUR – immer auf 12-Monats-Basis (Einmalprojekt = Projektwert; " +
+      "laufende/SaaS-Erlöse wie TelKI = Summe der ersten 12 Monate). Leite den Wert aus belegten Signalen ab " +
       "(Unternehmensgröße/Standorte/Branche, passende Leistung: Potenzialanalyse, Workshop, KI-Integration oder " +
       "TelKI-SaaS). Sei eher konservativ; wenn keine seriöse Schätzung möglich ist, value=0. " +
-      "Antworte ausschließlich im geforderten JSON-Format, kurz und auf Deutsch.",
-    `Bewerte diesen Lead von 0 (kalt) bis 100 (sehr heiß), vergib eine Schulnote A–D und schätze den Auftragswert.\n\n${leadContext(lead)}`,
+      "Fasse dich kurz – KEINE Handlungsempfehlungen oder Cold-Call-Strategie (die stehen bereits im Dossier). " +
+      "Antworte ausschließlich im geforderten JSON-Format auf Deutsch.",
+    `Bewerte diesen Lead von 0 (kalt) bis 100 (sehr heiß), vergib eine Schulnote A–D und schätze den 12-Monats-Auftragswert.\n\n${leadContext(lead)}`,
     { json: true }
   );
   const result = JSON.parse(raw);
@@ -648,7 +653,6 @@ async function computeLeadScore(lead) {
     score: Math.max(0, Math.min(100, Number(result.score) || 0)),
     grade: result.grade || "C",
     reasoning: result.reasoning || "",
-    nextStep: result.nextStep || "",
     value,
     valueReasoning: result.valueReasoning || "",
     scoredAt: new Date().toISOString(),
@@ -661,7 +665,7 @@ async function applyScore(lead) {
   const r = await computeLeadScore(lead);
   const ai = {
     score: r.score, grade: r.grade, reasoning: r.reasoning,
-    nextStep: r.nextStep, valueReasoning: r.valueReasoning, scoredAt: r.scoredAt,
+    valueReasoning: r.valueReasoning, scoredAt: r.scoredAt,
   };
   let updated = await db.setLeadAi(lead.id, ai);
   if (r.value > 0 && (!lead.value || Number(lead.value) === 0)) {

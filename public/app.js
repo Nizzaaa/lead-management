@@ -474,8 +474,7 @@ function detailViewHtml(l) {
          <div class="ai-score-meta">
            <strong>KI-Score · Note ${esc(ai.grade)}</strong>
            ${ai.reasoning ? `<p>${esc(ai.reasoning)}</p>` : ""}
-           ${ai.nextStep ? `<p class="next-step">➡️ ${esc(ai.nextStep)}</p>` : ""}
-           ${ai.valueReasoning ? `<p class="value-reason">💶 Wertschätzung: ${esc(ai.valueReasoning)}</p>` : ""}
+           ${ai.valueReasoning ? `<p class="value-reason">💶 Wert (12 Mon.): ${esc(ai.valueReasoning)}</p>` : ""}
          </div>
        </div>`
     : `<p class="d-muted">Noch keine KI-Bewertung. ${aiEnabled ? "" : "(KI nicht konfiguriert)"}</p>`;
@@ -1355,8 +1354,7 @@ function buildLeadPdfHtml(l, activities) {
          <h2>KI-Bewertung</h2>
          <p><strong>Score: ${esc(ai.score)}/100</strong> · Note ${esc(ai.grade || "—")}</p>
          ${ai.reasoning ? `<p>${esc(ai.reasoning)}</p>` : ""}
-         ${ai.nextStep ? `<p><strong>Empfohlener nächster Schritt:</strong> ${esc(ai.nextStep)}</p>` : ""}
-         ${ai.valueReasoning ? `<p><strong>Wertschätzung:</strong> ${esc(ai.valueReasoning)}</p>` : ""}
+         ${ai.valueReasoning ? `<p><strong>Wert (12 Monate):</strong> ${esc(ai.valueReasoning)}</p>` : ""}
        </section>`
     : "";
 
