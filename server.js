@@ -162,6 +162,7 @@ function sanitizeResearch(body = {}, prev = {}) {
     fields,
     negativeBewertungen: str("negativeBewertungen"),
     einordnung: str("einordnung"),
+    eingesetzteSysteme: str("eingesetzteSysteme"),
     schwachstellen: str("schwachstellen"),
     potenziale,
     coldCallStrategie: str("coldCallStrategie"),
@@ -565,6 +566,7 @@ function leadContext(lead) {
       `Kundenbewertung: ${fv(f.kundenbewertung)}`,
       `Negative Bewertungen: ${r.negativeBewertungen || "—"}`,
       `Einordnung/Selbstdarstellung: ${r.einordnung || "—"}`,
+      `Eingesetzte Systeme (Integrations-Andockpunkte): ${r.eingesetzteSysteme || "—"}`,
       `Sichtbare Schwachstellen: ${r.schwachstellen || "—"}`,
       "Potenziale für FU/GE:",
       ...(Array.isArray(r.potenziale) && r.potenziale.length

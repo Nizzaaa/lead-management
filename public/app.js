@@ -517,6 +517,7 @@ function detailViewHtml(l) {
 
       ${sectionView("Negative Bewertungen → Potenzial", r.negativeBewertungen)}
       ${sectionView("Einordnung / Selbstdarstellung", r.einordnung)}
+      ${sectionView("Eingesetzte Systeme / Integrationspotenzial", r.eingesetzteSysteme)}
       ${sectionView("Sichtbare Schwachstellen / Ansatzpunkte", r.schwachstellen)}
 
       <section class="d-section">
@@ -840,6 +841,7 @@ function detailEditHtml(l) {
 
         ${textarea("ed_r_negativeBewertungen", "Negative Bewertungen → Potenzial", r.negativeBewertungen || "")}
         ${textarea("ed_r_einordnung", "Einordnung / Selbstdarstellung", r.einordnung || "")}
+        ${textarea("ed_r_eingesetzteSysteme", "Eingesetzte Systeme / Integrationspotenzial", r.eingesetzteSysteme || "")}
         ${textarea("ed_r_schwachstellen", "Sichtbare Schwachstellen / Ansatzpunkte", r.schwachstellen || "")}
 
         <h4 class="edit-subhead">Potenziale für FU/GE</h4>
@@ -926,6 +928,7 @@ function collectResearch() {
     fields,
     negativeBewertungen: g("ed_r_negativeBewertungen"),
     einordnung: g("ed_r_einordnung"),
+    eingesetzteSysteme: g("ed_r_eingesetzteSysteme"),
     schwachstellen: g("ed_r_schwachstellen"),
     potenziale,
     coldCallStrategie: g("ed_r_coldCallStrategie"),
@@ -1385,6 +1388,7 @@ function buildLeadPdfHtml(l, activities) {
         ${fieldRows ? `<table class="kv">${fieldRows}</table>` : ""}
         ${sect("Negative Bewertungen → Potenzial", r.negativeBewertungen)}
         ${sect("Einordnung / Selbstdarstellung", r.einordnung)}
+        ${sect("Eingesetzte Systeme / Integrationspotenzial", r.eingesetzteSysteme)}
         ${sect("Sichtbare Schwachstellen / Ansatzpunkte", r.schwachstellen)}
         ${pots ? `<section><h3>Potenziale für FU/GE</h3>${pots}</section>` : ""}
         ${sect("Strategie für Cold Call", r.coldCallStrategie)}

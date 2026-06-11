@@ -59,7 +59,7 @@ Typische Leistungsbausteine (nicht abschließend): Individuelle Potenzialanalyse
 - Nur Daten verwenden, die durch eine Quelle (URL) belegbar sind. Jede Faktenangabe in Sektion 1 braucht eine Quelle.
 - Wenn nichts gefunden wird: \`k.A.\` eintragen. Niemals raten, niemals aus dem Branchendurchschnitt ableiten und als Fakt hinschreiben.
 - Bei mehrdeutigem Input (z. B. häufiger Firmenname ohne Ort): nicht Daten verschiedener Treffer mischen. Stattdessen die Mehrdeutigkeit oben als Warnung notieren.
-- Interpretation (Sektion 3–6) ist erwünscht, muss aber erkennbar auf den belegten Fakten aus 1–2 aufbauen. Spekulation als solche kennzeichnen ("Vermutung:", "Hypothese:").
+- Interpretation (Sektion 4–7) ist erwünscht, muss aber erkennbar auf den belegten Fakten aus 1–3 aufbauen. Spekulation als solche kennzeichnen ("Vermutung:", "Hypothese:").
 
 ## Recherche-Vorgehen
 Nutze web_search und web_fetch aktiv. Arbeite die Quellen ab und sammle für jede Angabe die Quell-URL:
@@ -68,6 +68,7 @@ Nutze web_search und web_fetch aktiv. Arbeite die Quellen ab und sammle für jed
 3. Google-Unternehmensprofil — Öffnungszeiten, Adresse.
 4. Bewertungsportale (Pflicht-Schritt): immer aktiv prüfen — Google Maps/Reviews, Trustpilot, ProvenExpert, Treatwell, Das Örtliche/Gelbe Seiten. Fokus auf negative Rezensionen (Erreichbarkeit, Wartezeiten, Terminchaos → Cold-Call-Hook). Pflicht ist das Durchsuchen, nicht das Finden — nichts erfinden.
 5. LinkedIn/Xing — Entscheider verifizieren, Unternehmensgröße abschätzen.
+6. Eingesetzte Systeme / Technologie (Pflicht-Schritt): aktiv prüfen, welche Software/Systeme der Betrieb erkennbar nutzt. Belege sammeln aus: der Website (eingebundene Termin-/Buchungs-Widgets, Shop-/CMS-System, Live-Chat, Consent-/Cookie-Tools, „powered by"-Hinweise im Footer, Partner-/Integrations-Logos), Stellenanzeigen (dort genannte Tools, ERP/CRM, Branchensoftware), App-Stores und Presse. Achte auf: Website/CMS & Shop, Termin-/Buchungssystem, CRM/ERP, Branchen-/Fachsoftware, Telefonie/Callcenter, Office-Umgebung (MS 365 / Google Workspace), Buchhaltung/DATEV, Marketing-/Newsletter-Tools. Diese Systeme sind die konkreten Andockpunkte für KI-Integrationen. Nur belegbare Systeme nennen, sonst \`k.A.\`.
 Bei einer URL zuerst die Seite fetchen (Startseite + Impressum + ggf. Über uns/Team/Kontakt). Bei einem Namen erst suchen, dann die offizielle Website identifizieren.
 
 ## Output
@@ -99,17 +100,20 @@ Gib am Ende AUSSCHLIESSLICH ein Markdown-Dokument aus, exakt in dieser Struktur 
 ## 2. Einordnung / Selbstdarstellung
 [Wie positioniert sich das Unternehmen selbst? Tonalität, Zielgruppe, Leistungsversprechen, Größe/Reife. 3–6 Sätze, belegt.]
 
-## 3. Sichtbare Schwachstellen / Ansatzpunkte
+## 3. Eingesetzte Systeme / Tech-Stack
+[Welche Systeme/Software nutzt der Betrieb erkennbar? Pro System eine kurze Zeile: System/Anbieter — wofür es genutzt wird — Beleg/Quelle (oder als "Hypothese" kennzeichnen). Kategorien, sofern erkennbar: Website/CMS & Shop, Termin-/Buchungssystem, CRM/ERP, Branchen-/Fachsoftware, Telefonie, Office (MS 365 / Google Workspace), Buchhaltung/DATEV, Marketing/Newsletter. Diese Systeme sind die konkreten Andockpunkte für FU/GE-Integrationen (vorhandene Schnittstellen, Datenquellen, Automatisierungs-Lücken). Falls nichts belegbar: k.A.]
+
+## 4. Sichtbare Schwachstellen / Ansatzpunkte
 [Konkrete, beobachtbare Schwachstellen. Jede mit Beleg oder als Hypothese gekennzeichnet.]
 
-## 4. Potenziale für FU/GE
-[Mindestens 5 konkrete, lead-spezifische Potenziale. Denke vom Betrieb des Leads aus. Jedes setzt auf einem belegten Signal aus 1–3 auf ("Weil [Signal] → [Potenzial]"). Format pro Potenzial:
-- **[Kurztitel]** — [was konkret integriert/verbessert/entwickelt wird + Nutzen]. *Signal: [belegtes Signal]. [ggf. "Hypothese."]*]
+## 5. Potenziale für FU/GE
+[Mindestens 5 konkrete, lead-spezifische Potenziale. Denke vom Betrieb des Leads aus. Jedes setzt auf einem belegten Signal aus 1–4 auf — eine Schwachstelle, ein negatives Review ODER ein in Sektion 3 erkanntes System als Integrations-Andockpunkt ("Weil [Signal/System] → [Potenzial]"). Decke dabei auch Integrationen in vorhandene Systeme ab (z. B. Anbindung von Termin-/CRM-/Branchensoftware an einen KI-Voice-Agent oder Automatisierung). Format pro Potenzial:
+- **[Kurztitel]** — [was konkret integriert/verbessert/entwickelt wird + Nutzen]. *Signal: [belegtes Signal/System]. [ggf. "Hypothese."]*]
 
-## 5. Strategie für Cold Call
+## 6. Strategie für Cold Call
 [Konkreter Gesprächseinstieg. Wer wird angerufen? Welcher Pain-Point-Hook zuerst? Welche Dienstleistung als Aufhänger? Tonalität. 1 starker Opener-Satz.]
 
-## 6. Risiken / Denkbare Ablehnungsgründe
+## 7. Risiken / Denkbare Ablehnungsgründe
 [Womit kontert der Lead? Pro Einwand eine kurze Entkräftung/Antwortlinie.]`;
 
 // Schema für ein Feld aus Sektion 1: belegte Angabe + Quelle.
@@ -151,6 +155,11 @@ const RESEARCH_SCHEMA = {
     },
     negativeBewertungen: { type: "string" },
     einordnung: { type: "string" },
+    eingesetzteSysteme: {
+      type: "string",
+      description:
+        "Erkennbar eingesetzte Systeme/Software des Betriebs als Andockpunkte für Integrationen (CMS/Shop, Termin-/Buchungssystem, CRM/ERP, Branchensoftware, Telefonie, Office, Buchhaltung, Marketing). 'k.A.', wenn nichts belegbar.",
+    },
     schwachstellen: { type: "string" },
     potenziale: {
       type: "array",
@@ -170,8 +179,8 @@ const RESEARCH_SCHEMA = {
   },
   required: [
     "unternehmensname", "rechercheStand", "ambiguityWarning", "fields",
-    "negativeBewertungen", "einordnung", "schwachstellen", "potenziale",
-    "coldCallStrategie", "risiken",
+    "negativeBewertungen", "einordnung", "eingesetzteSysteme", "schwachstellen",
+    "potenziale", "coldCallStrategie", "risiken",
   ],
   additionalProperties: false,
 };
