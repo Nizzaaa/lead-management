@@ -585,6 +585,9 @@ a { color: inherit; }
 .kanban-col.collapsed .kanban-col-head .status-pill {
   writing-mode: vertical-rl; text-orientation: mixed;
   transform: rotate(180deg); white-space: nowrap;
+  /* Feste Höhe + Zentrierung, damit alle Spalten-Beschriftungen unabhängig
+     von der Wortlänge gleich hoch sind. */
+  height: 132px; display: flex; align-items: center; justify-content: center;
 }
 .kanban-col.collapsed .kanban-count { writing-mode: horizontal-tb; }
 .kanban-col-head {
