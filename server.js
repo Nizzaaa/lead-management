@@ -16,6 +16,11 @@ const PORT = process.env.PORT || 3000;
 // Ohne diese Variable wird kein frame-ancestors-Header gesetzt (Verhalten wie bisher).
 const FRAME_ANCESTORS = String(process.env.FRAME_ANCESTORS || "").trim();
 
+// Abmelde-Ziel des vorgeschalteten Auth-Proxys. Default: Cloudflare Access.
+// Per Env überschreibbar (z. B. "/oauth2/sign_out" für oauth2-proxy). Leer =
+// kein Logout-Button.
+const LOGOUT_URL = String(process.env.LOGOUT_URL || "/cdn-cgi/access/logout").trim();
+
 // --- Anthropic / KI-Setup --------------------------------------------------
 // Das SDK wird nur geladen, wenn ein API-Key vorhanden ist. So läuft die App
 // auch ohne KI-Konfiguration vollständig (nur die KI-Buttons sind dann inaktiv).
@@ -347,6 +352,8 @@ app.get("/api/config", (req, res) => {
     models: AVAILABLE_MODELS,
     statuses: STATUSES,
     stageProbabilities,
+    user: actor(req) !== "—" ? actor(req) : "",
+    logoutUrl: LOGOUT_URL,
   });
 });
 

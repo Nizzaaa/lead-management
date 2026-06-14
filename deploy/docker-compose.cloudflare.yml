@@ -49,6 +49,7 @@ services:
       - PGDATABASE=leadpilot
       # Einbettung NUR durch Nextcloud erlauben:
       - FRAME_ANCESTORS=https://${NC_DOMAIN}
+      - LOGOUT_URL=${LOGOUT_URL:-/cdn-cgi/access/logout}
       - LOG_LEVEL=info
     networks:
       - internal   # Verbindung zur Datenbank

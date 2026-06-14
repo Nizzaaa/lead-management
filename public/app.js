@@ -141,6 +141,7 @@ async function init() {
     currentModel = cfg.model || "";
     stageProbabilities = cfg.stageProbabilities || {};
     renderAiBadge(cfg);
+    renderUserBar(cfg);
     renderStatusFilters();
     renderViewToggle();
     populateStatusSelect();
@@ -152,6 +153,21 @@ async function init() {
   window.addEventListener("hashchange", router);
   router();
   resumeJobs(); // noch laufende Recherchen nach Reload ins Dock zurückholen
+}
+
+// Zeigt den angemeldeten Benutzer und einen Logout-Link in der Topbar an.
+// Beides stammt vom Auth-Proxy (über /api/config); ohne Proxy bleibt es leer.
+function renderUserBar(cfg) {
+  const info = $("#userInfo");
+  if (info) {
+    if (cfg.user) { info.textContent = "👤 " + cfg.user; info.hidden = false; }
+    else { info.hidden = true; }
+  }
+  const link = $("#logoutLink");
+  if (link) {
+    if (cfg.logoutUrl) { link.href = cfg.logoutUrl; link.hidden = false; }
+    else { link.hidden = true; }
+  }
 }
 
 function renderAiBadge(cfg) {

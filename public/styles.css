@@ -651,6 +651,13 @@ a { color: inherit; }
 .navlink:hover { background: var(--surface-2); color: var(--text); }
 .navlink.active { background: var(--surface-2); color: var(--text); }
 
+/* Angemeldeter Benutzer in der Topbar */
+.user-chip {
+  color: var(--muted); font-size: 0.9rem; font-weight: 600;
+  padding: 6px 8px; display: inline-flex; align-items: center; gap: 6px;
+  white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* ===== View-Kopf ===== */
 .view-head {
   display: flex;

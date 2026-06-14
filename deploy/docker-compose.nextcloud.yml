@@ -54,6 +54,8 @@ services:
       - PGDATABASE=leadpilot
       # Einbettung NUR durch Nextcloud erlauben:
       - FRAME_ANCESTORS=https://${NC_DOMAIN}
+      # Variante B nutzt oauth2-proxy → Standard-Logout dort:
+      - LOGOUT_URL=${LOGOUT_URL:-/oauth2/sign_out}
       - LOG_LEVEL=info
     networks:
       - internal
