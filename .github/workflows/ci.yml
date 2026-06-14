@@ -37,17 +37,23 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Gleiche Major-Version wie Produktion (Dockerfile node:22, engines >=22.19).
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Sicherheits-Audit (Produktionsabhängigkeiten)
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Syntax-Check
         run: |
           node --check server.js
           node --check db.js
           node --check research.js
+          node --check exporters.js
+          node --check logger.js
           node --check public/app.js
 
       - name: Smoke-Test (App startet & /api/config antwortet)

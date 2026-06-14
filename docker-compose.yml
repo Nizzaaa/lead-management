@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       - POSTGRES_USER=leadpilot
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?bitte ein sicheres DB-Passwort in .env setzen}
       - POSTGRES_DB=leadpilot
     volumes:
       # Datenbank bleibt über Neustarts/Rebuilds hinweg erhalten
@@ -33,7 +33,7 @@ services:
       - PGHOST=db
       - PGPORT=5432
       - PGUSER=leadpilot
-      - PGPASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - PGPASSWORD=${POSTGRES_PASSWORD:?bitte ein sicheres DB-Passwort in .env setzen}
       - PGDATABASE=leadpilot
     depends_on:
       db:

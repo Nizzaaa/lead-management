@@ -28,7 +28,7 @@ services:
     restart: unless-stopped
     environment:
       - POSTGRES_USER=leadpilot
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?bitte ein sicheres DB-Passwort in .env setzen}
       - POSTGRES_DB=leadpilot
     volumes:
       - leadpilot-db:/var/lib/postgresql/data
@@ -50,7 +50,7 @@ services:
       - PGHOST=db
       - PGPORT=5432
       - PGUSER=leadpilot
-      - PGPASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - PGPASSWORD=${POSTGRES_PASSWORD:?bitte ein sicheres DB-Passwort in .env setzen}
       - PGDATABASE=leadpilot
       # Einbettung NUR durch Nextcloud erlauben:
       - FRAME_ANCESTORS=https://${NC_DOMAIN}

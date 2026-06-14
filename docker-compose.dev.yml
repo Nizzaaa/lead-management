@@ -20,8 +20,9 @@ services:
       - POSTGRES_PASSWORD=leadpilot
       - POSTGRES_DB=leadpilot
     ports:
-      # Datenbank lokal erreichbar (z. B. für ein DB-Tool)
-      - "5432:5432"
+      # Datenbank nur lokal erreichbar (z. B. für ein DB-Tool) – an 127.0.0.1
+      # gebunden, damit Postgres nicht im LAN exponiert wird.
+      - "127.0.0.1:5432:5432"
     volumes:
       - leadpilot-db-dev:/var/lib/postgresql/data
     healthcheck:

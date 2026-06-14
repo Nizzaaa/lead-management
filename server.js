@@ -13,8 +13,28 @@ const PORT = process.env.PORT || 3000;
 // Erlaubte Einbettungs-Quellen für den iframe (z. B. Nextcloud „External Sites").
 // Kommagetrennte Origin-Liste in FRAME_ANCESTORS, z. B.
 //   FRAME_ANCESTORS="https://cloud.firma.de"
-// Ohne diese Variable wird kein frame-ancestors-Header gesetzt (Verhalten wie bisher).
-const FRAME_ANCESTORS = String(process.env.FRAME_ANCESTORS || "").trim();
+// Streng validiert (nur http(s)-Origins), damit über die Variable keine
+// CSP-Header-Injection möglich ist. Ungültige Einträge werden verworfen.
+const FRAME_ANCESTORS = String(process.env.FRAME_ANCESTORS || "")
+  .split(/[\s,]+/)
+  .map((s) => s.trim())
+  .filter((s) => /^https?:\/\/[a-z0-9.-]+(?::\d{1,5})?$/i.test(s));
+
+// Content-Security-Policy: strikt (script-src 'self'), ohne externe Skripte.
+// frame-ancestors erlaubt die iframe-Einbettung nur für die konfigurierten
+// Origins; ohne Konfiguration wird Einbettung komplett unterbunden ('none').
+const CSP = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "img-src 'self' data:",
+  "style-src 'self' 'unsafe-inline'", // Inline-style-Attribute im Markup/JS
+  "script-src 'self'",
+  "connect-src 'self'",
+  FRAME_ANCESTORS.length
+    ? `frame-ancestors 'self' ${FRAME_ANCESTORS.join(" ")}`
+    : "frame-ancestors 'none'",
+].join("; ");
 
 // --- Anthropic / KI-Setup --------------------------------------------------
 // Das SDK wird nur geladen, wenn ein API-Key vorhanden ist. So läuft die App
@@ -76,6 +96,14 @@ try {
 
 const aiEnabled = () => Boolean(anthropic);
 
+// Erkennt das unsichere Standard-DB-Passwort ("leadpilot"), damit beim Start
+// klar gewarnt wird, falls in Produktion vergessen wurde, es zu ändern.
+function usingDefaultDbPassword() {
+  if (process.env.PGPASSWORD) return process.env.PGPASSWORD === "leadpilot";
+  if (process.env.DATABASE_URL) return /:leadpilot@/.test(process.env.DATABASE_URL);
+  return false;
+}
+
 const STATUSES = ["neu", "kontaktiert", "qualifiziert", "angebot", "gewonnen", "verloren"];
 
 // Abschlusswahrscheinlichkeit je Status (Prozent) für den gewichteten
@@ -101,7 +129,9 @@ function sanitizeStageProbabilities(input) {
 }
 
 function sanitizeLead(body = {}) {
-  const clean = (v) => (typeof v === "string" ? v.trim() : "");
+  // Begrenzt zugleich die Länge, damit überlange Eingaben (bis 1 MB Body)
+  // nicht Speicher/Anzeige aufblähen.
+  const clean = (v, max = 1000) => (typeof v === "string" ? v.trim().slice(0, max) : "");
   let status = clean(body.status).toLowerCase();
   if (!STATUSES.includes(status)) status = "neu";
   let value = Number(body.value);
@@ -111,15 +141,15 @@ function sanitizeLead(body = {}) {
   const ns = clean(body.nextStepAt);
   if (/^\d{4}-\d{2}-\d{2}$/.test(ns) && !Number.isNaN(new Date(ns).getTime())) nextStepAt = ns;
   return {
-    name: clean(body.name),
-    company: clean(body.company),
-    email: clean(body.email),
-    phone: clean(body.phone),
-    source: clean(body.source),
+    name: clean(body.name, 300),
+    company: clean(body.company, 300),
+    email: clean(body.email, 300),
+    phone: clean(body.phone, 100),
+    source: clean(body.source, 500),
     status,
     value,
-    notes: clean(body.notes),
-    nextStep: clean(body.nextStep),
+    notes: clean(body.notes, 5000),
+    nextStep: clean(body.nextStep, 500),
     nextStepAt,
   };
 }
@@ -134,7 +164,9 @@ const RESEARCH_FIELD_KEYS = [
 // mit dem bestehenden zusammen (so bleiben Metadaten wie markdown/input/model
 // erhalten). Akzeptiert nur die bekannten Felder der Dossier-Struktur.
 function sanitizeResearch(body = {}, prev = {}) {
-  const s = (v) => (typeof v === "string" ? v.trim() : "");
+  // Großzügig begrenzte Länge je Feld (Dossier-Texte können lang sein), aber
+  // gedeckelt gegen aufgeblähte Eingaben.
+  const s = (v, max = 10000) => (typeof v === "string" ? v.trim().slice(0, max) : "");
   const base = prev && typeof prev === "object" ? prev : {};
   const baseFields = (base.fields && typeof base.fields === "object") ? base.fields : {};
   const inFields = (body.fields && typeof body.fields === "object") ? body.fields : {};
@@ -147,6 +179,7 @@ function sanitizeResearch(body = {}, prev = {}) {
 
   const potenziale = Array.isArray(body.potenziale)
     ? body.potenziale
+        .slice(0, 50) // Anzahl deckeln
         .map((p) => ({ titel: s(p && p.titel), beschreibung: s(p && p.beschreibung), signal: s(p && p.signal) }))
         .filter((p) => p.titel || p.beschreibung || p.signal)
     : (Array.isArray(base.potenziale) ? base.potenziale : []);
@@ -198,6 +231,24 @@ function leadFromResearch(research, input) {
 // in einen Gateway-Timeout (524) laufen lassen. Daher läuft sie als
 // Hintergrund-Job; das Frontend pollt Status + Fortschritt.
 const researchJobs = new Map();
+
+// Obergrenze gleichzeitig laufender Recherchen. Jede Recherche ist teuer
+// (mehrere KI-Aufrufe + Web-Tools) und langlaufend; ohne Deckel könnte ein
+// einzelner Akteur das API-Budget und Server-Ressourcen erschöpfen.
+const MAX_CONCURRENT_RESEARCH = 3;
+
+// Lehnt eine neue Recherche ab (429), wenn bereits zu viele laufen.
+function allowNewResearch(res) {
+  let running = 0;
+  for (const j of researchJobs.values()) if (j.status === "running") running++;
+  if (running >= MAX_CONCURRENT_RESEARCH) {
+    res.status(429).json({
+      error: `Es laufen bereits ${MAX_CONCURRENT_RESEARCH} Recherchen. Bitte kurz warten, bis eine abgeschlossen ist.`,
+    });
+    return false;
+  }
+  return true;
+}
 
 // Übersetzt technische SDK-Fehler in verständliche, handlungsleitende Meldungen.
 function friendlyResearchError(raw) {
@@ -267,6 +318,39 @@ function actor(req) {
   return (req && req.actor) || "—";
 }
 
+// Schlankes In-Memory-Rate-Limiting (Fixed Window) ohne externe Abhängigkeit.
+// Schützt die kostenpflichtigen KI-Endpunkte vor Missbrauch (Kosten-/Quota-
+// Erschöpfung). Schlüssel ist der SSO-Aktor (pro Benutzer), sonst die IP.
+function rateLimiter({ windowMs, max }) {
+  const hits = new Map(); // key -> { count, resetAt }
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = (req.actor && req.actor !== "—" ? req.actor : "") || req.ip || "anon";
+    let rec = hits.get(key);
+    if (!rec || rec.resetAt <= now) {
+      rec = { count: 0, resetAt: now + windowMs };
+      hits.set(key, rec);
+    }
+    rec.count++;
+    // Gelegentlich abgelaufene Einträge aufräumen, damit die Map nicht wächst.
+    if (hits.size > 5000) {
+      for (const [k, v] of hits) if (v.resetAt <= now) hits.delete(k);
+    }
+    if (rec.count > max) {
+      const retry = Math.max(1, Math.ceil((rec.resetAt - now) / 1000));
+      res.setHeader("Retry-After", String(retry));
+      return res.status(429).json({
+        error: `Zu viele KI-Anfragen. Bitte in ${retry}s erneut versuchen.`,
+      });
+    }
+    next();
+  };
+}
+
+// 30 KI-Anfragen pro 5 Minuten je Akteur – großzügig für normale Nutzung,
+// bremst aber automatisierten Missbrauch der teuren KI-Endpunkte.
+const aiLimiter = rateLimiter({ windowMs: 5 * 60 * 1000, max: 30 });
+
 // Schreibt einen Aktivitäts-Eintrag, ohne den Hauptablauf scheitern zu lassen.
 async function logActivity(leadId, fields, who) {
   if (!leadId) return;
@@ -282,14 +366,21 @@ const app = express();
 app.use(httpLogger());
 app.use(express.json({ limit: "1mb" }));
 
-// Einbettung in Nextcloud (iframe) erlauben, wenn FRAME_ANCESTORS gesetzt ist.
-if (FRAME_ANCESTORS) {
-  const policy = `frame-ancestors 'self' ${FRAME_ANCESTORS}`;
-  app.use((req, res, next) => {
-    res.setHeader("Content-Security-Policy", policy);
-    next();
-  });
-}
+// Security-Header auf jede Antwort setzen. Bewusst als schlanke eigene
+// Middleware statt einer zusätzlichen Abhängigkeit (helmet), passend zur
+// dependency-freien Architektur. Setzt eine strikte CSP, verhindert
+// MIME-Sniffing und Clickjacking und begrenzt Referrer/Browser-Features.
+app.use((req, res, next) => {
+  res.setHeader("Content-Security-Policy", CSP);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "same-origin");
+  res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+  // Clickjacking-Schutz auch für Clients ohne CSP-frame-ancestors. Nur wenn
+  // KEINE Einbettung erlaubt ist – sonst würde es die iframe-Nutzung in
+  // Nextcloud blockieren (X-Frame-Options kann keine Allowlist abbilden).
+  if (!FRAME_ANCESTORS.length) res.setHeader("X-Frame-Options", "DENY");
+  next();
+});
 
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -447,8 +538,9 @@ async function scoreAfterResearch(lead, onProgress) {
 
 // Lead per Recherche anlegen: Eingabe = Firmenname ODER Website-URL.
 // Startet einen Hintergrund-Job und liefert sofort eine Job-ID zurück.
-app.post("/api/leads/research", wrap(async (req, res) => {
+app.post("/api/leads/research", aiLimiter, wrap(async (req, res) => {
   if (!requireAi(res)) return;
+  if (!allowNewResearch(res)) return;
   const input = typeof req.body.input === "string" ? req.body.input.trim() : "";
   if (!input) {
     return res.status(400).json({ error: "Firmenname oder Website-URL ist erforderlich." });
@@ -464,8 +556,9 @@ app.post("/api/leads/research", wrap(async (req, res) => {
 }));
 
 // Bestehenden Lead neu recherchieren (Daten aktualisieren) – ebenfalls als Job.
-app.post("/api/leads/:id/research", wrap(async (req, res) => {
+app.post("/api/leads/:id/research", aiLimiter, wrap(async (req, res) => {
   if (!requireAi(res)) return;
+  if (!allowNewResearch(res)) return;
   const lead = await db.getLead(req.params.id);
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
   const input =
@@ -681,7 +774,7 @@ async function applyScore(lead) {
 }
 
 // KI-Bewertung / Lead-Scoring
-app.post("/api/leads/:id/score", wrap(async (req, res) => {
+app.post("/api/leads/:id/score", aiLimiter, wrap(async (req, res) => {
   if (!requireAi(res)) return;
   const lead = await db.getLead(req.params.id);
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
@@ -700,7 +793,7 @@ app.post("/api/leads/:id/score", wrap(async (req, res) => {
 }));
 
 // KI-E-Mail-Entwurf
-app.post("/api/leads/:id/email", wrap(async (req, res) => {
+app.post("/api/leads/:id/email", aiLimiter, wrap(async (req, res) => {
   if (!requireAi(res)) return;
   const lead = await db.getLead(req.params.id);
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
@@ -726,7 +819,7 @@ app.post("/api/leads/:id/email", wrap(async (req, res) => {
 }));
 
 // KI-Empfehlung / Next Best Action
-app.post("/api/leads/:id/insights", wrap(async (req, res) => {
+app.post("/api/leads/:id/insights", aiLimiter, wrap(async (req, res) => {
   if (!requireAi(res)) return;
   const lead = await db.getLead(req.params.id);
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
@@ -757,11 +850,11 @@ app.get("/api/leads/:id/activities", wrap(async (req, res) => {
 app.post("/api/leads/:id/activities", wrap(async (req, res) => {
   const lead = await db.getLead(req.params.id);
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
-  const clean = (v) => (typeof v === "string" ? v.trim() : "");
+  const clean = (v, max = 5000) => (typeof v === "string" ? v.trim().slice(0, max) : "");
   let type = clean(req.body.type).toLowerCase();
   if (!ACTIVITY_TYPES.includes(type)) type = "note";
-  const title = clean(req.body.title);
-  const body = clean(req.body.body);
+  const title = clean(req.body.title, 500);
+  const body = clean(req.body.body, 10000);
   if (!title && !body) {
     return res.status(400).json({ error: "Titel oder Text ist erforderlich." });
   }
@@ -800,12 +893,17 @@ db.init()
     } catch (err) {
       logger.warn("stage_probabilities_load_failed", { error: err.message });
     }
+    if (usingDefaultDbPassword()) {
+      logger.warn("default_db_password", {
+        hint: "Das DB-Passwort ist auf den unsicheren Standard 'leadpilot' gesetzt. Bitte POSTGRES_PASSWORD auf ein sicheres Passwort ändern.",
+      });
+    }
     app.listen(PORT, () => {
       logger.info("server_started", {
         port: PORT,
         aiEnabled: aiEnabled(),
         model: aiEnabled() ? currentModel : null,
-        frameAncestors: FRAME_ANCESTORS || null,
+        frameAncestors: FRAME_ANCESTORS.length ? FRAME_ANCESTORS.join(" ") : null,
       });
     });
   })

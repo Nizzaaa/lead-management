@@ -50,9 +50,10 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 ## Schnellstart mit Docker Compose (empfohlen)
 
 ```bash
-# 1. API-Key hinterlegen (optional, aktiviert die KI-Funktionen)
+# 1. Konfiguration anlegen
 cp .env.example .env
-#   → ANTHROPIC_API_KEY in der .env eintragen
+#   → POSTGRES_PASSWORD in der .env auf ein sicheres Passwort setzen (PFLICHT)
+#   → ANTHROPIC_API_KEY in der .env eintragen (optional, aktiviert die KI)
 
 # 2. Bauen und starten
 docker compose up -d
@@ -64,7 +65,11 @@ Der Stack startet zwei Container: die **Web-App** und eine **PostgreSQL-Datenban
 
 - Die Leads werden in der PostgreSQL-DB im benannten Volume `leadpilot-db`
   gespeichert und bleiben über Neustarts und Rebuilds hinweg erhalten.
-- DB-Passwort über `POSTGRES_PASSWORD` in der `.env` setzen (Standard: `leadpilot`).
+- DB-Passwort über `POSTGRES_PASSWORD` in der `.env` setzen – **erforderlich**:
+  Ohne gesetztes Passwort startet der Stack bewusst nicht (kein unsicherer
+  Standard mehr). Bestehende Installationen, die bisher den alten Standard
+  `leadpilot` genutzt haben, müssen `POSTGRES_PASSWORD=leadpilot` setzen (Daten
+  bleiben erhalten) oder das Passwort aktiv rotieren.
 - Port anpassen: `PORT=8080 docker compose up -d` (oder `PORT` in der `.env` setzen).
 - Stoppen: `docker compose down` · inkl. Daten löschen: `docker compose down -v` ·
   Logs: `docker compose logs -f` · Neu bauen: `docker compose up -d --build`

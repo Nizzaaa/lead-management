@@ -10,8 +10,7 @@
 <body>
   <header class="topbar">
     <a class="brand" href="#/" aria-label="FU/GE Solutions – Zur Übersicht">
-      <img src="Branding/Logo_Gesamt_transparent.png" alt="FU/GE Solutions" class="brand-logo"
-           onerror="this.style.display='none';document.getElementById('brandWordmark').style.display='inline-block';" />
+      <img id="brandLogo" src="Branding/Logo_Gesamt_transparent.png" alt="FU/GE Solutions" class="brand-logo" />
       <span id="brandWordmark" class="brand-wordmark" style="display:none;">FU/GE <span class="wm-sol">SOLUTIONS</span></span>
       <div>
         <h1 class="sr-only">FU/GE Solutions</h1>
@@ -52,7 +51,7 @@
 
     <div id="emptyState" class="empty hidden">
       <p>Noch keine Leads vorhanden.</p>
-      <button class="btn btn-primary" onclick="document.getElementById('addLeadBtn').click()">Ersten Lead recherchieren</button>
+      <button id="emptyStateAddBtn" class="btn btn-primary">Ersten Lead recherchieren</button>
     </div>
   </main>
 
