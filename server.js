@@ -188,6 +188,39 @@ function parseJsonObject(raw) {
   }
 }
 
+// Ergänzt einen bestehenden (Dubletten-)Lead um FEHLENDE Angaben aus einer
+// Import-Zeile, ohne vorhandene Werte zu überschreiben. So lassen sich
+// unvollständige Datensätze per Import vervollständigen. Liefert die Namen der
+// tatsächlich ergänzten Felder (leer = nichts zu tun / Datensatz war komplett).
+async function enrichLead(existing, data, ai, research, req) {
+  const filled = [];
+  const merged = {
+    name: existing.name, company: existing.company, email: existing.email,
+    phone: existing.phone, source: existing.source, status: existing.status,
+    value: Number(existing.value) || 0, notes: existing.notes,
+    nextStep: existing.nextStep, nextStepAt: existing.nextStepAt || null,
+  };
+  // Leere Textfelder aus dem Import füllen (vorhandene bleiben unangetastet).
+  for (const f of ["name", "company", "email", "phone", "source", "notes", "nextStep"]) {
+    if (!String(merged[f] || "").trim() && data[f]) { merged[f] = data[f]; filled.push(f); }
+  }
+  if (!merged.nextStepAt && data.nextStepAt) { merged.nextStepAt = data.nextStepAt; filled.push("nextStepAt"); }
+  if ((!merged.value || merged.value === 0) && data.value > 0) { merged.value = data.value; filled.push("Wert"); }
+  // Status wird bewusst NICHT überschrieben (Pipeline-Stand bleibt erhalten).
+
+  if (filled.length) await db.updateLead(existing.id, merged);
+  if (ai && !existing.ai) { await db.setLeadAi(existing.id, ai); filled.push("KI-Bewertung"); }
+  if (research && !existing.research) { await db.updateLeadResearch(existing.id, research); filled.push("Dossier"); }
+
+  if (filled.length) {
+    await logActivity(existing.id, {
+      type: "system", title: "Per CSV-Import ergänzt",
+      body: "Ergänzte Felder: " + filled.join(", "),
+    }, actor(req));
+  }
+  return filled;
+}
+
 // Reihenfolge/Schlüssel der Felder aus Sektion 1 des Dossiers.
 const RESEARCH_FIELD_KEYS = [
   "branche", "adresse", "telefonAllgemein", "ansprechpartner",
@@ -533,6 +566,7 @@ app.post("/api/leads/import", wrap(async (req, res) => {
   }
 
   let created = 0;
+  let enriched = 0;
   let skippedDuplicate = 0;
   let skippedEmpty = 0;
   const errors = [];
@@ -542,14 +576,21 @@ app.post("/api/leads/import", wrap(async (req, res) => {
     try {
       const data = sanitizeLead({ ...raw, value: parseNumber(raw.value) });
       if (!data.name && !data.company) { skippedEmpty++; continue; }
-      if (!force) {
-        const dup = await db.findDuplicateLeads({ email: data.email, company: data.company });
-        if (dup.length) { skippedDuplicate++; continue; }
-      }
       // KI-Bewertung und Dossier aus den JSON-Spalten übernehmen (falls vorhanden),
       // damit ein Export→Import-Durchlauf diese Daten erhält.
       const research = parseJsonObject(raw.researchJson);
       const ai = parseJsonObject(raw.aiJson);
+
+      if (!force) {
+        const dup = await db.findDuplicateLeads({ email: data.email, company: data.company });
+        if (dup.length) {
+          // Dublette: kein zweiter Datensatz, aber fehlende Angaben ergänzen.
+          const filled = await enrichLead(dup[0], data, ai, research, req);
+          if (filled.length) enriched++; else skippedDuplicate++;
+          continue;
+        }
+      }
+
       const lead = await db.createLead(data, research);
       if (ai) await db.setLeadAi(lead.id, ai);
       await logActivity(lead.id, { type: "system", title: "Per CSV-Import angelegt" }, actor(req));
@@ -559,7 +600,7 @@ app.post("/api/leads/import", wrap(async (req, res) => {
     }
   }
 
-  res.json({ created, skippedDuplicate, skippedEmpty, errors, recognized, total: rows.length });
+  res.json({ created, enriched, skippedDuplicate, skippedEmpty, errors, recognized, total: rows.length });
 }));
 
 // Lead anlegen
