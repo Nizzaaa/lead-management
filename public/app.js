@@ -12,6 +12,19 @@ let currentModel = "";
 let stageProbabilities = {};
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
+// Eingeklappte Board-Spalten (Status-Namen). Persistiert wie `view`, lebt
+// außerhalb des DOM, da renderKanban() das Board per innerHTML neu aufbaut.
+const COLLAPSE_KEY = "leadpilot_kanban_collapsed";
+let collapsedStatuses = new Set(loadCollapsed());
+function loadCollapsed() {
+  try { return JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "[]"); }
+  catch { return []; }
+}
+function saveCollapsed() {
+  try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsedStatuses])); }
+  catch {}
+}
+
 // Aktuell geöffnete Detailseite (Lead-ID) und ob sie im Bearbeiten-Modus ist.
 let detailId = null;
 let detailEditing = false;
@@ -315,11 +328,14 @@ function renderKanban() {
       const colItems = items.filter((l) => l.status === status);
       const cards = colItems.map(kanbanCard).join("") ||
         `<div class="kanban-empty">—</div>`;
-      return `<div class="kanban-col" data-status="${status}">
-        <div class="kanban-col-head">
+      const isCollapsed = collapsedStatuses.has(status);
+      return `<div class="kanban-col${isCollapsed ? " collapsed" : ""}" data-status="${status}">
+        <button type="button" class="kanban-col-head" data-collapse="${status}"
+          aria-expanded="${!isCollapsed}"
+          aria-label="${status} ${isCollapsed ? "ausklappen" : "einklappen"}">
           <span class="status-pill s-${status}">${status}</span>
           <span class="kanban-count">${colItems.length}</span>
-        </div>
+        </button>
         <div class="kanban-cards" data-status="${status}">${cards}</div>
       </div>`;
     })
@@ -1099,7 +1115,17 @@ function bindEvents() {
     e.preventDefault();
     location.hash = "#/lead/" + encodeURIComponent(card.dataset.nav);
   });
-  $("#kanban").addEventListener("click", onCardNav);
+  $("#kanban").addEventListener("click", (e) => {
+    const head = e.target.closest("[data-collapse]");
+    if (head) {
+      const s = head.dataset.collapse;
+      collapsedStatuses.has(s) ? collapsedStatuses.delete(s) : collapsedStatuses.add(s);
+      saveCollapsed();
+      renderKanban();
+      return;
+    }
+    onCardNav(e);
+  });
   bindKanbanDnd();
 
   // Detailseite: ein delegierter Handler für alle Aktionen.
