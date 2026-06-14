@@ -3,16 +3,18 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LeadPilot · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=14" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>" />
+  <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
+  <link rel="stylesheet" href="styles.css?v=21" />
+  <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#/" aria-label="Zur Übersicht">
-      <span class="logo">🎯</span>
+    <a class="brand" href="#/" aria-label="FU/GE Solutions – Zur Übersicht">
+      <img src="Branding/Logo_Gesamt_transparent.png" alt="FU/GE Solutions" class="brand-logo"
+           onerror="this.style.display='none';document.getElementById('brandWordmark').style.display='inline-block';" />
+      <span id="brandWordmark" class="brand-wordmark" style="display:none;">FU/GE <span class="wm-sol">SOLUTIONS</span></span>
       <div>
-        <h1>LeadPilot</h1>
+        <h1 class="sr-only">FU/GE Solutions</h1>
         <p class="tagline">Lead-Verwaltung mit KI-Unterstützung</p>
       </div>
     </a>
@@ -103,6 +105,22 @@
         </label>
         <p class="hint">Der gewichtete Pipeline-Wert = Σ (geschätzter Wert × Wahrscheinlichkeit). Startwerte sind Richtwerte – über echte Abschlüsse kalibrieren.</p>
 
+        <div class="settings-section">
+          <h3>📦 Daten-Import &amp; -Export</h3>
+          <p class="hint">Alle Leads als Datei sichern oder eine Liste importieren. Die CSV verwendet das Trennzeichen „;" und öffnet sich direkt in Excel.</p>
+          <div class="io-row">
+            <button type="button" class="btn" id="exportCsvBtn">⬇️ CSV exportieren</button>
+            <button type="button" class="btn" id="exportXlsxBtn">⬇️ Excel exportieren</button>
+          </div>
+          <label class="io-import">CSV importieren
+            <input type="file" id="importCsvInput" accept=".csv,text/csv" />
+          </label>
+          <p class="hint">Erkannte Spalten (deutsch oder englisch): Name, Firma, E-Mail, Telefon, Quelle, Status, Wert, Notizen, Nächster Schritt, Wiedervorlage. Mögliche Dubletten (gleiche E-Mail oder Firma) werden übersprungen.</p>
+          <div class="io-row">
+            <button type="button" class="btn btn-primary" id="importCsvBtn">⬆️ Importieren</button>
+          </div>
+        </div>
+
         <div class="form-actions">
           <button type="button" class="btn" id="cancelSettingsBtn">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Speichern</button>
@@ -190,6 +208,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=14"></script>
+  <script src="app.js?v=18"></script>
 </body>
 </html>

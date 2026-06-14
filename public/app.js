@@ -12,6 +12,19 @@ let currentModel = "";
 let stageProbabilities = {};
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
+// Eingeklappte Board-Spalten (Status-Namen). Persistiert wie `view`, lebt
+// außerhalb des DOM, da renderKanban() das Board per innerHTML neu aufbaut.
+const COLLAPSE_KEY = "leadpilot_kanban_collapsed";
+let collapsedStatuses = new Set(loadCollapsed());
+function loadCollapsed() {
+  try { return JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "[]"); }
+  catch { return []; }
+}
+function saveCollapsed() {
+  try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsedStatuses])); }
+  catch {}
+}
+
 // Aktuell geöffnete Detailseite (Lead-ID) und ob sie im Bearbeiten-Modus ist.
 let detailId = null;
 let detailEditing = false;
@@ -268,7 +281,7 @@ function dueLeadCount() {
 function scoreColor(score) {
   if (score >= 75) return "var(--green)";
   if (score >= 50) return "var(--amber)";
-  if (score >= 25) return "#fb923c";
+  if (score >= 25) return "#E8703A";
   return "var(--red)";
 }
 
@@ -315,11 +328,14 @@ function renderKanban() {
       const colItems = items.filter((l) => l.status === status);
       const cards = colItems.map(kanbanCard).join("") ||
         `<div class="kanban-empty">—</div>`;
-      return `<div class="kanban-col" data-status="${status}">
-        <div class="kanban-col-head">
+      const isCollapsed = collapsedStatuses.has(status);
+      return `<div class="kanban-col${isCollapsed ? " collapsed" : ""}" data-status="${status}">
+        <button type="button" class="kanban-col-head" data-collapse="${status}"
+          aria-expanded="${!isCollapsed}"
+          aria-label="${status} ${isCollapsed ? "ausklappen" : "einklappen"}">
           <span class="status-pill s-${status}">${status}</span>
           <span class="kanban-count">${colItems.length}</span>
-        </div>
+        </button>
         <div class="kanban-cards" data-status="${status}">${cards}</div>
       </div>`;
     })
@@ -474,8 +490,7 @@ function detailViewHtml(l) {
          <div class="ai-score-meta">
            <strong>KI-Score · Note ${esc(ai.grade)}</strong>
            ${ai.reasoning ? `<p>${esc(ai.reasoning)}</p>` : ""}
-           ${ai.nextStep ? `<p class="next-step">➡️ ${esc(ai.nextStep)}</p>` : ""}
-           ${ai.valueReasoning ? `<p class="value-reason">💶 Wertschätzung: ${esc(ai.valueReasoning)}</p>` : ""}
+           ${ai.valueReasoning ? `<p class="value-reason">💶 Wert (12 Mon.): ${esc(ai.valueReasoning)}</p>` : ""}
          </div>
        </div>`
     : `<p class="d-muted">Noch keine KI-Bewertung. ${aiEnabled ? "" : "(KI nicht konfiguriert)"}</p>`;
@@ -517,6 +532,7 @@ function detailViewHtml(l) {
 
       ${sectionView("Negative Bewertungen → Potenzial", r.negativeBewertungen)}
       ${sectionView("Einordnung / Selbstdarstellung", r.einordnung)}
+      ${sectionView("Eingesetzte Systeme / Integrationspotenzial", r.eingesetzteSysteme)}
       ${sectionView("Sichtbare Schwachstellen / Ansatzpunkte", r.schwachstellen)}
 
       <section class="d-section">
@@ -539,6 +555,7 @@ function detailViewHtml(l) {
       <a class="btn btn-sm" href="#/">← Zurück</a>
       <div class="detail-bar-actions">
         ${aiEnabled && r ? `<button class="btn btn-sm" data-action="research">🔄 Neu recherchieren</button>` : ""}
+        <button class="btn btn-sm" data-action="pdf" title="Lead-Details als PDF (Drucken / Als PDF speichern)">📄 PDF</button>
         <button class="btn btn-sm" data-action="export" title="Alle Daten dieses Leads als JSON (DSGVO-Auskunft)">⬇️ Datenauskunft</button>
         <button class="btn btn-sm" data-action="edit">✏️ Bearbeiten</button>
         <button class="btn btn-sm btn-danger" data-action="delete">🗑️ Löschen</button>
@@ -839,6 +856,7 @@ function detailEditHtml(l) {
 
         ${textarea("ed_r_negativeBewertungen", "Negative Bewertungen → Potenzial", r.negativeBewertungen || "")}
         ${textarea("ed_r_einordnung", "Einordnung / Selbstdarstellung", r.einordnung || "")}
+        ${textarea("ed_r_eingesetzteSysteme", "Eingesetzte Systeme / Integrationspotenzial", r.eingesetzteSysteme || "")}
         ${textarea("ed_r_schwachstellen", "Sichtbare Schwachstellen / Ansatzpunkte", r.schwachstellen || "")}
 
         <h4 class="edit-subhead">Potenziale für FU/GE</h4>
@@ -925,6 +943,7 @@ function collectResearch() {
     fields,
     negativeBewertungen: g("ed_r_negativeBewertungen"),
     einordnung: g("ed_r_einordnung"),
+    eingesetzteSysteme: g("ed_r_eingesetzteSysteme"),
     schwachstellen: g("ed_r_schwachstellen"),
     potenziale,
     coldCallStrategie: g("ed_r_coldCallStrategie"),
@@ -998,6 +1017,9 @@ function onDetailClick(e) {
     case "export":
       exportLead(id);
       break;
+    case "pdf":
+      exportLeadPdf(id);
+      break;
     case "next-step-done":
       completeNextStep(id);
       break;
@@ -1052,6 +1074,9 @@ function bindEvents() {
   $("#closeSettingsModal").addEventListener("click", closeSettingsModal);
   $("#cancelSettingsBtn").addEventListener("click", closeSettingsModal);
   $("#settingsForm").addEventListener("submit", saveSettings);
+  $("#exportCsvBtn").addEventListener("click", () => downloadFile("/api/leads/export.csv"));
+  $("#exportXlsxBtn").addEventListener("click", () => downloadFile("/api/leads/export.xlsx"));
+  $("#importCsvBtn").addEventListener("click", importCsv);
 
   $("#search").addEventListener("input", (e) => {
     searchTerm = e.target.value.toLowerCase().trim();
@@ -1090,7 +1115,17 @@ function bindEvents() {
     e.preventDefault();
     location.hash = "#/lead/" + encodeURIComponent(card.dataset.nav);
   });
-  $("#kanban").addEventListener("click", onCardNav);
+  $("#kanban").addEventListener("click", (e) => {
+    const head = e.target.closest("[data-collapse]");
+    if (head) {
+      const s = head.dataset.collapse;
+      collapsedStatuses.has(s) ? collapsedStatuses.delete(s) : collapsedStatuses.add(s);
+      saveCollapsed();
+      renderKanban();
+      return;
+    }
+    onCardNav(e);
+  });
   bindKanbanDnd();
 
   // Detailseite: ein delegierter Handler für alle Aktionen.
@@ -1294,6 +1329,158 @@ async function exportLead(id) {
   }
 }
 
+// PDF-Export der Lead-Details: baut ein eigenständiges, druckfreundliches
+// HTML-Dokument und öffnet den Druckdialog. Der Browser bietet dort „Als PDF
+// speichern" – dependency-frei und mit korrekten Umlauten. Aktivitäten werden
+// über den vorhandenen Export-Endpunkt mitgeladen.
+async function exportLeadPdf(id) {
+  try {
+    const data = await api(`/api/leads/${id}/export`);
+    const l = data.lead || {};
+    const activities = Array.isArray(data.activities) ? data.activities : [];
+    const html = buildLeadPdfHtml(l, activities);
+    const win = window.open("", "_blank");
+    if (!win) {
+      toast("Bitte Pop-ups erlauben, um das PDF zu erzeugen.", "error");
+      return;
+    }
+    win.document.open();
+    win.document.write(html);
+    win.document.close();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// Erzeugt das vollständige, eigenständige HTML-Dokument für den PDF-Druck.
+function buildLeadPdfHtml(l, activities) {
+  const r = l.research;
+  const ai = l.ai;
+  const title = l.company || l.name || "Lead";
+
+  const row = (label, value) =>
+    value ? `<tr><th>${esc(label)}</th><td>${esc(value)}</td></tr>` : "";
+
+  const stammdaten = `
+    <table class="kv">
+      ${row("Firma", l.company)}
+      ${row("Ansprechpartner", l.name)}
+      ${row("E-Mail", l.email)}
+      ${row("Telefon", l.phone)}
+      ${row("Quelle", l.source)}
+      ${row("Status", l.status)}
+      ${row("Geschätzter Wert", fmtEuro(l.value))}
+      ${row("Nächster Schritt", l.nextStep)}
+      ${row("Wiedervorlage", l.nextStepAt ? fmtDate(l.nextStepAt) : "")}
+      ${row("Angelegt", fmtDateTime(l.createdAt))}
+    </table>`;
+
+  const aiBox = ai
+    ? `<section>
+         <h2>KI-Bewertung</h2>
+         <p><strong>Score: ${esc(ai.score)}/100</strong> · Note ${esc(ai.grade || "—")}</p>
+         ${ai.reasoning ? `<p>${esc(ai.reasoning)}</p>` : ""}
+         ${ai.valueReasoning ? `<p><strong>Wert (12 Monate):</strong> ${esc(ai.valueReasoning)}</p>` : ""}
+       </section>`
+    : "";
+
+  const notes = l.notes
+    ? `<section><h2>Notizen</h2><p>${esc(l.notes).replace(/\n/g, "<br>")}</p></section>`
+    : "";
+
+  let dossier = "";
+  if (r) {
+    const f = r.fields || {};
+    const fieldRows = RESEARCH_FIELDS.map(([key, label]) => {
+      const v = fieldVal(f[key]);
+      return v ? `<tr><th>${esc(label)}</th><td>${esc(v)}</td></tr>` : "";
+    }).join("");
+
+    const sect = (heading, text) =>
+      text ? `<section><h3>${esc(heading)}</h3><p>${esc(text).replace(/\n/g, "<br>")}</p></section>` : "";
+
+    const pots = Array.isArray(r.potenziale) && r.potenziale.length
+      ? `<ul>${r.potenziale.map((p) =>
+          `<li><strong>${esc(p.titel)}</strong>${p.beschreibung ? `: ${esc(p.beschreibung)}` : ""}${p.signal ? ` <em>(Signal: ${esc(p.signal)})</em>` : ""}</li>`
+        ).join("")}</ul>`
+      : "";
+
+    dossier = `
+      <section class="dossier">
+        <h2>Recherche-Dossier</h2>
+        ${r.rechercheStand ? `<p class="muted">Recherche-Stand: ${esc(r.rechercheStand)}</p>` : ""}
+        ${fieldRows ? `<table class="kv">${fieldRows}</table>` : ""}
+        ${sect("Negative Bewertungen → Potenzial", r.negativeBewertungen)}
+        ${sect("Einordnung / Selbstdarstellung", r.einordnung)}
+        ${sect("Eingesetzte Systeme / Integrationspotenzial", r.eingesetzteSysteme)}
+        ${sect("Sichtbare Schwachstellen / Ansatzpunkte", r.schwachstellen)}
+        ${pots ? `<section><h3>Potenziale für FU/GE</h3>${pots}</section>` : ""}
+        ${sect("Strategie für Cold Call", r.coldCallStrategie)}
+        ${sect("Risiken / Denkbare Ablehnungsgründe", r.risiken)}
+      </section>`;
+  }
+
+  let timeline = "";
+  if (activities.length) {
+    const items = activities.map((a) => {
+      const m = ACTIVITY_META[a.type] || ACTIVITY_META.note;
+      const head = a.title || m.label;
+      const who = a.actor && a.actor !== "—" ? ` · ${a.actor}` : "";
+      return `<li>
+        <div class="act-head">${m.icon} <strong>${esc(head)}</strong>
+          <span class="muted">${esc(fmtDateTime(a.createdAt))}${esc(who)}</span></div>
+        ${a.body ? `<p>${esc(a.body).replace(/\n/g, "<br>")}</p>` : ""}
+        ${a.outcome ? `<p class="muted">Ergebnis: ${esc(a.outcome)}</p>` : ""}
+      </li>`;
+    }).join("");
+    timeline = `<section><h2>Aktivitäten</h2><ul class="acts">${items}</ul></section>`;
+  }
+
+  return `<!DOCTYPE html>
+<html lang="de"><head><meta charset="UTF-8">
+<title>Lead · ${esc(title)}</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+         color: #1a2330; margin: 32px; font-size: 13px; line-height: 1.5; }
+  h1 { font-size: 22px; margin: 0 0 2px; }
+  h2 { font-size: 15px; margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 2px solid #0A7A3B; color: #0A7A3B; }
+  h3 { font-size: 13px; margin: 14px 0 4px; }
+  .sub { color: #5b6878; margin: 0 0 4px; }
+  .pills { margin: 6px 0 4px; }
+  .pill { display: inline-block; background: #eef2f8; border-radius: 999px;
+          padding: 3px 12px; font-weight: 600; margin-right: 6px; }
+  table.kv { border-collapse: collapse; width: 100%; margin: 6px 0; }
+  table.kv th { text-align: left; width: 200px; vertical-align: top; color: #5b6878;
+                font-weight: 600; padding: 4px 10px 4px 0; }
+  table.kv td { padding: 4px 0; vertical-align: top; }
+  section { page-break-inside: avoid; }
+  p { margin: 4px 0; }
+  .muted { color: #5b6878; font-size: 12px; }
+  ul.acts { list-style: none; padding: 0; margin: 0; }
+  ul.acts li { border-left: 2px solid #e2e8f0; padding: 4px 0 10px 12px; margin-left: 4px; }
+  ul.acts .act-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .foot { margin-top: 28px; padding-top: 8px; border-top: 1px solid #e2e8f0;
+          color: #8a96a6; font-size: 11px; }
+  @media print { body { margin: 0; } @page { margin: 16mm; } }
+</style></head>
+<body onload="window.print()">
+  <h1>${esc(title)}</h1>
+  ${l.company && l.name ? `<p class="sub">${esc(l.name)}</p>` : ""}
+  <div class="pills">
+    <span class="pill">${esc(l.status)}</span>
+    <span class="pill">${esc(fmtEuro(l.value))}</span>
+    ${ai ? `<span class="pill">KI-Score ${esc(ai.score)} · ${esc(ai.grade || "—")}</span>` : ""}
+  </div>
+  <section><h2>Stammdaten</h2>${stammdaten}</section>
+  ${aiBox}
+  ${notes}
+  ${dossier}
+  ${timeline}
+  <div class="foot">FU/GE Solutions · erstellt am ${esc(fmtDateTime(new Date().toISOString()))}</div>
+</body></html>`;
+}
+
 async function deleteLead(id, fromDetail = false) {
   const l = getLead(id);
   const name = l?.company || l?.name || "—";
@@ -1366,6 +1553,51 @@ async function saveSettings(e) {
     closeSettingsModal();
   } catch (err) {
     toast(err.message, "error");
+  }
+}
+
+// --- Daten-Import & -Export (Einstellungen) --------------------------------
+// Startet einen Datei-Download für eine Server-Route mit attachment-Disposition.
+function downloadFile(url) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+// CSV-Import: liest die gewählte Datei, schickt sie an den Server und meldet das
+// Ergebnis. Anschließend wird die Lead-Liste aktualisiert.
+async function importCsv() {
+  const input = $("#importCsvInput");
+  const file = input.files && input.files[0];
+  if (!file) {
+    toast("Bitte zuerst eine CSV-Datei auswählen.", "error");
+    return;
+  }
+  const btn = $("#importCsvBtn");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Importiere…";
+  try {
+    const csv = await file.text();
+    const res = await api("/api/leads/import", {
+      method: "POST",
+      body: JSON.stringify({ csv }),
+    });
+    const parts = [`${res.created} angelegt`];
+    if (res.skippedDuplicate) parts.push(`${res.skippedDuplicate} Dublette(n) übersprungen`);
+    if (res.skippedEmpty) parts.push(`${res.skippedEmpty} leer`);
+    if (res.errors && res.errors.length) parts.push(`${res.errors.length} fehlerhaft`);
+    toast("Import: " + parts.join(" · "), res.created ? "success" : "");
+    input.value = "";
+    await refresh();
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
   }
 }
 
@@ -1771,11 +2003,11 @@ function barChart(series, { format = (v) => v, color = "var(--primary)" } = {}) 
 
 // Kräftige (dunklere) Status-Farben – guter Kontrast zu weißer Schrift im Trichter.
 const FUNNEL_COLORS = {
-  neu: "#64748b",
-  kontaktiert: "#0891b2",
-  qualifiziert: "#6366f1",
-  angebot: "#d97706",
-  gewonnen: "#16a34a",
+  neu: "#6B706D",
+  kontaktiert: "#529C72",
+  qualifiziert: "#0A7A3B",
+  angebot: "#B8740A",
+  gewonnen: "#127A38",
 };
 
 // Echter, sich verjüngender SVG-Trichter. Stufen = Pipeline ohne "verloren".

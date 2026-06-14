@@ -31,7 +31,10 @@ services:
       retries: 5
 
   app:
-    image: node:20-alpine
+    # Gleiche Node-Major wie das Produktions-Image (Dockerfile) und die in
+    # package.json geforderte Engine (>=22.19.0) – sonst läuft die Entwicklung
+    # auf einer anderen Laufzeit als die Produktion.
+    image: node:22-alpine
     container_name: leadpilot-dev
     working_dir: /app
     # Erst Abhängigkeiten (inkl. devDependencies wie nodemon), dann Live-Reload.
