@@ -1,15 +1,15 @@
 :root {
-  --bg: #FFFBF1;            /* Creme */
+  --bg: #F3F6FB;            /* cool near-white (inputs/fields) */
   --surface: #FFFFFF;
-  --surface-2: #F4F1E7;     /* warm off-white */
-  --border: #E4DFD0;        /* light warm-gray lines */
+  --surface-2: #E9EEF5;     /* cool light grey-blue */
+  --border: #D7DEE9;        /* cool light lines */
   --text: #23261F;          /* near-black body text */
   --muted: #6B706D;         /* brand Grey */
   --primary: #1DDB6F;       /* lightgreen CTA */
   --primary-hover: #15B95C;
   --primary-text: #063D1E;  /* dark-green text on primary buttons */
   --nav: #0A7A3B;           /* darkgreen accents/borders/headings */
-  --nav-text: #FFFBF1;
+  --nav-text: #F5F8FC;
   --accent: #0A7A3B;        /* darkgreen for links/section headings */
   --accent-soft: #529C72;   /* sec-green hovers/icons */
   --green: #15A34A;         /* won/success */
@@ -161,7 +161,7 @@ a { color: inherit; }
   letter-spacing: 0.4px;
   white-space: nowrap;
 }
-.s-neu { background: #EFEDE4; color: #5A5F5B; }
+.s-neu { background: #E7ECF3; color: #5A5F5B; }
 .s-kontaktiert { background: #E1F0E8; color: #2F7D57; }
 .s-qualifiziert { background: #D2EADD; color: #0A7A3B; }
 .s-angebot { background: #FBEFD6; color: #9A5B00; }
