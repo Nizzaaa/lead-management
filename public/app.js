@@ -1587,10 +1587,11 @@ async function importCsv() {
       body: JSON.stringify({ csv }),
     });
     const parts = [`${res.created} angelegt`];
-    if (res.skippedDuplicate) parts.push(`${res.skippedDuplicate} Dublette(n) übersprungen`);
+    if (res.enriched) parts.push(`${res.enriched} ergänzt`);
+    if (res.skippedDuplicate) parts.push(`${res.skippedDuplicate} Dublette(n) unverändert`);
     if (res.skippedEmpty) parts.push(`${res.skippedEmpty} leer`);
     if (res.errors && res.errors.length) parts.push(`${res.errors.length} fehlerhaft`);
-    toast("Import: " + parts.join(" · "), res.created ? "success" : "");
+    toast("Import: " + parts.join(" · "), res.created || res.enriched ? "success" : "");
     input.value = "";
     await refresh();
   } catch (err) {
