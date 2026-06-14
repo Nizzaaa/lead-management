@@ -45,7 +45,7 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 
 **Betrieb & Sicherheit**
 - **Strukturiertes Logging** (JSON-Lines) mit Request-ID, Dauer, Aktor und Redaction sensibler Felder; Level über `LOG_LEVEL`, lesbar mit `LOG_PRETTY=1`
-- **Einbettung in Nextcloud** als iframe mit SSO über **Cloudflare Access + Zitadel** (oder alternativ eigener `oauth2-proxy`) – siehe [`docs/nextcloud-deployment.md`](docs/nextcloud-deployment.md) und die fertigen Stacks unter [`deploy/`](deploy/). Der authentifizierte Benutzer (`Cf-Access-Authenticated-User-Email` bzw. Proxy-Header) wird als Aktor in der Timeline übernommen.
+- **Einbettung in Nextcloud** als iframe mit SSO über **Cloudflare Access** (IdP z. B. Zitadel) – siehe [`docs/nextcloud-deployment.md`](docs/nextcloud-deployment.md). Die App **verifiziert das Cloudflare-Access-JWT** (`Cf-Access-Jwt-Assertion`) kryptografisch (aktivieren über `CF_ACCESS_TEAM_DOMAIN` + `CF_ACCESS_AUD`) und übernimmt erst die so **verifizierte** Identität als Aktor in der Timeline – der fälschbare Klartext-Header wird dann nicht mehr vertraut.
 
 ## Schnellstart mit Docker Compose (empfohlen)
 
@@ -153,18 +153,16 @@ oder in `.env` hinterlegen. So siehst du Änderungen sofort, ganz ohne Image-Bui
   eine Wegwerf-Postgres starten und `/api/config` prüfen).
 - Erst wenn CI **grün** ist → mergen. So erreicht kein kaputter Stand `main`.
 
-### 3. Staging → Release auf Produktion
+### 3. Release auf Produktion
 
-Jeder Merge auf `main` baut automatisch `:latest` (GHCR). Daraus:
+Jeder Merge auf `main` baut automatisch `:latest` (GHCR). Für ein Release:
 
-1. **Staging** ([`dockge/compose.staging.yaml`](dockge/compose.staging.yaml)) fährt
-   `:latest` auf einem eigenen Host/Volume → dort testen.
-2. Zufrieden? **Release per Git-Tag** setzen:
+1. **Release per Git-Tag** setzen:
    ```bash
    git tag v1.4.0 && git push origin v1.4.0
    ```
    Die Action baut daraufhin `:1.4.0` (+ `:1.4`, `:1`).
-3. **Produktion** ([`dockge/compose.yaml`](dockge/compose.yaml)) auf diese Version
+2. **Produktion** ([`dockge/compose.yaml`](dockge/compose.yaml)) auf diese Version
    pinnen — im `.env`-Editor von Dockge: `LEADPILOT_TAG=1.4.0` → Stack neu deployen.
 
 So aktualisierst du Prod **bewusst** und kannst jederzeit auf eine bekannte

@@ -3,10 +3,30 @@
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
+const fs = require("fs");
 const db = require("./db");
 const { researchCompany } = require("./research");
 const { leadsToCsv, parseCsv, csvRowsToLeads, parseNumber, leadsToXlsxXml } = require("./exporters");
 const { logger, httpLogger } = require("./logger");
+const cfAccess = require("./cfAccess");
+
+// Liest ein Secret bevorzugt aus einer Datei (<NAME>_FILE, Docker-Secret-
+// Konvention), sonst aus der Umgebungsvariable. So lässt sich z. B. der
+// API-Key als Docker-Secret bereitstellen, statt ihn in der Container-Env
+// (sichtbar via `docker inspect`) zu hinterlegen.
+function readSecret(name) {
+  const file = process.env[`${name}_FILE`];
+  if (file) {
+    try {
+      return fs.readFileSync(file, "utf8").trim();
+    } catch (err) {
+      logger.warn("secret_file_read_failed", { name, error: err.message });
+    }
+  }
+  return process.env[name] || "";
+}
+
+const ANTHROPIC_API_KEY = readSecret("ANTHROPIC_API_KEY");
 
 const PORT = process.env.PORT || 3000;
 
@@ -80,13 +100,14 @@ try {
 }
 
 try {
-  if (process.env.ANTHROPIC_API_KEY) {
+  if (ANTHROPIC_API_KEY) {
     const Anthropic = require("@anthropic-ai/sdk");
     // maxRetries: das SDK wiederholt 429 (Rate-Limit) automatisch und respektiert
     // dabei den retry-after-Header; auch abgebrochene Verbindungen ("terminated")
     // werden erneut versucht. Default ist 2 – wir erhöhen für die langen,
     // tool-lastigen Recherche-Streams. timeout deckelt einen Einzel-Call.
-    const opts = { maxRetries: 5, timeout: 900000 };
+    // apiKey explizit übergeben, damit auch die Datei-Secret-Variante greift.
+    const opts = { apiKey: ANTHROPIC_API_KEY, maxRetries: 5, timeout: 900000 };
     if (aiFetch) opts.fetch = aiFetch;
     anthropic = new Anthropic(opts);
   }
@@ -381,6 +402,33 @@ app.use((req, res, next) => {
   if (!FRAME_ANCESTORS.length) res.setHeader("X-Frame-Options", "DENY");
   next();
 });
+
+// Cloudflare-Access-JWT erzwingen (nur wenn CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD
+// gesetzt sind). Schützt die sensiblen API-Routen kryptografisch – auch falls die
+// App unter Umgehung von Cloudflare direkt erreicht wird. Die verifizierte E-Mail
+// wird zum autoritativen Aktor. Ausgenommen: /api/config (Healthcheck) und
+// /api/widget (serverseitiger homepage-Abruf im internen Netz). Statische Assets
+// bleiben offen (nur SPA-Hülle, keine Daten).
+const CF_EXEMPT = new Set(["/api/config", "/api/widget"]);
+if (cfAccess.isEnabled()) {
+  logger.info("cf_access_enabled", { issuer: cfAccess.ISSUER });
+  app.use(async (req, res, next) => {
+    if (!req.path.startsWith("/api/") || CF_EXEMPT.has(req.path)) return next();
+    try {
+      const id = await cfAccess.verifyRequest(req);
+      req.actor = id.email || "—";
+      if (req.log && id.email) req.log = req.log.child({ actor: id.email });
+      next();
+    } catch (err) {
+      if (err && err.code === "JWKS_UNAVAILABLE") {
+        (req.log || logger).error("cf_access_jwks_unavailable", { error: err.message });
+        return res.status(503).json({ error: "Authentifizierung vorübergehend nicht verfügbar. Bitte erneut versuchen." });
+      }
+      (req.log || logger).warn("cf_access_denied", { path: req.path, error: err.message });
+      return res.status(403).json({ error: "Zugriff verweigert: Cloudflare-Access-Token fehlt oder ist ungültig." });
+    }
+  });
+}
 
 app.use(express.static(path.join(__dirname, "public")));
 

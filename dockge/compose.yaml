@@ -38,6 +38,17 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # Härtung: keine Rechte-Eskalation, Ressourcen deckeln, Logs rotieren.
+    # (Kein cap_drop/read_only: der Postgres-Entrypoint braucht Caps für die Init.)
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   leadpilot:
     # Produktiv eine feste Version pinnen, statt blind :latest zu ziehen:
@@ -61,6 +72,28 @@ services:
       # Nextcloud-Origin setzen, z. B. FRAME_ANCESTORS=https://cloud.lennartg.de
       # Leer = kein frame-ancestors-Header (Einbettung dann nicht abgesichert).
       - FRAME_ANCESTORS=${FRAME_ANCESTORS:-}
+      # Cloudflare-Access-JWT-Verifikation (empfohlen): beide Werte im
+      # .env-Editor setzen, damit die App das Cf-Access-Token kryptografisch
+      # prüft, statt nur dem Header zu vertrauen. CF_ACCESS_TEAM_DOMAIN =
+      # <team>.cloudflareaccess.com, CF_ACCESS_AUD = Application-AUD-Tag.
+      - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN:-}
+      - CF_ACCESS_AUD=${CF_ACCESS_AUD:-}
+    # Härtung: non-root (im Image), keine Rechte-Eskalation, alle Caps weg,
+    # read-only Root-FS (App schreibt nichts) mit beschreibbarem /tmp.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 512m
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     networks:
       - internal   # Verbindung zur Datenbank
       - traefik     # Ingress über Traefik
