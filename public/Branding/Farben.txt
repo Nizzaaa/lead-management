@@ -1,0 +1,5 @@
+Lightgreen:     #1DDB6F     -> Hauptfarbe für Buttons, Key-Visuals, Call-to-Action
+Darkgreen:      #0A7A3B     -> Headlines, Kontrastflächen, Navigation
+Sec. Green:     #529C72     -> Icons, Hover-Effekte, Hervorhebungen
+Grey:           #6B706D     -> Text, Hintergrundflächen, Linien
+Creme:		#FFFBF1
