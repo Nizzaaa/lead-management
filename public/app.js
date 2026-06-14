@@ -268,7 +268,7 @@ function dueLeadCount() {
 function scoreColor(score) {
   if (score >= 75) return "var(--green)";
   if (score >= 50) return "var(--amber)";
-  if (score >= 25) return "#fb923c";
+  if (score >= 25) return "#E8703A";
   return "var(--red)";
 }
 
@@ -1418,7 +1418,7 @@ function buildLeadPdfHtml(l, activities) {
   body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
          color: #1a2330; margin: 32px; font-size: 13px; line-height: 1.5; }
   h1 { font-size: 22px; margin: 0 0 2px; }
-  h2 { font-size: 15px; margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 2px solid #e2e8f0; }
+  h2 { font-size: 15px; margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 2px solid #0A7A3B; color: #0A7A3B; }
   h3 { font-size: 13px; margin: 14px 0 4px; }
   .sub { color: #5b6878; margin: 0 0 4px; }
   .pills { margin: 6px 0 4px; }
@@ -1451,7 +1451,7 @@ function buildLeadPdfHtml(l, activities) {
   ${notes}
   ${dossier}
   ${timeline}
-  <div class="foot">LeadPilot · erstellt am ${esc(fmtDateTime(new Date().toISOString()))}</div>
+  <div class="foot">FU/GE Solutions · erstellt am ${esc(fmtDateTime(new Date().toISOString()))}</div>
 </body></html>`;
 }
 
@@ -1977,11 +1977,11 @@ function barChart(series, { format = (v) => v, color = "var(--primary)" } = {}) 
 
 // Kräftige (dunklere) Status-Farben – guter Kontrast zu weißer Schrift im Trichter.
 const FUNNEL_COLORS = {
-  neu: "#64748b",
-  kontaktiert: "#0891b2",
-  qualifiziert: "#6366f1",
-  angebot: "#d97706",
-  gewonnen: "#16a34a",
+  neu: "#6B706D",
+  kontaktiert: "#529C72",
+  qualifiziert: "#0A7A3B",
+  angebot: "#B8740A",
+  gewonnen: "#127A38",
 };
 
 // Echter, sich verjüngender SVG-Trichter. Stufen = Pipeline ohne "verloren".
