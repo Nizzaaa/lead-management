@@ -24,6 +24,11 @@ const LEAD_COLUMNS = [
   ["KI-Note", (l) => (l.ai && l.ai.grade ? l.ai.grade : "")],
   ["Erstellt", (l) => l.createdAt || ""],
   ["Aktualisiert", (l) => l.updatedAt || ""],
+  // Vollständige KI-Bewertung und Recherche-Dossier als JSON – damit ein
+  // Export→Import-Durchlauf diese Daten verlustfrei erhält. (KI-Score/KI-Note
+  // oben bleiben als gut lesbare Kurzfassung für Excel.)
+  ["KI-Bewertung (JSON)", (l) => (l.ai ? JSON.stringify(l.ai) : "")],
+  ["Dossier (JSON)", (l) => (l.research ? JSON.stringify(l.research) : "")],
 ];
 
 // Spalten, die beim Excel-Export numerisch ausgegeben werden.
@@ -45,6 +50,9 @@ const IMPORT_MAP = {
   "nextstep": "nextStep", "next step": "nextStep",
   "wiedervorlage": "nextStepAt", "wiedervorlage am": "nextStepAt",
   "nextstepat": "nextStepAt", "next step at": "nextStepAt",
+  // Vollständige KI-Bewertung / Dossier als JSON (für verlustfreien Round-Trip).
+  "ki-bewertung (json)": "aiJson", "ki-bewertung": "aiJson", "ai": "aiJson",
+  "dossier (json)": "researchJson", "dossier": "researchJson", "research": "researchJson",
 };
 
 // --- CSV -------------------------------------------------------------------
