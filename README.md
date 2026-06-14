@@ -188,9 +188,82 @@ Version zurück, statt blind `:latest` zu ziehen.
 | `PUT` | `/api/leads/:id` | Lead aktualisieren |
 | `DELETE` | `/api/leads/:id` | Lead löschen |
 | `GET` | `/api/stats` | Dashboard-Kennzahlen |
+| `GET` | `/api/widget` | Kompakte, flache Kennzahlen für externe Dashboards (z. B. homepage) |
 | `POST` | `/api/leads/:id/score` | KI-Bewertung |
 | `POST` | `/api/leads/:id/email` | KI-E-Mail-Entwurf |
 | `POST` | `/api/leads/:id/insights` | KI-Empfehlung |
+
+## Dashboard-Widget für [homepage](https://gethomepage.dev)
+
+Der Endpunkt `GET /api/widget` liefert ein flaches Kennzahlen-Objekt, das sich
+direkt mit dem **Custom-API-Widget** von homepage anzeigen lässt – ohne weitere
+Anpassungen an der App.
+
+Antwort-Beispiel:
+
+```json
+{
+  "total": 42,
+  "open": 30,
+  "pipeline": 388000,
+  "weighted": 124000,
+  "won": 95000,
+  "conversion": 67,
+  "due": 4
+}
+```
+
+| Feld | Bedeutung |
+|------|-----------|
+| `total` | Leads gesamt |
+| `open` | Offene Leads (ohne gewonnen/verloren) |
+| `pipeline` | Pipeline-Wert in € (roh) |
+| `weighted` | Gewichteter Pipeline-Wert in € (Σ Wert × Abschlusswahrscheinlichkeit) |
+| `won` | Gewonnener Umsatz in € |
+| `conversion` | Conversion-Rate in % (0–100) |
+| `due` | Fällige/überfällige Wiedervorlagen |
+
+Eintrag für die homepage-`config/services.yaml` (zeigt 4 Felder pro Kachel):
+
+```yaml
+- CRM:
+    - Lead System:
+        icon: http://lead-management:3000/Branding/Logo_Icon_Quadratisch_Transparent.png
+        href: http://<dein-host>:3000          # im Browser anklickbarer Link
+        description: Lead-Verwaltung mit KI
+        siteMonitor: http://lead-management:3000   # optional: up/down-Ping
+        widget:
+          type: customapi
+          url: http://lead-management:3000/api/widget   # vom homepage-Container erreichbar
+          refreshInterval: 60000        # ms
+          method: GET
+          mappings:
+            - field: open
+              label: Offen
+              format: number
+            - field: pipeline
+              label: Pipeline
+              format: currency
+              currency: EUR
+            - field: weighted
+              label: Gewichtet
+              format: currency
+              currency: EUR
+            - field: due
+              label: Fällig
+              format: number
+```
+
+**Hinweise:**
+
+- homepage holt die Daten **serverseitig** (aus dem homepage-Container). Die
+  `widget.url` muss daher vom Container erreichbar sein – im selben Docker-Netz
+  per Servicename (`http://lead-management:3000`), bei getrennten Stacks über ein
+  gemeinsames externes Netz oder die Host-IP. `href` dagegen muss im **Browser**
+  erreichbar sein. CORS ist kein Thema, da kein Browser-Fetch erfolgt.
+- `conversion` ist bereits ein Prozentwert (z. B. `67`). Für die Anzeige
+  `format: number` + `suffix: "%"` nutzen – **nicht** `format: percent`, da dieser
+  den Wert ×100 nehmen würde.
 
 ## Lizenz
 

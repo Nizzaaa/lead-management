@@ -240,6 +240,32 @@ async function getStats(statuses, probabilities = {}) {
   return { total, byStatus, pipelineValue, weightedPipelineValue, wonValue, conversion };
 }
 
+// Kompakte, flache Kennzahlen für Dashboard-Widgets (z. B. gethomepage.dev).
+// Basiert auf getStats() und ergänzt offene Leads sowie fällige/überfällige
+// Wiedervorlagen – jeweils als einfache Zahlen, leicht zu mappen.
+async function getWidgetStats(statuses, probabilities = {}) {
+  const stats = await getStats(statuses, probabilities);
+  const { rows } = await pool.query(
+    `SELECT COUNT(*)::int AS due
+       FROM leads
+      WHERE next_step_at IS NOT NULL
+        AND next_step_at <= CURRENT_DATE
+        AND status NOT IN ('gewonnen', 'verloren')`
+  );
+  const due = rows[0] ? rows[0].due : 0;
+  const won = stats.byStatus["gewonnen"] || 0;
+  const lost = stats.byStatus["verloren"] || 0;
+  return {
+    total: stats.total,
+    open: stats.total - won - lost,
+    pipeline: stats.pipelineValue,
+    weighted: stats.weightedPipelineValue,
+    won: stats.wonValue,
+    conversion: stats.conversion, // bereits in Prozent (0–100)
+    due,
+  };
+}
+
 // --- Aktivitäten-Timeline --------------------------------------------------
 function rowToActivity(row) {
   return {
@@ -357,6 +383,7 @@ module.exports = {
   getSetting,
   setSetting,
   getStats,
+  getWidgetStats,
   listActivities,
   createActivity,
   deleteActivity,

@@ -336,6 +336,12 @@ app.get("/api/stats", wrap(async (req, res) => {
   res.json(await db.getStats(STATUSES, stageProbabilities));
 }));
 
+// Kompakte, flache Kennzahlen für externe Dashboard-Widgets (z. B. gethomepage.dev).
+// Liefert nur einfache Zahlen, damit das Custom-API-Widget sie direkt mappen kann.
+app.get("/api/widget", wrap(async (req, res) => {
+  res.json(await db.getWidgetStats(STATUSES, stageProbabilities));
+}));
+
 // Dateinamen-Datum (YYYY-MM-DD) für Downloads.
 function ymd() {
   return new Date().toISOString().slice(0, 10);
