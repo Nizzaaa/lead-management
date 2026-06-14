@@ -124,6 +124,19 @@ function sanitizeLead(body = {}) {
   };
 }
 
+// Parst einen JSON-String aus einer Import-Zelle in ein Objekt (für die
+// vollständige KI-Bewertung / das Dossier). Liefert null bei leerem oder
+// ungültigem Wert bzw. wenn das Ergebnis kein Objekt ist.
+function parseJsonObject(raw) {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 // Reihenfolge/Schlüssel der Felder aus Sektion 1 des Dossiers.
 const RESEARCH_FIELD_KEYS = [
   "branche", "adresse", "telefonAllgemein", "ansprechpartner",
@@ -394,7 +407,12 @@ app.post("/api/leads/import", wrap(async (req, res) => {
         const dup = await db.findDuplicateLeads({ email: data.email, company: data.company });
         if (dup.length) { skippedDuplicate++; continue; }
       }
-      const lead = await db.createLead(data);
+      // KI-Bewertung und Dossier aus den JSON-Spalten übernehmen (falls vorhanden),
+      // damit ein Export→Import-Durchlauf diese Daten erhält.
+      const research = parseJsonObject(raw.researchJson);
+      const ai = parseJsonObject(raw.aiJson);
+      const lead = await db.createLead(data, research);
+      if (ai) await db.setLeadAi(lead.id, ai);
       await logActivity(lead.id, { type: "system", title: "Per CSV-Import angelegt" }, actor(req));
       created++;
     } catch (err) {
