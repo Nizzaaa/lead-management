@@ -83,33 +83,50 @@ Cloudflare reicht die Identität als Header **`Cf-Access-Authenticated-User-Emai
 an den Origin durch – LeadPilot übernimmt sie automatisch als **Aktor** in
 der Aktivitäten-Timeline.
 
-## Schritt 3 – LeadPilot-Stack ausrollen
+## Schritt 3 – LeadPilot-Stack ausrollen (Dockge)
 
-Vorlage: [`deploy/docker-compose.cloudflare.yml`](../deploy/docker-compose.cloudflare.yml)
-und [`deploy/.env.example`](../deploy/.env.example).
+Der Stack läuft über **Dockge** mit dem GHCR-Image und der Compose-Datei
+[`dockge/compose.yaml`](../dockge/compose.yaml):
 
-```bash
-cd deploy
-cp .env.example .env     # LEAD_DOMAIN, NC_DOMAIN, POSTGRES_PASSWORD, ANTHROPIC_API_KEY
-docker compose -f docker-compose.cloudflare.yml up -d
-```
+1. In Dockge **„+ Compose"**, Inhalt von `dockge/compose.yaml` einfügen.
+2. Im **`.env`-Editor** setzen:
+   ```env
+   POSTGRES_PASSWORD=<sicheres-passwort>
+   ANTHROPIC_API_KEY=sk-ant-...                 # optional (KI)
+   FRAME_ANCESTORS=https://cloud.lennartg.de
+   CF_ACCESS_TEAM_DOMAIN=<team>.cloudflareaccess.com
+   CF_ACCESS_AUD=<Application-AUD-Tag>          # siehe Schritt 4
+   ```
+3. **Deploy** klicken.
 
 Der cloudflared-Tunnel zeigt auf Traefik; Traefik routet `leads.lennartg.de`
 (Entrypoint `web`, HTTP) auf die App. TLS macht Cloudflare. `FRAME_ANCESTORS`
-ist auf `https://cloud.lennartg.de` gesetzt.
+erlaubt die iframe-Einbettung nur durch Nextcloud.
 
 ## Schritt 4 – Origin absichern (Header-Spoofing verhindern)
 
-Da LeadPilot dem Header `Cf-Access-Authenticated-User-Email` vertraut, muss der
-**cloudflared-Tunnel die einzige Route zum Origin** sein:
+LeadPilot **verifiziert das signierte Cloudflare-Access-JWT**
+(`Cf-Access-Jwt-Assertion`) kryptografisch gegen Cloudflares Schlüssel
+(`https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`) und übernimmt die
+Identität erst nach erfolgreicher Prüfung. Dazu im Stack setzen:
+
+- `CF_ACCESS_TEAM_DOMAIN` = deine Team-Domain, z. B. `<team>.cloudflareaccess.com`.
+- `CF_ACCESS_AUD` = der **Application Audience (AUD) Tag** der Access-Application
+  (Zero Trust → Access → Applications → LeadPilot → *Overview*).
+
+Sind beide gesetzt, lehnt die App jeden sensiblen API-Zugriff **ohne gültiges
+Token mit `403`** ab – selbst wenn jemand den Origin direkt erreicht und den
+Klartext-Header `Cf-Access-Authenticated-User-Email` fälscht. Die Aktor-Identität
+in der Timeline stammt dann aus dem **verifizierten** Token. (Ohne diese
+Variablen bleibt das alte Verhalten – der Header wird vertraut –, nur für rein
+interne/lokale Setups gedacht.) Ausgenommen von der Prüfung sind bewusst
+`/api/config` (Healthcheck) und `/api/widget` (interner homepage-Abruf).
+
+Zusätzlich weiterhin empfohlen:
 
 - Kein öffentlicher Port/DNS-A-Record direkt auf den Server – nur der Tunnel.
 - Traefik-Router nur über den Tunnel erreichbar (kein paralleler Ingress).
 - Optional als Härtung: in Traefik/Cloudflare nur Cloudflare-IPs zulassen.
-- (Fortgeschritten) Zusätzlich das signierte JWT
-  `Cf-Access-Jwt-Assertion` gegen `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`
-  validieren. Ist über den Tunnel der einzige Zugang gegeben, reicht in der
-  Praxis das Vertrauen in den Header.
 
 ## Schritt 5 – Nextcloud-Login auf Zitadel umstellen
 
@@ -179,20 +196,10 @@ erlaubt der Browser die Einbettung nur durch Nextcloud.
 
 - [ ] Zitadel-App „Cloudflare Access" angelegt, in Zero Trust als OIDC-Login
 - [ ] Access-Application für `leads.lennartg.de` mit Zitadel-Policy
-- [ ] Stack läuft (`docker-compose.cloudflare.yml`), `FRAME_ANCESTORS` gesetzt
+- [ ] Stack läuft (Dockge / `dockge/compose.yaml`), `FRAME_ANCESTORS` gesetzt
+- [ ] `CF_ACCESS_TEAM_DOMAIN` + `CF_ACCESS_AUD` gesetzt (JWT-Verifikation aktiv)
 - [ ] Origin nur über den Tunnel erreichbar (kein paralleler Zugang)
 - [ ] Nextcloud-Login über `user_oidc`/Zitadel, UID-Mapping geprüft
 - [ ] External-Sites-Eintrag als iframe sichtbar
 - [ ] (Empfohlen) Zitadel-Custom-Domain `id.lennartg.de` für lautloses SSO
 - [ ] Test: in NC eingeloggt → Lead-System ohne zweites Login sichtbar
-
----
-
-## Anhang: Alternative ohne Cloudflare Access (eigener oauth2-proxy)
-
-Wer den Zugriff lieber selbst im LXC absichert (statt an der Cloudflare-Edge),
-nutzt [`deploy/docker-compose.nextcloud.yml`](../deploy/docker-compose.nextcloud.yml):
-ein `oauth2-proxy` vor LeadPilot, direkt gegen Zitadel. Variablen dafür stehen
-im Block „Variante B" in `deploy/.env.example`. Das Cross-Domain-Cookie-Thema
-gilt hier analog – auch dann ist eine Zitadel-Custom-Domain unter `lennartg.de`
-die robusteste Lösung fürs iframe-SSO.

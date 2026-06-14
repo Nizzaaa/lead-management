@@ -5,7 +5,7 @@ services:
     restart: unless-stopped
     environment:
       - POSTGRES_USER=leadpilot
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?bitte ein sicheres DB-Passwort in .env setzen}
       - POSTGRES_DB=leadpilot
     volumes:
       # Datenbank bleibt über Neustarts/Rebuilds hinweg erhalten
@@ -15,6 +15,17 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    # Härtung: keine Rechte-Eskalation, Ressourcen deckeln, Logs rotieren.
+    # (Kein cap_drop/read_only: der Postgres-Entrypoint braucht Caps für die Init.)
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   leadpilot:
     build: .
@@ -33,8 +44,29 @@ services:
       - PGHOST=db
       - PGPORT=5432
       - PGUSER=leadpilot
-      - PGPASSWORD=${POSTGRES_PASSWORD:-leadpilot}
+      - PGPASSWORD=${POSTGRES_PASSWORD:?bitte ein sicheres DB-Passwort in .env setzen}
       - PGDATABASE=leadpilot
+      # Cloudflare-Access-JWT-Verifikation (optional). Beide Werte setzen, damit
+      # die App das Cf-Access-Token kryptografisch prüft, statt dem Header zu
+      # vertrauen. Leer = aus (z. B. lokal ohne Cloudflare).
+      - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN:-}
+      - CF_ACCESS_AUD=${CF_ACCESS_AUD:-}
+    # Härtung: non-root (im Image), keine Rechte-Eskalation, alle Caps weg,
+    # read-only Root-FS (App schreibt nichts) mit beschreibbarem /tmp.
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 512m
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     depends_on:
       db:
         condition: service_healthy

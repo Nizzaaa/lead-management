@@ -1040,6 +1040,19 @@ function onDetailClick(e) {
 // --- Events ----------------------------------------------------------------
 function bindEvents() {
   $("#addLeadBtn").addEventListener("click", openResearchModal);
+  // Logo-Fallback auf Wortmarke (zuvor inline onerror – wegen strikter CSP
+  // ausgelagert).
+  const brandLogo = $("#brandLogo");
+  if (brandLogo) {
+    brandLogo.addEventListener("error", () => {
+      brandLogo.style.display = "none";
+      const wm = $("#brandWordmark");
+      if (wm) wm.style.display = "inline-block";
+    });
+  }
+  // Empty-State-Button öffnet den Recherche-Dialog (zuvor inline onclick).
+  const emptyAdd = $("#emptyStateAddBtn");
+  if (emptyAdd) emptyAdd.addEventListener("click", openResearchModal);
   $("#manualLeadBtn").addEventListener("click", () => openLeadModal());
   $("#closeModal").addEventListener("click", closeLeadModal);
   $("#cancelBtn").addEventListener("click", closeLeadModal);
@@ -1347,6 +1360,17 @@ async function exportLeadPdf(id) {
     win.document.open();
     win.document.write(html);
     win.document.close();
+    // Druck aus dem Opener-Kontext anstoßen (zuvor inline onload="window.print()",
+    // das unter der strikten CSP des geerbten about:blank-Dokuments blockiert
+    // würde). Ein Flag verhindert doppeltes Drucken aus load + Fallback-Timeout.
+    let printed = false;
+    const triggerPrint = () => {
+      if (printed) return;
+      printed = true;
+      try { win.focus(); win.print(); } catch { /* Fenster ggf. geschlossen */ }
+    };
+    win.addEventListener("load", triggerPrint);
+    setTimeout(triggerPrint, 1200);
   } catch (err) {
     toast(err.message, "error");
   }
@@ -1464,7 +1488,7 @@ function buildLeadPdfHtml(l, activities) {
           color: #8a96a6; font-size: 11px; }
   @media print { body { margin: 0; } @page { margin: 16mm; } }
 </style></head>
-<body onload="window.print()">
+<body>
   <h1>${esc(title)}</h1>
   ${l.company && l.name ? `<p class="sub">${esc(l.name)}</p>` : ""}
   <div class="pills">
