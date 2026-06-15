@@ -305,12 +305,17 @@ function scoreColor(score) {
   return "var(--red)";
 }
 
-// Nur Suchbegriff anwenden (für das Kanban-Board, das nach Status spaltet).
+// Such- und Fällig-Filter anwenden (für das Kanban-Board, das nach Status
+// spaltet – der Status-Filter entfällt hier, da jede Spalte ein Status ist).
 function searchFiltered() {
+  const today = todayYMD();
   return leads.filter((l) => {
-    if (!searchTerm) return true;
-    const hay = `${l.name} ${l.company} ${l.email} ${l.source}`.toLowerCase();
-    return hay.includes(searchTerm);
+    if (dueOnly && !(l.nextStepAt && l.nextStepAt <= today)) return false;
+    if (searchTerm) {
+      const hay = `${l.name} ${l.company} ${l.email} ${l.source}`.toLowerCase();
+      if (!hay.includes(searchTerm)) return false;
+    }
+    return true;
   });
 }
 
@@ -325,6 +330,9 @@ function renderLeads() {
   const isKanban = view === "kanban";
   $("#leadList").classList.toggle("hidden", isKanban);
   $("#kanban").classList.toggle("hidden", !isKanban);
+  // Status-Filter-Chips ergeben im Board keinen Sinn (jede Spalte IST ein
+  // Status) – nur der Fällig-Filter bleibt sichtbar.
+  $("#statusFilters").classList.toggle("hidden", isKanban);
   if (isKanban) renderKanban();
   else renderList();
   // Fälligkeits-Chip mit Anzahl aktualisieren.
@@ -382,19 +390,21 @@ function bindKanbanDnd() {
     dragId = null;
     setTimeout(() => (dragMoved = false), 0);
   });
+  // Drop-Ziel ist die ganze Spalte (nicht nur die Kartenzone). So lassen sich
+  // Karten auch in eingeklappte Spalten ziehen, deren Kartenzone ausgeblendet ist.
   board.addEventListener("dragover", (e) => {
-    const zone = e.target.closest(".kanban-cards");
-    if (!zone) return;
+    const col = e.target.closest(".kanban-col");
+    if (!col || !dragId) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
     document.querySelectorAll(".kanban-col.drop").forEach((c) => c.classList.remove("drop"));
-    zone.closest(".kanban-col").classList.add("drop");
+    col.classList.add("drop");
   });
   board.addEventListener("drop", (e) => {
-    const zone = e.target.closest(".kanban-cards");
-    if (!zone || !dragId) return;
+    const col = e.target.closest(".kanban-col");
+    if (!col || !dragId) return;
     e.preventDefault();
-    changeStatus(dragId, zone.dataset.status);
+    changeStatus(dragId, col.dataset.status);
   });
 }
 
