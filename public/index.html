@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=22" />
+  <link rel="stylesheet" href="styles.css?v=23" />
   <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
@@ -95,21 +95,18 @@
         <button class="icon-btn" id="closeSettingsModal" aria-label="Schließen">✕</button>
       </div>
       <form id="settingsForm" class="form">
-        <label>KI-Modell (für Recherche und alle KI-Funktionen)
+        <label>
+          <span class="field-head">KI-Modell<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Dieses Modell erstellt das Recherche-Dossier und liefert KI-Score, E-Mail-Entwurf &amp; Empfehlungen (für Recherche und alle KI-Funktionen). Die JSON-Extraktion läuft zur Kostenersparnis immer auf Haiku.<br><br>Richtwerte pro Lead: <strong>Haiku ~$0,10</strong> · <strong>Sonnet ~$0,30</strong> · <strong>Opus ~$0,50</strong>.<br><br>Sonnet hat auf Anthropic-Tier&nbsp;1 ein niedriges Minuten-Limit (30k Input-Tokens). Bei häufigen Rate-Limit-Fehlern (429) auf Haiku wechseln oder das Tier erhöhen.</span></span></span>
           <select id="settingsModel"></select>
         </label>
-        <p class="hint">Dieses Modell erstellt das Recherche-Dossier und liefert KI-Score, E-Mail-Entwurf &amp; Empfehlungen. Die JSON-Extraktion läuft zur Kostenersparnis immer auf Haiku.<br>
-        Richtwerte pro Lead: <strong>Haiku ~$0,10</strong> · <strong>Sonnet ~$0,30</strong> · <strong>Opus ~$0,50</strong>.<br>
-        Hinweis: Sonnet hat auf Anthropic-Tier&nbsp;1 ein niedriges Minuten-Limit (30k Input-Tokens). Bei häufigen Rate-Limit-Fehlern (429) auf Haiku wechseln oder das Tier erhöhen.</p>
 
-        <label>Abschlusswahrscheinlichkeit je Status (%) – für den gewichteten Pipeline-Wert
+        <label>
+          <span class="field-head">Abschlusswahrscheinlichkeit je Status<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Gewichteter Pipeline-Wert = Σ (geschätzter Wert × Wahrscheinlichkeit). Die Startwerte sind Richtwerte – über echte Abschlüsse kalibrieren.</span></span></span>
           <div id="stageProbFields" class="prob-grid"></div>
         </label>
-        <p class="hint">Der gewichtete Pipeline-Wert = Σ (geschätzter Wert × Wahrscheinlichkeit). Startwerte sind Richtwerte – über echte Abschlüsse kalibrieren.</p>
 
         <div class="settings-section">
-          <h3>📦 Daten-Import &amp; -Export</h3>
-          <p class="hint">Alle Leads als Datei sichern oder eine Liste importieren. Die CSV verwendet das Trennzeichen „;" und öffnet sich direkt in Excel.</p>
+          <h3 class="field-head">📦 Daten-Import &amp; -Export<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Alle Leads als Datei sichern oder eine Liste importieren. Die CSV verwendet das Trennzeichen „;“ und öffnet sich direkt in Excel.<br><br>Erkannte Spalten (deutsch oder englisch): Name, Firma, E-Mail, Telefon, Quelle, Status, Wert, Notizen, Nächster Schritt, Wiedervorlage sowie „KI-Bewertung (JSON)“ und „Dossier (JSON)“ aus dem Export. Bei Dubletten (gleiche E-Mail oder Firma) wird kein zweiter Datensatz angelegt; stattdessen werden nur fehlende Felder des bestehenden Leads ergänzt.</span></span></h3>
           <div class="io-row">
             <button type="button" class="btn" id="exportCsvBtn">⬇️ CSV exportieren</button>
             <button type="button" class="btn" id="exportXlsxBtn">⬇️ Excel exportieren</button>
@@ -117,7 +114,6 @@
           <label class="io-import">CSV importieren
             <input type="file" id="importCsvInput" accept=".csv,text/csv" />
           </label>
-          <p class="hint">Erkannte Spalten (deutsch oder englisch): Name, Firma, E-Mail, Telefon, Quelle, Status, Wert, Notizen, Nächster Schritt, Wiedervorlage sowie „KI-Bewertung (JSON)“ und „Dossier (JSON)“ aus dem Export (KI-Bewertung &amp; Recherche-Dossier bleiben so erhalten). Bei Dubletten (gleiche E-Mail oder Firma) wird kein zweiter Datensatz angelegt; stattdessen werden nur fehlende Felder des bestehenden Leads ergänzt – vorhandene Angaben bleiben unverändert.</p>
           <div class="io-row">
             <button type="button" class="btn btn-primary" id="importCsvBtn">⬆️ Importieren</button>
           </div>
@@ -210,6 +206,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=24"></script>
+  <script src="app.js?v=25"></script>
 </body>
 </html>

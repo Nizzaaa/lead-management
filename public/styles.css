@@ -366,17 +366,58 @@ a { color: inherit; }
 .ai-score-meta .next-step { color: var(--text); }
 .ai-score-meta .value-reason { color: var(--muted); }
 
-/* Abschlusswahrscheinlichkeiten in den Einstellungen */
-.prob-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 4px; }
+/* Abschlusswahrscheinlichkeiten in den Einstellungen (Schieberegler) */
+.prob-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 6px; }
 .prob-item {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; flex-direction: column; gap: 10px;
   background: var(--bg); border: 1px solid var(--border);
-  border-radius: 9px; padding: 6px 10px;
+  border-radius: 12px; padding: 12px 14px;
 }
-.prob-item .prob-label { flex: 1; text-transform: capitalize; color: var(--text); font-size: 13px; }
-.prob-item input { width: 64px; text-align: right; }
-.prob-item .prob-pct { color: var(--muted); font-size: 13px; }
+.prob-item-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.prob-item .prob-label { text-transform: capitalize; color: var(--text); font-size: 13px; font-weight: 600; }
+.prob-val { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.prob-val b { color: var(--accent); font-size: 15px; }
+/* Regler: gefüllter Teil (var(--val)) in Akzentfarbe, Rest in Grau-Blau */
+.form .prob-range {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 6px; padding: 0; border: none; border-radius: 999px;
+  background: linear-gradient(to right, var(--primary) var(--val, 0%), var(--surface-2) var(--val, 0%));
+  cursor: pointer;
+}
+.form .prob-range:focus { outline: none; }
+.form .prob-range::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #fff; border: 2px solid var(--primary); box-shadow: var(--shadow);
+  cursor: pointer;
+}
+.form .prob-range::-moz-range-thumb {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #fff; border: 2px solid var(--primary); cursor: pointer;
+}
+.form .prob-range::-moz-range-track { height: 6px; border-radius: 999px; background: transparent; }
+.form .prob-range:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(10,122,59,0.25); }
 .d-btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* "i"-Info-Symbol mit schwebendem Tooltip */
+.field-head { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.info-tip {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; flex-shrink: 0;
+  border: 1px solid var(--border); border-radius: 50%;
+  background: var(--surface); color: var(--muted);
+  font-family: Georgia, "Times New Roman", serif; font-style: italic; font-weight: 700;
+  font-size: 11px; line-height: 1; cursor: help; padding: 0; margin-left: 2px; user-select: none;
+}
+.info-tip:hover, .info-tip:focus-visible { border-color: var(--primary); color: var(--accent); outline: none; }
+.info-content { display: none; }
+#infoTooltip {
+  position: fixed; z-index: 100; max-width: 320px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow);
+  padding: 10px 12px; font-size: 12px; line-height: 1.55; pointer-events: none;
+}
+#infoTooltip.hidden { display: none; }
 
 .ai-output { margin-top: 14px; }
 .ai-output-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }

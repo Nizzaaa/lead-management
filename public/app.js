@@ -150,9 +150,53 @@ async function init() {
     toast(err.message, "error");
   }
   bindEvents();
+  setupInfoTips();
   window.addEventListener("hashchange", router);
   router();
   resumeJobs(); // noch laufende Recherchen nach Reload ins Dock zurückholen
+}
+
+// "i"-Symbole: zeigen ihren versteckten .info-content als schwebenden Tooltip
+// bei Hover/Fokus. Ein gemeinsames, fixed positioniertes Element vermeidet das
+// Abschneiden durch das scrollbare Modal.
+function setupInfoTips() {
+  let tip = document.getElementById("infoTooltip");
+  if (!tip) {
+    tip = document.createElement("div");
+    tip.id = "infoTooltip";
+    tip.className = "hidden";
+    document.body.appendChild(tip);
+  }
+  const show = (el) => {
+    const content = el.querySelector(".info-content");
+    if (!content) return;
+    tip.innerHTML = content.innerHTML;
+    tip.classList.remove("hidden");
+    const r = el.getBoundingClientRect();
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    let left = Math.min(Math.max(8, r.left + r.width / 2 - tw / 2), window.innerWidth - tw - 8);
+    let top = r.bottom + 8;
+    if (top + th > window.innerHeight - 8) top = r.top - th - 8; // bei wenig Platz nach oben kippen
+    tip.style.left = left + "px";
+    tip.style.top = Math.max(8, top) + "px";
+  };
+  const hide = () => tip.classList.add("hidden");
+  document.addEventListener("mouseover", (e) => {
+    const el = e.target.closest(".info-tip");
+    if (el) show(el);
+  });
+  document.addEventListener("mouseout", (e) => {
+    const el = e.target.closest(".info-tip");
+    if (el && !el.contains(e.relatedTarget)) hide();
+  });
+  document.addEventListener("focusin", (e) => {
+    const el = e.target.closest(".info-tip");
+    if (el) show(el);
+  });
+  document.addEventListener("focusout", (e) => {
+    const el = e.target.closest(".info-tip");
+    if (el) hide();
+  });
 }
 
 // Zeigt den angemeldeten Benutzer und einen Logout-Link in der Topbar an.
@@ -1104,6 +1148,7 @@ function bindEvents() {
   $("#closeSettingsModal").addEventListener("click", closeSettingsModal);
   $("#cancelSettingsBtn").addEventListener("click", closeSettingsModal);
   $("#settingsForm").addEventListener("submit", saveSettings);
+  $("#stageProbFields").addEventListener("input", onProbInput);
   $("#exportCsvBtn").addEventListener("click", () => downloadFile("/api/leads/export.csv"));
   $("#exportXlsxBtn").addEventListener("click", () => downloadFile("/api/leads/export.xlsx"));
   $("#importCsvBtn").addEventListener("click", importCsv);
@@ -1534,14 +1579,29 @@ async function deleteLead(id, fromDetail = false) {
 function renderStageProbFields() {
   const open = statuses.filter((s) => s !== "gewonnen" && s !== "verloren");
   $("#stageProbFields").innerHTML = open
-    .map(
-      (s) => `<div class="prob-item">
-        <span class="prob-label">${esc(s)}</span>
-        <input type="number" min="0" max="100" step="5" data-prob="${esc(s)}" value="${Number(stageProbabilities[s] ?? 0)}" />
-        <span class="prob-pct">%</span>
-      </div>`
-    )
+    .map((s) => {
+      const val = Number(stageProbabilities[s] ?? 0);
+      return `<div class="prob-item" style="--val:${val}%">
+        <div class="prob-item-head">
+          <span class="prob-label">${esc(s)}</span>
+          <span class="prob-val"><b data-prob-out="${esc(s)}">${val}</b>&thinsp;%</span>
+        </div>
+        <input type="range" class="prob-range" min="0" max="100" step="5"
+          data-prob="${esc(s)}" value="${val}"
+          aria-label="Abschlusswahrscheinlichkeit ${esc(s)}" />
+      </div>`;
+    })
     .join("");
+}
+
+// Live-Update beim Schieben: Prozentzahl und Füllstand des Reglers.
+function onProbInput(e) {
+  const input = e.target.closest(".prob-range");
+  if (!input) return;
+  const item = input.closest(".prob-item");
+  const out = item && item.querySelector("[data-prob-out]");
+  if (out) out.textContent = input.value;
+  if (item) item.style.setProperty("--val", input.value + "%");
 }
 
 function openSettingsModal() {
