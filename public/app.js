@@ -2028,6 +2028,108 @@ function barChart(series, { format = (v) => v, color = "var(--primary)" } = {}) 
   return `<svg viewBox="0 0 ${W} ${H}" class="bar-chart" preserveAspectRatio="xMidYMid meet">${bars}</svg>`;
 }
 
+// Lesbare Modellnamen für die Kosten-Aufteilung im Tooltip.
+const MODEL_NAMES = {
+  "claude-opus-4-8": "Opus 4.8",
+  "claude-sonnet-4-6": "Sonnet 4.6",
+  "claude-haiku-4-5": "Haiku 4.5",
+};
+const shortModel = (m) => MODEL_NAMES[m] || m;
+
+// Rundet auf einen „schönen" oberen Achsenwert (1/2/2,5/5/10 × Zehnerpotenz).
+function niceCeil(x) {
+  if (!(x > 0)) return 1;
+  const pow = Math.pow(10, Math.floor(Math.log10(x)));
+  const f = x / pow;
+  const nf = f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10;
+  return nf * pow;
+}
+
+function dayLabelLong(ymd) {
+  const [y, m, d] = String(ymd).split("-");
+  return d ? `${d}.${m}.${y}` : ymd;
+}
+
+// Interaktives KI-Kosten-Diagramm: Hintergrund-Raster + Y-Skala, je Tag ein
+// Balken. Der Hover-Tooltip (siehe wireCostChart) zeigt Modell-Aufteilung und
+// Anzahl recherchierter Leads.
+function costChart(days) {
+  if (!days.length) return `<p class="d-muted">Keine Daten.</p>`;
+  const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
+  const maxVal = Math.max(...days.map((d) => d.value || 0), 0);
+  const top = niceCeil(maxVal);
+  const W = 640, H = 220, padL = 48, padR = 14, padT = 14, padB = 30;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const yFor = (v) => padT + plotH - (v / top) * plotH;
+  const ticks = 4;
+
+  let grid = "";
+  for (let t = 0; t <= ticks; t++) {
+    const val = (top * t) / ticks;
+    const y = yFor(val);
+    grid += `<line x1="${padL}" y1="${y}" x2="${W - padR}" y2="${y}" class="grid-line" />`;
+    grid += `<text x="${padL - 8}" y="${y + 3}" class="axis-lbl">${esc(usd(val))}</text>`;
+  }
+
+  const bw = plotW / days.length;
+  const bars = days.map((d, i) => {
+    const x = padL + i * bw;
+    const h = top > 0 ? ((d.value || 0) / top) * plotH : 0;
+    const y = padT + plotH - h;
+    const payload = esc(JSON.stringify({
+      day: d.day, value: d.value || 0, models: d.models || {}, researched: d.researched || 0,
+    }));
+    return `<g class="cc-col" data-tip="${payload}">
+        <rect class="cc-hit" x="${x}" y="${padT}" width="${bw}" height="${plotH}" />
+        <rect class="cc-bar" x="${x + bw * 0.18}" y="${y}" width="${bw * 0.64}" height="${Math.max(0, h)}" rx="3" />
+        <text x="${x + bw / 2}" y="${H - 8}" class="cc-lbl">${esc(dayLabel(d.day))}</text>
+      </g>`;
+  }).join("");
+
+  return `<div class="cost-chart-wrap">
+      <svg viewBox="0 0 ${W} ${H}" class="cost-chart" preserveAspectRatio="xMidYMid meet">
+        ${grid}
+        <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" class="axis-line" />
+        ${bars}
+      </svg>
+      <div class="chart-tip hidden"></div>
+    </div>`;
+}
+
+// Verdrahtet die Hover-Tooltips des Kosten-Diagramms nach dem Einfügen ins DOM.
+function wireCostChart(root) {
+  const wrap = root.querySelector(".cost-chart-wrap");
+  if (!wrap) return;
+  const tip = wrap.querySelector(".chart-tip");
+  const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
+
+  wrap.querySelectorAll(".cc-col").forEach((col) => {
+    const show = (ev) => {
+      let d;
+      try { d = JSON.parse(col.getAttribute("data-tip")); } catch { return; }
+      const models = Object.entries(d.models || {}).sort((a, b) => b[1] - a[1]);
+      const rows = models.length
+        ? models.map(([m, c]) => `<div class="tip-row"><span>${esc(shortModel(m))}</span><span>${esc(usd(c))}</span></div>`).join("")
+        : `<div class="tip-row d-muted"><span>Keine KI-Kosten</span><span></span></div>`;
+      tip.innerHTML = `<div class="tip-head">${esc(dayLabelLong(d.day))}</div>
+        <div class="tip-row tip-total"><span>Gesamt</span><span>${esc(usd(d.value))}</span></div>
+        ${rows}
+        <div class="tip-row tip-meta"><span>Recherchierte Leads</span><span>${Number(d.researched) || 0}</span></div>`;
+      tip.classList.remove("hidden");
+
+      const wr = wrap.getBoundingClientRect();
+      const tw = tip.offsetWidth || 180;
+      let left = ev.clientX - wr.left + 14;
+      if (left + tw > wr.width) left = ev.clientX - wr.left - tw - 14;
+      tip.style.left = Math.max(4, left) + "px";
+      tip.style.top = Math.max(4, ev.clientY - wr.top + 12) + "px";
+    };
+    col.addEventListener("mouseenter", show);
+    col.addEventListener("mousemove", show);
+    col.addEventListener("mouseleave", () => tip.classList.add("hidden"));
+  });
+}
+
 // Kräftige (dunklere) Status-Farben – guter Kontrast zu weißer Schrift im Trichter.
 const FUNNEL_COLORS = {
   neu: "#6B706D",
@@ -2104,12 +2206,11 @@ async function renderReportsView() {
     ["Ø Vertriebszyklus", r.avgCycleDays ? r.avgCycleDays + " Tage" : "—"],
   ].map(([label, val]) => `<div class="stat-card"><span class="stat-value">${esc(String(val))}</span><span class="stat-label">${esc(label)}</span></div>`).join("");
 
-  const won = r.wonByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
-  const activity = r.activityByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
+  const wonLeads = r.wonLeadsByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
 
-  // KI-Kosten je Tag (USD, aus den Tokens der Anfragen errechnet).
-  const costSeries = (r.costByDay || []).map((d) => ({ label: dayLabel(d.day), value: d.value }));
-  const costTotal = costSeries.reduce((a, d) => a + d.value, 0);
+  // KI-Kosten je Tag (USD, aus den Tokens + Tool-Gebühren errechnet).
+  const costByDay = r.costByDay || [];
+  const costTotal = costByDay.reduce((a, d) => a + (d.value || 0), 0);
   const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
 
   // Verlust-Übersicht: Anzahl, Wert und Verlustquote (gegen abgeschlossene Deals).
@@ -2130,12 +2231,8 @@ async function renderReportsView() {
 
     <div class="report-grid">
       <section class="card">
-        <h3>Gewonnener Umsatz je Monat</h3>
-        ${barChart(won, { color: "var(--green)", format: (val) => (val >= 1000 ? Math.round(val / 1000) + "k" : val) })}
-      </section>
-      <section class="card">
-        <h3>Vertriebsaktivität je Monat</h3>
-        ${barChart(activity, { color: "var(--accent)" })}
+        <h3>Gewonnene Leads je Monat</h3>
+        ${barChart(wonLeads, { color: "var(--green)" })}
       </section>
       <section class="card">
         <h3>Verlust-Übersicht</h3>
@@ -2149,10 +2246,11 @@ async function renderReportsView() {
 
     <section class="card report-funnel">
       <h3>KI-Kosten je Tag <span class="d-muted" style="font-weight:400;font-size:13px;">· Summe 14 Tage: ${esc(usd(costTotal))}</span></h3>
-      ${barChart(costSeries, { color: "var(--primary)", format: (v) => usd(v) })}
-      <p class="hint">Errechnet aus den Tokens aller KI-Anfragen (Recherche, Scoring, E-Mail, Tipps) zu Anthropic-Listenpreisen – inklusive Cache und Web-Suche-Gebühren ($10/1.000 Suchen). Web-Fetch verursacht keine Zusatzkosten.</p>
+      ${costChart(costByDay)}
     </section>
   `;
+
+  wireCostChart(v);
 }
 
 // --- Toast -----------------------------------------------------------------

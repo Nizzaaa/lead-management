@@ -338,23 +338,14 @@ async function getReport(statuses, probabilities = {}) {
     value: (funnelMap[s] && funnelMap[s].value) || 0,
   }));
 
-  // Gewonnener Umsatz je Monat (Status gewonnen; updated_at als Abschlussdatum).
+  // Gewonnene Leads je Monat (Anzahl; updated_at als Abschlussdatum).
   const wonRes = await pool.query(
-    `SELECT to_char(date_trunc('month', updated_at), 'YYYY-MM') AS month, COALESCE(SUM(value),0)::float AS value
+    `SELECT to_char(date_trunc('month', updated_at), 'YYYY-MM') AS month, COUNT(*)::int AS count
      FROM leads
      WHERE status = 'gewonnen' AND updated_at >= date_trunc('month', now()) - interval '11 months'
      GROUP BY 1 ORDER BY 1`
   );
-  const wonByMonth = fillMonths(wonRes.rows, "value");
-
-  // Vertriebsaktivität je Monat: Anzahl Touchpoints (letzte 12 Monate, inkl. Lücken).
-  const activityRes = await pool.query(
-    `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS month, COUNT(*)::int AS count
-     FROM activities
-     WHERE created_at >= date_trunc('month', now()) - interval '11 months'
-     GROUP BY 1 ORDER BY 1`
-  );
-  const activityByMonth = fillMonths(activityRes.rows, "count");
+  const wonLeadsByMonth = fillMonths(wonRes.rows, "count");
 
   // Durchschnittlicher Vertriebszyklus in Tagen: Anlage → Abschluss (gewonnen).
   // Näherung über updated_at als Abschlussdatum.
@@ -369,16 +360,41 @@ async function getReport(statuses, probabilities = {}) {
     ? Math.round(stats.wonValue / stats.byStatus["gewonnen"])
     : 0;
 
-  // KI-Kosten je Tag (letzte 14 Tage, inkl. Lücken).
+  // KI-Kosten je Tag (letzte 14 Tage, inkl. Lücken) – je Tag mit Modell-
+  // Aufteilung und Anzahl recherchierter Leads für den Hover-Tooltip.
   const costRes = await pool.query(
-    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, COALESCE(SUM(cost_usd),0)::float AS cost
+    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, model,
+            COALESCE(SUM(cost_usd),0)::float AS cost
      FROM ai_usage
      WHERE created_at >= date_trunc('day', now()) - interval '13 days'
-     GROUP BY 1 ORDER BY 1`
+     GROUP BY 1, 2`
   );
-  const costByDay = fillDays(costRes.rows, "cost", 14);
+  // Recherchierte Leads je Tag (angelegt + aktualisiert über die Recherche).
+  const researchRes = await pool.query(
+    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS n
+     FROM activities
+     WHERE type = 'system'
+       AND title IN ('Per Recherche angelegt', 'Recherche aktualisiert')
+       AND created_at >= date_trunc('day', now()) - interval '13 days'
+     GROUP BY 1`
+  );
+  const byDay = {};
+  for (const r of costRes.rows) {
+    const e = (byDay[r.day] = byDay[r.day] || { cost: 0, models: {} });
+    const c = Number(r.cost) || 0;
+    e.cost += c;
+    if (r.model) e.models[r.model] = (e.models[r.model] || 0) + c;
+  }
+  const researchedByDay = {};
+  for (const r of researchRes.rows) researchedByDay[r.day] = Number(r.n) || 0;
+  const costByDay = listDays(14).map((day) => ({
+    day,
+    value: byDay[day] ? byDay[day].cost : 0,
+    models: byDay[day] ? byDay[day].models : {},
+    researched: researchedByDay[day] || 0,
+  }));
 
-  return { stats, funnel, wonByMonth, activityByMonth, avgWon, avgCycleDays, costByDay };
+  return { stats, funnel, wonLeadsByMonth, avgWon, avgCycleDays, costByDay };
 }
 
 // Füllt fehlende Monate der letzten 12 Monate mit 0 auf.
@@ -395,16 +411,13 @@ function fillMonths(rows, key) {
   return out;
 }
 
-// Füllt fehlende Tage der letzten N Tage mit 0 auf.
-function fillDays(rows, key, days = 14) {
-  const map = {};
-  for (const r of rows) map[r.day] = Number(r[key]) || 0;
+// Liefert die letzten N Kalendertage als 'YYYY-MM-DD' (ältester zuerst).
+function listDays(days = 14) {
   const out = [];
   const now = new Date();
   for (let i = days - 1; i >= 0; i--) {
     const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
-    const day = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
-    out.push({ day, value: map[day] || 0 });
+    out.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`);
   }
   return out;
 }

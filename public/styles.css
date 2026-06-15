@@ -776,11 +776,37 @@ a { color: inherit; }
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 18px;
+  margin-bottom: 18px;
 }
 .report-grid .card h3 { margin-top: 0; }
 .bar-chart { width: 100%; height: auto; display: block; }
 .bar-chart .bar-val { fill: var(--muted); font-size: 11px; text-anchor: middle; }
 .bar-chart .bar-lbl { fill: var(--muted); font-size: 10px; text-anchor: middle; }
+
+/* Interaktives KI-Kosten-Diagramm (Raster, Y-Skala, Hover-Tooltip) */
+.cost-chart-wrap { position: relative; }
+.cost-chart { width: 100%; height: auto; display: block; }
+.cost-chart .grid-line { stroke: var(--border); stroke-width: 1; }
+.cost-chart .axis-line { stroke: var(--border); stroke-width: 1; }
+.cost-chart .axis-lbl { fill: var(--muted); font-size: 10px; text-anchor: end; }
+.cost-chart .cc-lbl { fill: var(--muted); font-size: 10px; text-anchor: middle; }
+.cost-chart .cc-hit { fill: transparent; }
+.cost-chart .cc-bar { fill: var(--primary); transition: fill .12s ease; }
+.cost-chart .cc-col:hover .cc-bar { fill: var(--accent); }
+.cost-chart .cc-col:hover .cc-hit { fill: rgba(10,122,59,0.06); }
+.chart-tip {
+  position: absolute; z-index: 6; pointer-events: none;
+  min-width: 172px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--shadow);
+  padding: 9px 11px; font-size: 12px; color: var(--text);
+}
+.chart-tip.hidden { display: none; }
+.chart-tip .tip-head { font-weight: 700; margin-bottom: 5px; }
+.chart-tip .tip-row { display: flex; justify-content: space-between; gap: 16px; line-height: 1.55; }
+.chart-tip .tip-row > span:last-child { font-variant-numeric: tabular-nums; }
+.chart-tip .tip-total { font-weight: 600; border-bottom: 1px solid var(--border); padding-bottom: 4px; margin-bottom: 4px; }
+.chart-tip .tip-meta { margin-top: 5px; border-top: 1px solid var(--border); padding-top: 4px; color: var(--muted); }
 
 /* Pipeline-Trichter (prominent über volle Breite) */
 .report-funnel { margin-bottom: 18px; }
