@@ -156,17 +156,21 @@ async function init() {
 }
 
 // Zeigt den angemeldeten Benutzer und einen Logout-Link in der Topbar an.
-// Beides stammt vom Auth-Proxy (über /api/config); ohne Proxy bleibt es leer.
+// Beides kommt vom Auth-Proxy (über /api/config). Der Logout-Pfad wird vom
+// Proxy bereitgestellt (z. B. Cloudflare Access) – ohne angemeldeten Benutzer
+// (z. B. lokal ohne Proxy) gäbe es nichts abzumelden, daher bleibt der Button
+// dann ausgeblendet.
 function renderUserBar(cfg) {
+  const authed = !!cfg.user;
   const info = $("#userInfo");
   if (info) {
-    if (cfg.user) { info.textContent = "👤 " + cfg.user; info.hidden = false; }
-    else { info.hidden = true; }
+    if (authed) { info.textContent = "👤 " + cfg.user; info.hidden = false; }
+    else info.hidden = true;
   }
   const link = $("#logoutLink");
   if (link) {
-    if (cfg.logoutUrl) { link.href = cfg.logoutUrl; link.hidden = false; }
-    else { link.hidden = true; }
+    if (authed && cfg.logoutUrl) { link.href = cfg.logoutUrl; link.hidden = false; }
+    else link.hidden = true;
   }
 }
 
