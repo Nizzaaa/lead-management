@@ -57,10 +57,21 @@ const IMPORT_MAP = {
 
 // --- CSV -------------------------------------------------------------------
 
+// Schützt vor CSV-Formel-Injection (Excel/LibreOffice werten Zellen, die mit
+// = + - @ oder Tab/CR beginnen, als Formel aus). Lead-Daten stammen u. a. aus
+// der KI-Web-Recherche fremder Websites – also nicht vertrauenswürdig. Solche
+// Zellen werden mit einem führenden Apostroph als Text markiert (Excel zeigt
+// den Apostroph nicht an). Reine Zahlen bleiben unangetastet.
+function neutralizeFormula(s) {
+  if (!s) return s;
+  if (/^-?\d+(?:[.,]\d+)?$/.test(s)) return s; // echte Zahl: nicht anfassen
+  return /^[=+\-@\t\r]/.test(s) ? "'" + s : s;
+}
+
 // Maskiert eine Zelle nach RFC 4180 (Anführungszeichen verdoppeln, bei
-// Sonderzeichen in Anführungszeichen setzen).
+// Sonderzeichen in Anführungszeichen setzen) – inkl. Formel-Injection-Schutz.
 function csvCell(value, delimiter) {
-  const s = value == null ? "" : String(value);
+  const s = neutralizeFormula(value == null ? "" : String(value));
   if (s.includes('"') || s.includes("\n") || s.includes("\r") || s.includes(delimiter)) {
     return '"' + s.replace(/"/g, '""') + '"';
   }

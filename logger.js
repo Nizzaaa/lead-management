@@ -9,6 +9,8 @@
 //   LOG_PRETTY  "1"/"true" → menschenlesbar statt JSON  (Default: aus)
 //   LOG_FORMAT  "pretty" | "json"                       (Alternative zu LOG_PRETTY)
 
+const cfAccess = require("./cfAccess");
+
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 
 const envLevel = String(process.env.LOG_LEVEL || "info").toLowerCase();
@@ -69,9 +71,13 @@ function makeLogger(bindings = {}) {
 const logger = makeLogger();
 
 // Ermittelt den handelnden Benutzer aus den Headern, die ein vorgeschalteter
-// Auth-Proxy (z. B. oauth2-proxy vor Nextcloud-SSO) setzt. Ohne Proxy bleibt
-// das Feld leer und die App läuft unverändert weiter.
+// Auth-Proxy (Cloudflare Access) setzt. Ist die kryptografische Cloudflare-
+// Access-Verifikation aktiv, kommt die Identität ausschließlich aus dem
+// verifizierten JWT (von der cfAccess-Middleware in req.actor gesetzt) – der
+// fälschbare Klartext-Header wird hier dann NICHT vertraut. Ohne Proxy/Config
+// bleibt das Feld leer und die App läuft unverändert weiter.
 function actorFromRequest(req) {
+  if (cfAccess.isEnabled()) return "";
   const h = req.headers || {};
   // Bevorzugt den (sprechenden) Benutzernamen des Auth-Proxys (z. B. Zitadel
   // preferred_username) und fällt sonst auf die E-Mail-Header zurück.
