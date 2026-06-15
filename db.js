@@ -108,9 +108,11 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
           output_tokens      INTEGER NOT NULL DEFAULT 0,
           cache_write_tokens INTEGER NOT NULL DEFAULT 0,
           cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+          web_searches       INTEGER NOT NULL DEFAULT 0,
           cost_usd      NUMERIC     NOT NULL DEFAULT 0
         );
       `);
+      await pool.query("ALTER TABLE ai_usage ADD COLUMN IF NOT EXISTS web_searches INTEGER NOT NULL DEFAULT 0;");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage(created_at);");
       // Aufgaben-Funktion wurde entfernt: Alttabelle und zugehörige
       // System-Verlaufseinträge idempotent bereinigen.
@@ -410,12 +412,13 @@ function fillDays(rows, key, days = 14) {
 // Schreibt einen KI-Nutzungs-Datensatz (Tokens + errechnete Kosten).
 async function recordUsage(u) {
   await pool.query(
-    `INSERT INTO ai_usage (model, kind, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    `INSERT INTO ai_usage (model, kind, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, web_searches, cost_usd)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [
       u.model || "", u.kind || "",
       Math.round(u.inputTokens || 0), Math.round(u.outputTokens || 0),
       Math.round(u.cacheWriteTokens || 0), Math.round(u.cacheReadTokens || 0),
+      Math.round(u.webSearches || 0),
       Number(u.costUsd) || 0,
     ]
   );

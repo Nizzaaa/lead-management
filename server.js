@@ -661,24 +661,32 @@ const MODEL_PRICING = {
   "claude-sonnet-4-6": { input: 3.0, output: 15.0 },
   "claude-haiku-4-5":  { input: 1.0, output: 5.0 },
 };
+// Server-Tool-Gebühren: Web-Suche $10 pro 1.000 Anfragen. (Web-Fetch kostet
+// nichts extra; dessen Inhalt zählt bereits als Input-Tokens.)
+const WEB_SEARCH_USD_PER_REQUEST = 10 / 1000;
 
-// Errechnet die Kosten eines Aufrufs aus dem usage-Objekt und schreibt sie weg.
-// Schlägt nie hart fehl – Kostenerfassung darf den Hauptablauf nicht stören.
+// Errechnet die Kosten eines Aufrufs aus dem usage-Objekt (Tokens + Tool-
+// Gebühren) und schreibt sie weg. Schlägt nie hart fehl – Kostenerfassung darf
+// den Hauptablauf nicht stören.
 async function recordClaudeUsage(model, kind, usage) {
   try {
     if (!usage) return;
-    const p = MODEL_PRICING[model];
-    if (!p) return; // unbekanntes Modell -> nicht abrechnen
     const inp = Number(usage.input_tokens) || 0;
     const out = Number(usage.output_tokens) || 0;
     const cw = Number(usage.cache_creation_input_tokens) || 0;
     const cr = Number(usage.cache_read_input_tokens) || 0;
-    const costUsd =
-      (inp * p.input + out * p.output + cw * p.input * 1.25 + cr * p.input * 0.1) / 1e6;
+    const webSearches = (usage.server_tool_use && Number(usage.server_tool_use.web_search_requests)) || 0;
+
+    let costUsd = webSearches * WEB_SEARCH_USD_PER_REQUEST; // Tool-Gebühren immer
+    const p = MODEL_PRICING[model];
+    if (p) {
+      costUsd += (inp * p.input + out * p.output + cw * p.input * 1.25 + cr * p.input * 0.1) / 1e6;
+    }
     await db.recordUsage({
       model, kind,
       inputTokens: inp, outputTokens: out,
       cacheWriteTokens: cw, cacheReadTokens: cr,
+      webSearches,
       costUsd,
     });
   } catch (err) {

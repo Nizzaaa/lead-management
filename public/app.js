@@ -2150,7 +2150,7 @@ async function renderReportsView() {
     <section class="card report-funnel">
       <h3>KI-Kosten je Tag <span class="d-muted" style="font-weight:400;font-size:13px;">· Summe 14 Tage: ${esc(usd(costTotal))}</span></h3>
       ${barChart(costSeries, { color: "var(--primary)", format: (v) => usd(v) })}
-      <p class="hint">Errechnet aus den Tokens der KI-Anfragen (Recherche, Scoring, E-Mail, Tipps) zu Anthropic-Listenpreisen. Web-Suche-Gebühren sind nicht enthalten.</p>
+      <p class="hint">Errechnet aus den Tokens aller KI-Anfragen (Recherche, Scoring, E-Mail, Tipps) zu Anthropic-Listenpreisen – inklusive Cache und Web-Suche-Gebühren ($10/1.000 Suchen). Web-Fetch verursacht keine Zusatzkosten.</p>
     </section>
   `;
 }
