@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=23" />
+  <link rel="stylesheet" href="styles.css?v=24" />
   <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
@@ -40,12 +40,17 @@
     </section>
 
     <section class="toolbar">
-      <input type="search" id="search" class="search" placeholder="🔍 Suche nach Name, Firma, E-Mail…" />
-      <div class="filters" id="statusFilters"></div>
-      <button class="chip due-chip" id="dueFilter" title="Nur fällige/überfällige Wiedervorlagen">⏰ Fällig <span id="dueCount" class="due-count hidden">0</span></button>
-      <div class="view-toggle" id="viewToggle">
-        <button class="chip active" data-view="list" title="Kartenansicht">🗂 Karten</button>
-        <button class="chip" data-view="kanban" title="Kanban-Board nach Status">▦ Board</button>
+      <div class="toolbar-top">
+        <input type="search" id="search" class="search" placeholder="🔍 Suche nach Name, Firma, E-Mail…" />
+        <div class="view-switch" id="viewToggle" role="tablist" aria-label="Ansicht wählen">
+          <button class="vs-option active" data-view="list" role="tab" title="Kartenansicht">🗂 Karten</button>
+          <button class="vs-option" data-view="kanban" role="tab" title="Kanban-Board nach Status">▦ Board</button>
+          <span class="vs-thumb" aria-hidden="true"></span>
+        </div>
+      </div>
+      <div class="toolbar-filters">
+        <div class="filters" id="statusFilters"></div>
+        <button class="chip due-chip" id="dueFilter" title="Nur fällige/überfällige Wiedervorlagen">⏰ Fällig <span id="dueCount" class="due-count hidden">0</span></button>
       </div>
     </section>
 
@@ -206,6 +211,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=25"></script>
+  <script src="app.js?v=26"></script>
 </body>
 </html>

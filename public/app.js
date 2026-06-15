@@ -364,9 +364,14 @@ function searchFiltered() {
 }
 
 function renderViewToggle() {
-  document.querySelectorAll("#viewToggle .chip").forEach((b) => {
-    b.classList.toggle("active", b.dataset.view === view);
+  const sw = $("#viewToggle");
+  if (!sw) return;
+  sw.querySelectorAll(".vs-option").forEach((b) => {
+    const on = b.dataset.view === view;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", on ? "true" : "false");
   });
+  sw.classList.toggle("sw-kanban", view === "kanban");
 }
 
 function renderLeads() {
