@@ -2000,6 +2000,12 @@ function monthLabel(ym) {
   return MONTH_SHORT[Number(m) - 1] || ym;
 }
 
+// "2026-06-15" -> "15.06."
+function dayLabel(ymd) {
+  const [, m, d] = ymd.split("-");
+  return d && m ? `${d}.${m}.` : ymd;
+}
+
 // Einfaches, abhängigkeitsfreies SVG-Säulendiagramm.
 function barChart(series, { format = (v) => v, color = "var(--primary)" } = {}) {
   if (!series.length) return `<p class="d-muted">Keine Daten.</p>`;
@@ -2101,6 +2107,11 @@ async function renderReportsView() {
   const won = r.wonByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
   const activity = r.activityByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
 
+  // KI-Kosten je Tag (USD, aus den Tokens der Anfragen errechnet).
+  const costSeries = (r.costByDay || []).map((d) => ({ label: dayLabel(d.day), value: d.value }));
+  const costTotal = costSeries.reduce((a, d) => a + d.value, 0);
+  const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
+
   // Verlust-Übersicht: Anzahl, Wert und Verlustquote (gegen abgeschlossene Deals).
   const lost = r.funnel.find((f) => f.status === "verloren") || { count: 0, value: 0 };
   const won_n = s.byStatus["gewonnen"] || 0;
@@ -2135,6 +2146,12 @@ async function renderReportsView() {
         </div>
       </section>
     </div>
+
+    <section class="card report-funnel">
+      <h3>KI-Kosten je Tag <span class="d-muted" style="font-weight:400;font-size:13px;">· Summe 14 Tage: ${esc(usd(costTotal))}</span></h3>
+      ${barChart(costSeries, { color: "var(--primary)", format: (v) => usd(v) })}
+      <p class="hint">Errechnet aus den Tokens der KI-Anfragen (Recherche, Scoring, E-Mail, Tipps) zu Anthropic-Listenpreisen. Web-Suche-Gebühren sind nicht enthalten.</p>
+    </section>
   `;
 }
 

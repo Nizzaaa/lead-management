@@ -97,6 +97,21 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
         );
       `);
       await pool.query("CREATE INDEX IF NOT EXISTS idx_activities_lead ON activities(lead_id, created_at DESC);");
+      // KI-Nutzung: pro Anfrage Tokens + errechnete Kosten (für die Kostenauswertung).
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ai_usage (
+          id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+          model         TEXT        NOT NULL DEFAULT '',
+          kind          TEXT        NOT NULL DEFAULT '',
+          input_tokens       INTEGER NOT NULL DEFAULT 0,
+          output_tokens      INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+          cost_usd      NUMERIC     NOT NULL DEFAULT 0
+        );
+      `);
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage(created_at);");
       // Aufgaben-Funktion wurde entfernt: Alttabelle und zugehörige
       // System-Verlaufseinträge idempotent bereinigen.
       await pool.query("DROP TABLE IF EXISTS tasks;");
@@ -352,7 +367,16 @@ async function getReport(statuses, probabilities = {}) {
     ? Math.round(stats.wonValue / stats.byStatus["gewonnen"])
     : 0;
 
-  return { stats, funnel, wonByMonth, activityByMonth, avgWon, avgCycleDays };
+  // KI-Kosten je Tag (letzte 14 Tage, inkl. Lücken).
+  const costRes = await pool.query(
+    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, COALESCE(SUM(cost_usd),0)::float AS cost
+     FROM ai_usage
+     WHERE created_at >= date_trunc('day', now()) - interval '13 days'
+     GROUP BY 1 ORDER BY 1`
+  );
+  const costByDay = fillDays(costRes.rows, "cost", 14);
+
+  return { stats, funnel, wonByMonth, activityByMonth, avgWon, avgCycleDays, costByDay };
 }
 
 // Füllt fehlende Monate der letzten 12 Monate mit 0 auf.
@@ -367,6 +391,34 @@ function fillMonths(rows, key) {
     out.push({ month: m, value: map[m] || 0 });
   }
   return out;
+}
+
+// Füllt fehlende Tage der letzten N Tage mit 0 auf.
+function fillDays(rows, key, days = 14) {
+  const map = {};
+  for (const r of rows) map[r.day] = Number(r[key]) || 0;
+  const out = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
+    const day = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+    out.push({ day, value: map[day] || 0 });
+  }
+  return out;
+}
+
+// Schreibt einen KI-Nutzungs-Datensatz (Tokens + errechnete Kosten).
+async function recordUsage(u) {
+  await pool.query(
+    `INSERT INTO ai_usage (model, kind, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, cost_usd)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      u.model || "", u.kind || "",
+      Math.round(u.inputTokens || 0), Math.round(u.outputTokens || 0),
+      Math.round(u.cacheWriteTokens || 0), Math.round(u.cacheReadTokens || 0),
+      Number(u.costUsd) || 0,
+    ]
+  );
 }
 
 module.exports = {
@@ -384,6 +436,7 @@ module.exports = {
   setSetting,
   getStats,
   getWidgetStats,
+  recordUsage,
   listActivities,
   createActivity,
   deleteActivity,
