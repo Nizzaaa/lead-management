@@ -78,6 +78,10 @@ services:
       # <team>.cloudflareaccess.com, CF_ACCESS_AUD = Application-AUD-Tag.
       - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN:-}
       - CF_ACCESS_AUD=${CF_ACCESS_AUD:-}
+      # Abmelde-Ziel des Auth-Proxys (Logout-Button in der Topbar). Default passt
+      # zu Cloudflare Access; für oauth2-proxy z. B. LOGOUT_URL=/oauth2/sign_out.
+      # Leer setzen, um den Logout-Button auszublenden.
+      - LOGOUT_URL=${LOGOUT_URL:-/cdn-cgi/access/logout}
     # Härtung: non-root (im Image), keine Rechte-Eskalation, alle Caps weg,
     # read-only Root-FS (App schreibt nichts) mit beschreibbarem /tmp.
     security_opt:

@@ -56,6 +56,11 @@ const CSP = [
     : "frame-ancestors 'none'",
 ].join("; ");
 
+// Abmelde-Ziel des vorgeschalteten Auth-Proxys. Default: Cloudflare Access.
+// Per Env überschreibbar (z. B. "/oauth2/sign_out" für oauth2-proxy). Leer =
+// kein Logout-Button.
+const LOGOUT_URL = String(process.env.LOGOUT_URL || "/cdn-cgi/access/logout").trim();
+
 // --- Anthropic / KI-Setup --------------------------------------------------
 // Das SDK wird nur geladen, wenn ein API-Key vorhanden ist. So läuft die App
 // auch ohne KI-Konfiguration vollständig (nur die KI-Buttons sind dann inaktiv).
@@ -486,6 +491,8 @@ app.get("/api/config", (req, res) => {
     models: AVAILABLE_MODELS,
     statuses: STATUSES,
     stageProbabilities,
+    user: actor(req) !== "—" ? actor(req) : "",
+    logoutUrl: LOGOUT_URL,
   });
 });
 
@@ -653,7 +660,8 @@ app.post("/api/leads/research", aiLimiter, wrap(async (req, res) => {
     return res.status(400).json({ error: "Firmenname oder Website-URL ist erforderlich." });
   }
   const job = startResearchJob(async (onProgress, signal) => {
-    const research = await researchCompany(anthropic, input, currentModel, onProgress, signal);
+    const research = await researchCompany(anthropic, input, currentModel, onProgress, signal,
+      (u) => recordClaudeUsage(u.model, u.kind, u.usage));
     const data = { ...leadFromResearch(research, input), status: "neu", value: 0, notes: "" };
     const lead = await db.createLead(data, research);
     await logActivity(lead.id, { type: "system", title: "Per Recherche angelegt", body: `Input: ${input}` }, "KI-Recherche");
@@ -677,7 +685,8 @@ app.post("/api/leads/:id/research", aiLimiter, wrap(async (req, res) => {
     return res.status(400).json({ error: "Kein Recherche-Input vorhanden." });
   }
   const job = startResearchJob(async (onProgress, signal) => {
-    const research = await researchCompany(anthropic, input, currentModel, onProgress, signal);
+    const research = await researchCompany(anthropic, input, currentModel, onProgress, signal,
+      (u) => recordClaudeUsage(u.model, u.kind, u.usage));
     const data = leadFromResearch(research, input);
     const updated = await db.setLeadResearch(lead.id, research, data);
     await logActivity(lead.id, { type: "system", title: "Recherche aktualisiert", body: `Input: ${input}` }, "KI-Recherche");
@@ -786,7 +795,47 @@ function leadContext(lead) {
   return base.join("\n");
 }
 
-async function callClaude(system, userText, { json = false } = {}) {
+// Anthropic-Listenpreise in USD pro 1 Mio. Tokens (Quelle: platform.claude.com).
+// Cache-Writes kosten das 1,25-fache, Cache-Reads das 0,1-fache des Input-Preises.
+const MODEL_PRICING = {
+  "claude-opus-4-8":   { input: 5.0, output: 25.0 },
+  "claude-sonnet-4-6": { input: 3.0, output: 15.0 },
+  "claude-haiku-4-5":  { input: 1.0, output: 5.0 },
+};
+// Server-Tool-Gebühren: Web-Suche $10 pro 1.000 Anfragen. (Web-Fetch kostet
+// nichts extra; dessen Inhalt zählt bereits als Input-Tokens.)
+const WEB_SEARCH_USD_PER_REQUEST = 10 / 1000;
+
+// Errechnet die Kosten eines Aufrufs aus dem usage-Objekt (Tokens + Tool-
+// Gebühren) und schreibt sie weg. Schlägt nie hart fehl – Kostenerfassung darf
+// den Hauptablauf nicht stören.
+async function recordClaudeUsage(model, kind, usage) {
+  try {
+    if (!usage) return;
+    const inp = Number(usage.input_tokens) || 0;
+    const out = Number(usage.output_tokens) || 0;
+    const cw = Number(usage.cache_creation_input_tokens) || 0;
+    const cr = Number(usage.cache_read_input_tokens) || 0;
+    const webSearches = (usage.server_tool_use && Number(usage.server_tool_use.web_search_requests)) || 0;
+
+    let costUsd = webSearches * WEB_SEARCH_USD_PER_REQUEST; // Tool-Gebühren immer
+    const p = MODEL_PRICING[model];
+    if (p) {
+      costUsd += (inp * p.input + out * p.output + cw * p.input * 1.25 + cr * p.input * 0.1) / 1e6;
+    }
+    await db.recordUsage({
+      model, kind,
+      inputTokens: inp, outputTokens: out,
+      cacheWriteTokens: cw, cacheReadTokens: cr,
+      webSearches,
+      costUsd,
+    });
+  } catch (err) {
+    logger.warn("usage_record_failed", { model, kind, error: err.message });
+  }
+}
+
+async function callClaude(system, userText, { json = false, kind = "ai" } = {}) {
   const params = {
     model: currentModel,
     max_tokens: 1500,
@@ -824,6 +873,7 @@ async function callClaude(system, userText, { json = false } = {}) {
     };
   }
   const msg = await anthropic.messages.create(params);
+  await recordClaudeUsage(currentModel, kind, msg.usage);
   const text = msg.content.find((b) => b.type === "text");
   return text ? text.text : "";
 }
@@ -850,7 +900,7 @@ async function computeLeadScore(lead) {
       "Fasse dich kurz – KEINE Handlungsempfehlungen oder Cold-Call-Strategie (die stehen bereits im Dossier). " +
       "Antworte ausschließlich im geforderten JSON-Format auf Deutsch.",
     `Bewerte diesen Lead von 0 (kalt) bis 100 (sehr heiß), vergib eine Schulnote A–D und schätze den 12-Monats-Auftragswert.\n\n${leadContext(lead)}`,
-    { json: true }
+    { json: true, kind: "score" }
   );
   const result = JSON.parse(raw);
   let value = Math.round(Number(result.value));
@@ -915,7 +965,8 @@ app.post("/api/leads/:id/email", aiLimiter, wrap(async (req, res) => {
         "belegten Ansatzpunkt aus dem Recherche-Dossier an (z. B. eine Schwachstelle oder ein Potenzial). " +
         "Verwende eine klare Betreffzeile (Format: 'Betreff: ...'), eine persönliche Ansprache und einen klaren Call-to-Action. " +
         "Keine Floskeln, kein Spam-Ton, maximal 150 Wörter.",
-      `Ziel der E-Mail: ${goal}\n\nLead:\n${leadContext(lead)}`
+      `Ziel der E-Mail: ${goal}\n\nLead:\n${leadContext(lead)}`,
+      { kind: "email" }
     );
     await logActivity(lead.id, { type: "email", title: "KI-E-Mail-Entwurf erstellt", body: text }, actor(req));
     res.json({ email: text });
@@ -935,7 +986,8 @@ app.post("/api/leads/:id/insights", aiLimiter, wrap(async (req, res) => {
       "Du bist Vertriebs-Coach für FU/GE Solutions und bereitest Cold Calls vor. Gib eine kurze, konkrete " +
         "Handlungsempfehlung auf Deutsch: 2–4 priorisierte nächste Schritte als Aufzählung, abgeleitet aus den " +
         "belegten Ansatzpunkten und Potenzialen des Recherche-Dossiers. Pragmatisch und umsetzbar.",
-      `Was sind die besten nächsten Schritte für diesen Lead?\n\n${leadContext(lead)}`
+      `Was sind die besten nächsten Schritte für diesen Lead?\n\n${leadContext(lead)}`,
+      { kind: "insight" }
     );
     await logActivity(lead.id, { type: "ai", title: "KI-Empfehlung erstellt", body: text }, actor(req));
     res.json({ insights: text });

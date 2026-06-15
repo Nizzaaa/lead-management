@@ -97,6 +97,23 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
         );
       `);
       await pool.query("CREATE INDEX IF NOT EXISTS idx_activities_lead ON activities(lead_id, created_at DESC);");
+      // KI-Nutzung: pro Anfrage Tokens + errechnete Kosten (für die Kostenauswertung).
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS ai_usage (
+          id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+          model         TEXT        NOT NULL DEFAULT '',
+          kind          TEXT        NOT NULL DEFAULT '',
+          input_tokens       INTEGER NOT NULL DEFAULT 0,
+          output_tokens      INTEGER NOT NULL DEFAULT 0,
+          cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+          web_searches       INTEGER NOT NULL DEFAULT 0,
+          cost_usd      NUMERIC     NOT NULL DEFAULT 0
+        );
+      `);
+      await pool.query("ALTER TABLE ai_usage ADD COLUMN IF NOT EXISTS web_searches INTEGER NOT NULL DEFAULT 0;");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage(created_at);");
       // Aufgaben-Funktion wurde entfernt: Alttabelle und zugehörige
       // System-Verlaufseinträge idempotent bereinigen.
       await pool.query("DROP TABLE IF EXISTS tasks;");
@@ -321,23 +338,14 @@ async function getReport(statuses, probabilities = {}) {
     value: (funnelMap[s] && funnelMap[s].value) || 0,
   }));
 
-  // Gewonnener Umsatz je Monat (Status gewonnen; updated_at als Abschlussdatum).
+  // Gewonnene Leads je Monat (Anzahl; updated_at als Abschlussdatum).
   const wonRes = await pool.query(
-    `SELECT to_char(date_trunc('month', updated_at), 'YYYY-MM') AS month, COALESCE(SUM(value),0)::float AS value
+    `SELECT to_char(date_trunc('month', updated_at), 'YYYY-MM') AS month, COUNT(*)::int AS count
      FROM leads
      WHERE status = 'gewonnen' AND updated_at >= date_trunc('month', now()) - interval '11 months'
      GROUP BY 1 ORDER BY 1`
   );
-  const wonByMonth = fillMonths(wonRes.rows, "value");
-
-  // Vertriebsaktivität je Monat: Anzahl Touchpoints (letzte 12 Monate, inkl. Lücken).
-  const activityRes = await pool.query(
-    `SELECT to_char(date_trunc('month', created_at), 'YYYY-MM') AS month, COUNT(*)::int AS count
-     FROM activities
-     WHERE created_at >= date_trunc('month', now()) - interval '11 months'
-     GROUP BY 1 ORDER BY 1`
-  );
-  const activityByMonth = fillMonths(activityRes.rows, "count");
+  const wonLeadsByMonth = fillMonths(wonRes.rows, "count");
 
   // Durchschnittlicher Vertriebszyklus in Tagen: Anlage → Abschluss (gewonnen).
   // Näherung über updated_at als Abschlussdatum.
@@ -352,7 +360,41 @@ async function getReport(statuses, probabilities = {}) {
     ? Math.round(stats.wonValue / stats.byStatus["gewonnen"])
     : 0;
 
-  return { stats, funnel, wonByMonth, activityByMonth, avgWon, avgCycleDays };
+  // KI-Kosten je Tag (letzte 14 Tage, inkl. Lücken) – je Tag mit Modell-
+  // Aufteilung und Anzahl recherchierter Leads für den Hover-Tooltip.
+  const costRes = await pool.query(
+    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, model,
+            COALESCE(SUM(cost_usd),0)::float AS cost
+     FROM ai_usage
+     WHERE created_at >= date_trunc('day', now()) - interval '13 days'
+     GROUP BY 1, 2`
+  );
+  // Recherchierte Leads je Tag (angelegt + aktualisiert über die Recherche).
+  const researchRes = await pool.query(
+    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS n
+     FROM activities
+     WHERE type = 'system'
+       AND title IN ('Per Recherche angelegt', 'Recherche aktualisiert')
+       AND created_at >= date_trunc('day', now()) - interval '13 days'
+     GROUP BY 1`
+  );
+  const byDay = {};
+  for (const r of costRes.rows) {
+    const e = (byDay[r.day] = byDay[r.day] || { cost: 0, models: {} });
+    const c = Number(r.cost) || 0;
+    e.cost += c;
+    if (r.model) e.models[r.model] = (e.models[r.model] || 0) + c;
+  }
+  const researchedByDay = {};
+  for (const r of researchRes.rows) researchedByDay[r.day] = Number(r.n) || 0;
+  const costByDay = listDays(14).map((day) => ({
+    day,
+    value: byDay[day] ? byDay[day].cost : 0,
+    models: byDay[day] ? byDay[day].models : {},
+    researched: researchedByDay[day] || 0,
+  }));
+
+  return { stats, funnel, wonLeadsByMonth, avgWon, avgCycleDays, costByDay };
 }
 
 // Füllt fehlende Monate der letzten 12 Monate mit 0 auf.
@@ -367,6 +409,32 @@ function fillMonths(rows, key) {
     out.push({ month: m, value: map[m] || 0 });
   }
   return out;
+}
+
+// Liefert die letzten N Kalendertage als 'YYYY-MM-DD' (ältester zuerst).
+function listDays(days = 14) {
+  const out = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
+    out.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`);
+  }
+  return out;
+}
+
+// Schreibt einen KI-Nutzungs-Datensatz (Tokens + errechnete Kosten).
+async function recordUsage(u) {
+  await pool.query(
+    `INSERT INTO ai_usage (model, kind, input_tokens, output_tokens, cache_write_tokens, cache_read_tokens, web_searches, cost_usd)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      u.model || "", u.kind || "",
+      Math.round(u.inputTokens || 0), Math.round(u.outputTokens || 0),
+      Math.round(u.cacheWriteTokens || 0), Math.round(u.cacheReadTokens || 0),
+      Math.round(u.webSearches || 0),
+      Number(u.costUsd) || 0,
+    ]
+  );
 }
 
 module.exports = {
@@ -384,6 +452,7 @@ module.exports = {
   setSetting,
   getStats,
   getWidgetStats,
+  recordUsage,
   listActivities,
   createActivity,
   deleteActivity,

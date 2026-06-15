@@ -206,7 +206,7 @@ function setRollingCache(messages) {
 // Phase 1: agentische Web-Recherche → Markdown-Dossier.
 // Server-Tools laufen in einer serverseitigen Schleife; bei Erreichen des
 // Iterationslimits liefert die API stop_reason "pause_turn" und wir setzen fort.
-async function runResearch(anthropic, input, model, onProgress, signal) {
+async function runResearch(anthropic, input, model, onProgress, signal, onUsage = () => {}) {
   const messages = [
     {
       role: "user",
@@ -262,6 +262,7 @@ async function runResearch(anthropic, input, model, onProgress, signal) {
     });
 
     const msg = await stream.finalMessage();
+    try { onUsage({ model, kind: "research", usage: msg.usage }); } catch {}
 
     if (msg.stop_reason === "pause_turn") {
       // Server hat das interne Tool-Limit erreicht – Assistant-Turn anhängen
@@ -338,7 +339,7 @@ function readExtractionJson(msg, label) {
 }
 
 // Versuch via Structured Outputs (json_schema erzwingt valides JSON).
-async function extractStructured(anthropic, input, dossier, model, signal) {
+async function extractStructured(anthropic, input, dossier, model, signal, onUsage = () => {}) {
   const msg = await anthropic.messages.create({
     model,
     max_tokens: 16000,
@@ -346,12 +347,13 @@ async function extractStructured(anthropic, input, dossier, model, signal) {
     messages: [{ role: "user", content: `Input: ${input}\n\nDossier:\n\n${dossier}` }],
     output_config: { format: { type: "json_schema", schema: RESEARCH_SCHEMA } },
   }, { signal });
+  try { onUsage({ model, kind: "research-extract", usage: msg.usage }); } catch {}
   return readExtractionJson(msg, "Strukturierte Extraktion");
 }
 
 // Fallback ohne Structured Outputs: explizite JSON-Anweisung + defensives Parsen.
 // Greift, falls die json_schema-Ausgabe in der Umgebung nicht greift.
-async function extractPlain(anthropic, input, dossier, model, signal) {
+async function extractPlain(anthropic, input, dossier, model, signal, onUsage = () => {}) {
   const msg = await anthropic.messages.create({
     model,
     max_tokens: 16000,
@@ -362,16 +364,17 @@ async function extractPlain(anthropic, input, dossier, model, signal) {
       JSON.stringify(RESEARCH_SCHEMA),
     messages: [{ role: "user", content: `Input: ${input}\n\nDossier:\n\n${dossier}` }],
   }, { signal });
+  try { onUsage({ model, kind: "research-extract", usage: msg.usage }); } catch {}
   return readExtractionJson(msg, "JSON-Extraktion");
 }
 
 // Extraktion mit Wiederholungen: zweimal strukturiert, dann der Klartext-Fallback.
 // Schlägt erst nach allen Versuchen fehl – verhindert ein still leeres Dossier.
-async function extractFields(anthropic, input, dossier, model, signal) {
+async function extractFields(anthropic, input, dossier, model, signal, onUsage = () => {}) {
   const attempts = [
-    () => extractStructured(anthropic, input, dossier, model, signal),
-    () => extractStructured(anthropic, input, dossier, model, signal),
-    () => extractPlain(anthropic, input, dossier, model, signal),
+    () => extractStructured(anthropic, input, dossier, model, signal, onUsage),
+    () => extractStructured(anthropic, input, dossier, model, signal, onUsage),
+    () => extractPlain(anthropic, input, dossier, model, signal, onUsage),
   ];
   let lastErr;
   for (const attempt of attempts) {
@@ -389,12 +392,12 @@ async function extractFields(anthropic, input, dossier, model, signal) {
 }
 
 // Öffentliche API: vollständige Recherche → strukturiertes Objekt inkl. Markdown.
-async function researchCompany(anthropic, input, model = DEFAULT_MODEL, onProgress = () => {}, signal) {
+async function researchCompany(anthropic, input, model = DEFAULT_MODEL, onProgress = () => {}, signal, onUsage = () => {}) {
   onProgress(`Starte Recherche zu „${input}“…`);
-  const dossier = await runResearch(anthropic, input, model, onProgress, signal);
+  const dossier = await runResearch(anthropic, input, model, onProgress, signal, onUsage);
   onProgress("📝 Dossier erstellt – extrahiere strukturierte Felder…");
   // Extraktion bewusst auf dem günstigen Modell (mechanische Aufgabe).
-  const fields = await extractFields(anthropic, input, dossier, EXTRACT_MODEL, signal);
+  const fields = await extractFields(anthropic, input, dossier, EXTRACT_MODEL, signal, onUsage);
   onProgress("✅ Recherche abgeschlossen.");
   return {
     ...fields,

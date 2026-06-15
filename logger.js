@@ -79,10 +79,14 @@ const logger = makeLogger();
 function actorFromRequest(req) {
   if (cfAccess.isEnabled()) return "";
   const h = req.headers || {};
+  // Bevorzugt den (sprechenden) Benutzernamen des Auth-Proxys (z. B. Zitadel
+  // preferred_username) und fällt sonst auf die E-Mail-Header zurück.
   const v =
+    h["x-forwarded-preferred-username"] ||
+    h["x-auth-request-preferred-username"] ||
+    h["cf-access-authenticated-user-name"] ||
     h["cf-access-authenticated-user-email"] ||
     h["x-forwarded-email"] ||
-    h["x-forwarded-preferred-username"] ||
     h["x-forwarded-user"] ||
     h["x-auth-request-email"] ||
     h["x-auth-request-user"] ||
