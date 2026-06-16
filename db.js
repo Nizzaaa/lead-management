@@ -122,6 +122,33 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
       `);
       await pool.query("ALTER TABLE ai_usage ADD COLUMN IF NOT EXISTS web_searches INTEGER NOT NULL DEFAULT 0;");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage(created_at);");
+      // Prospects: persistente Liste möglicher Leads aus der Discovery, gegliedert
+      // nach Branche/Größe/Potenzial. status 'offen' (Arbeitsliste) oder
+      // 'abgelehnt' (verworfen, bleibt für die Dedup erhalten). domain ist die
+      // normalisierte Web-Domain für den Dublettenabgleich.
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS prospects (
+          id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+          name          TEXT        NOT NULL DEFAULT '',
+          website       TEXT        NOT NULL DEFAULT '',
+          domain        TEXT        NOT NULL DEFAULT '',
+          ort           TEXT        NOT NULL DEFAULT '',
+          branche       TEXT        NOT NULL DEFAULT '',
+          groesse       TEXT        NOT NULL DEFAULT '',
+          potenzial     TEXT        NOT NULL DEFAULT 'C',
+          potenzial_grund TEXT      NOT NULL DEFAULT '',
+          begruendung   TEXT        NOT NULL DEFAULT '',
+          quelle        TEXT        NOT NULL DEFAULT '',
+          status        TEXT        NOT NULL DEFAULT 'offen',
+          kriterien     JSONB,
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_prospects_branche ON prospects(branche);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_prospects_potenzial ON prospects(potenzial);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_prospects_status ON prospects(status);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_prospects_domain ON prospects(domain);");
       // Aufgaben-Funktion wurde entfernt: Alttabelle und zugehörige
       // System-Verlaufseinträge idempotent bereinigen.
       await pool.query("DROP TABLE IF EXISTS tasks;");
@@ -339,6 +366,120 @@ async function deleteActivity(id) {
   return rowCount > 0;
 }
 
+// --- Prospects (Discovery-Liste) -------------------------------------------
+// Normalisiert eine URL/Domain für den Dublettenabgleich
+// ("https://www.Foo.de/x" → "foo.de"). Ohne Punkt (kein Domainname) → leer.
+function normalizeDomain(s) {
+  if (!s) return "";
+  const v = String(s).toLowerCase().trim()
+    .replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
+  return v.includes(".") ? v : "";
+}
+
+function rowToProspect(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    website: row.website,
+    domain: row.domain,
+    ort: row.ort,
+    branche: row.branche,
+    groesse: row.groesse,
+    potenzial: row.potenzial,
+    potenzialGrund: row.potenzial_grund,
+    begruendung: row.begruendung,
+    quelle: row.quelle,
+    status: row.status,
+    kriterien: row.kriterien || null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+  };
+}
+
+async function listProspects() {
+  const { rows } = await pool.query("SELECT * FROM prospects ORDER BY created_at DESC");
+  return rows.map(rowToProspect);
+}
+
+async function getProspect(id) {
+  const { rows } = await pool.query("SELECT * FROM prospects WHERE id = $1", [id]);
+  return rows[0] ? rowToProspect(rows[0]) : null;
+}
+
+// Existiert die Firma bereits – als Prospect (egal welcher Status, also auch
+// 'abgelehnt') ODER als Lead? Abgleich case-insensitiv über Name/Firma und
+// (falls vorhanden) die normalisierte Domain.
+async function prospectExists({ name = "", domain = "" } = {}) {
+  const n = (name || "").trim();
+  const d = (domain || "").trim();
+  if (!n && !d) return false;
+  const pr = await pool.query(
+    `SELECT 1 FROM prospects
+      WHERE (NULLIF($1,'') IS NOT NULL AND lower(name) = lower($1))
+         OR (NULLIF($2,'') IS NOT NULL AND domain = $2)
+      LIMIT 1`,
+    [n, d]
+  );
+  if (pr.rowCount) return true;
+  const ld = await pool.query(
+    `SELECT 1 FROM leads
+      WHERE (NULLIF($1,'') IS NOT NULL AND lower(company) = lower($1))
+         OR (NULLIF($2,'') IS NOT NULL AND (
+              lower(source) LIKE '%' || $2 || '%'
+              OR lower(COALESCE(research->>'input','')) LIKE '%' || $2 || '%'))
+      LIMIT 1`,
+    [n, d]
+  );
+  return ld.rowCount > 0;
+}
+
+// Legt einen Prospect an – aber nur, wenn er nicht bereits existiert (Dedup
+// gegen Prospects inkl. 'abgelehnt' UND Leads). Liefert den Prospect oder
+// null (= Dublette, übersprungen).
+async function createProspect(data) {
+  const domain = normalizeDomain(data.website || data.domain);
+  if (await prospectExists({ name: data.name, domain })) return null;
+  const { rows } = await pool.query(
+    `INSERT INTO prospects (name, website, domain, ort, branche, groesse, potenzial, potenzial_grund, begruendung, quelle, kriterien)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     RETURNING *`,
+    [data.name || "", data.website || "", domain, data.ort || "", data.branche || "",
+     data.groesse || "", data.potenzial || "C", data.potenzialGrund || "",
+     data.begruendung || "", data.quelle || "", data.kriterien || null]
+  );
+  return rowToProspect(rows[0]);
+}
+
+async function setProspectStatus(id, status) {
+  const s = status === "abgelehnt" ? "abgelehnt" : "offen";
+  const { rows } = await pool.query(
+    "UPDATE prospects SET status = $2, updated_at = now() WHERE id = $1 RETURNING *",
+    [id, s]
+  );
+  return rows[0] ? rowToProspect(rows[0]) : null;
+}
+
+// Endgültige Löschung (DSGVO) – entfernt die Zeile vollständig.
+async function deleteProspect(id) {
+  const { rowCount } = await pool.query("DELETE FROM prospects WHERE id = $1", [id]);
+  return rowCount > 0;
+}
+
+// Kennzahlen fürs Reporting: offene/abgelehnte Anzahl + Potenzialverteilung (nur offen).
+async function prospectStats() {
+  const { rows } = await pool.query(
+    "SELECT status, potenzial, COUNT(*)::int AS n FROM prospects GROUP BY status, potenzial"
+  );
+  const byPotenzial = { A: 0, B: 0, C: 0, D: 0 };
+  let open = 0, rejected = 0;
+  for (const r of rows) {
+    if (r.status === "abgelehnt") { rejected += r.n; continue; }
+    open += r.n;
+    if (byPotenzial[r.potenzial] !== undefined) byPotenzial[r.potenzial] += r.n;
+  }
+  return { open, rejected, byPotenzial };
+}
+
 // --- Reporting -------------------------------------------------------------
 // Liefert die Daten für die Berichte-Seite in einem Rutsch.
 async function getReport(statuses, probabilities = {}) {
@@ -412,7 +553,15 @@ async function getReport(statuses, probabilities = {}) {
     researched: researchedByDay[day] || 0,
   }));
 
-  return { stats, funnel, wonLeadsByMonth, avgWon, avgCycleDays, costByDay };
+  // Prospects (Discovery-Pipeline) + Discovery-Kosten der letzten 14 Tage.
+  const prospects = await prospectStats();
+  const discRes = await pool.query(
+    `SELECT COALESCE(SUM(cost_usd),0)::float AS cost FROM ai_usage
+      WHERE kind LIKE 'discovery%' AND created_at >= date_trunc('day', now()) - interval '13 days'`
+  );
+  const discoveryCost14d = Number(discRes.rows[0].cost) || 0;
+
+  return { stats, funnel, wonLeadsByMonth, avgWon, avgCycleDays, costByDay, prospects, discoveryCost14d };
 }
 
 // Füllt fehlende Monate der letzten 12 Monate mit 0 auf.
@@ -474,5 +623,11 @@ module.exports = {
   listActivities,
   createActivity,
   deleteActivity,
+  listProspects,
+  getProspect,
+  createProspect,
+  setProspectStatus,
+  deleteProspect,
+  prospectStats,
   getReport,
 };
