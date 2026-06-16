@@ -2770,7 +2770,7 @@ function discoveryFormHtml() {
   return `<section class="card discovery-form">
     <h3>Neue Leads finden</h3>
     <p class="d-muted">Kriterien angeben – die KI sucht passende, reale Unternehmen. Danach wählst du aus, welche tatsächlich recherchiert werden (jeweils als Hintergrund-Job).</p>
-    <form id="discoveryForm">
+    <form id="discoveryForm" class="form">
       <div class="form-row">
         <label>Branche<input type="text" id="dc_branche" value="${esc(c.branche || "")}" placeholder="z. B. Steuerberatung, SHK, Autohaus" /></label>
         <label>Region / Ort<input type="text" id="dc_region" value="${esc(c.region || "")}" placeholder="z. B. Berlin, Raum München, NRW" /></label>

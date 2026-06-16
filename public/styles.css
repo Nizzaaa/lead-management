@@ -1067,6 +1067,9 @@ a { color: inherit; }
 .ns-due.today { color: var(--amber); }
 
 /* ===== Discovery ===== */
+/* Das Formular liegt bereits in einer .card – daher keine doppelte Polsterung. */
+.discovery-form .form { padding: 0; }
+.discovery-form h3 { margin-top: 0; }
 .discovery-form .form-actions { margin-top: 8px; }
 .discovery-results { margin-top: 16px; }
 .disc-results-head {
