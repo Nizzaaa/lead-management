@@ -439,13 +439,15 @@ async function prospectExists({ name = "", domain = "" } = {}) {
 async function createProspect(data) {
   const domain = normalizeDomain(data.website || data.domain);
   if (await prospectExists({ name: data.name, domain })) return null;
+  // Status nur für den Import relevant; Discovery übergibt keinen → 'offen'.
+  const status = data.status === "abgelehnt" ? "abgelehnt" : "offen";
   const { rows } = await pool.query(
-    `INSERT INTO prospects (name, website, domain, ort, branche, groesse, potenzial, potenzial_grund, begruendung, quelle, kriterien)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `INSERT INTO prospects (name, website, domain, ort, branche, groesse, potenzial, potenzial_grund, begruendung, quelle, status, kriterien)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING *`,
     [data.name || "", data.website || "", domain, data.ort || "", data.branche || "",
      data.groesse || "", data.potenzial || "C", data.potenzialGrund || "",
-     data.begruendung || "", data.quelle || "", data.kriterien || null]
+     data.begruendung || "", data.quelle || "", status, data.kriterien || null]
   );
   return rowToProspect(rows[0]);
 }

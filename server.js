@@ -6,7 +6,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const db = require("./db");
 const { researchCompany, discoverCompanies } = require("./research");
-const { leadsToCsv, prospectsToCsv, parseCsv, csvRowsToLeads, parseNumber, leadsToXlsxXml } = require("./exporters");
+const { leadsToCsv, prospectsToCsv, parseCsv, csvRowsToLeads, csvRowsToProspects, parseNumber, leadsToXlsxXml } = require("./exporters");
 const { logger, httpLogger } = require("./logger");
 const cfAccess = require("./cfAccess");
 
@@ -191,6 +191,30 @@ function sanitizeLead(body = {}) {
     nextStep: clean(body.nextStep, 500),
     nextStepAt,
     tags,
+  };
+}
+
+// Wie sanitizeLead, aber für Prospects (Discovery-Liste). Begrenzt Längen,
+// validiert Potenzial (A–D) und Status (offen/abgelehnt) und parst die
+// Kriterien-Spalte (JSON) zurück in ein Objekt.
+function sanitizeProspect(body = {}) {
+  const clean = (v, max = 500) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  let potenzial = clean(body.potenzial, 2).toUpperCase();
+  if (!["A", "B", "C", "D"].includes(potenzial)) potenzial = "C";
+  const status = clean(body.status).toLowerCase() === "abgelehnt" ? "abgelehnt" : "offen";
+  return {
+    name: clean(body.name, 300),
+    website: clean(body.website, 500),
+    domain: clean(body.domain, 300),
+    ort: clean(body.ort, 200),
+    branche: clean(body.branche, 200),
+    groesse: clean(body.groesse, 100),
+    potenzial,
+    potenzialGrund: clean(body.potenzialGrund, 500),
+    begruendung: clean(body.begruendung, 2000),
+    quelle: clean(body.quelle, 500),
+    status,
+    kriterien: parseJsonObject(body.kriterienJson),
   };
 }
 
@@ -788,6 +812,40 @@ app.get("/api/prospects/export.csv", wrap(async (req, res) => {
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="prospects-${ymd()}.csv"`);
   res.send("﻿" + csv);
+}));
+
+// CSV-Import: legt aus einer hochgeladenen CSV neue Prospects an. Dubletten
+// (gegen vorhandene Prospects inkl. 'abgelehnt' UND Leads) werden übersprungen –
+// anders als beim Lead-Import gibt es keine Ergänzung bestehender Datensätze.
+app.post("/api/prospects/import", wrap(async (req, res) => {
+  const text = typeof req.body.csv === "string" ? req.body.csv : "";
+  if (!text.trim()) {
+    return res.status(400).json({ error: "Keine CSV-Daten erhalten." });
+  }
+  const { prospects: rows, recognized } = csvRowsToProspects(parseCsv(text));
+  if (!recognized.length) {
+    return res.status(400).json({
+      error: "Keine bekannten Spalten gefunden. Erwartet werden u. a. Name, Website, Ort, Branche, Größe, Potenzial, Status.",
+    });
+  }
+
+  let created = 0;
+  let skippedDuplicate = 0;
+  let skippedEmpty = 0;
+  const errors = [];
+
+  for (let idx = 0; idx < rows.length; idx++) {
+    try {
+      const data = sanitizeProspect(rows[idx]);
+      if (!data.name && !data.website && !data.domain) { skippedEmpty++; continue; }
+      const prospect = await db.createProspect(data);
+      if (prospect) created++; else skippedDuplicate++;
+    } catch (err) {
+      errors.push({ row: idx + 2, error: err.message }); // +2: Kopfzeile + 1-basiert
+    }
+  }
+
+  res.json({ created, skippedDuplicate, skippedEmpty, errors, recognized, total: rows.length });
 }));
 
 // Status setzen: verwerfen ('abgelehnt', bleibt für Dedup erhalten) oder

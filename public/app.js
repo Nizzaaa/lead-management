@@ -1268,6 +1268,7 @@ function bindEvents() {
   $("#exportXlsxBtn").addEventListener("click", () => downloadFile("/api/leads/export.xlsx"));
   $("#exportProspectsCsvBtn").addEventListener("click", () => downloadFile("/api/prospects/export.csv"));
   $("#importCsvBtn").addEventListener("click", importCsv);
+  $("#importProspectsCsvBtn").addEventListener("click", importProspectsCsv);
 
   $("#search").addEventListener("input", (e) => {
     searchTerm = e.target.value.toLowerCase().trim();
@@ -1885,6 +1886,40 @@ async function importCsv() {
     toast("Import: " + parts.join(" · "), res.created || res.enriched ? "success" : "");
     input.value = "";
     await refresh();
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+}
+
+// CSV-Import für Prospects: liest die gewählte Datei, schickt sie an den Server
+// und meldet das Ergebnis. Anschließend wird die Prospect-Liste aktualisiert.
+async function importProspectsCsv() {
+  const input = $("#importProspectsCsvInput");
+  const file = input.files && input.files[0];
+  if (!file) {
+    toast("Bitte zuerst eine CSV-Datei auswählen.", "error");
+    return;
+  }
+  const btn = $("#importProspectsCsvBtn");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Importiere…";
+  try {
+    const csv = await file.text();
+    const res = await api("/api/prospects/import", {
+      method: "POST",
+      body: JSON.stringify({ csv }),
+    });
+    const parts = [`${res.created} angelegt`];
+    if (res.skippedDuplicate) parts.push(`${res.skippedDuplicate} Dublette(n) übersprungen`);
+    if (res.skippedEmpty) parts.push(`${res.skippedEmpty} leer`);
+    if (res.errors && res.errors.length) parts.push(`${res.errors.length} fehlerhaft`);
+    toast("Prospect-Import: " + parts.join(" · "), res.created ? "success" : "");
+    input.value = "";
+    await loadProspects();
   } catch (err) {
     toast(err.message, "error");
   } finally {

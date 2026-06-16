@@ -165,7 +165,7 @@
         </label>
 
         <div class="settings-section">
-          <h3 class="field-head">📦 Daten-Import &amp; -Export<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Leads und Prospects als Datei sichern oder eine Lead-Liste importieren. Die CSV verwendet das Trennzeichen „;“ und öffnet sich direkt in Excel.<br><br>Erkannte Spalten beim Lead-Import (deutsch oder englisch): Name, Firma, E-Mail, Telefon, Quelle, Status, Wert, Notizen, Nächster Schritt, Wiedervorlage sowie „KI-Bewertung (JSON)“ und „Dossier (JSON)“ aus dem Export. Bei Dubletten (gleiche E-Mail oder Firma) wird kein zweiter Datensatz angelegt; stattdessen werden nur fehlende Felder des bestehenden Leads ergänzt. Der Prospect-Export enthält die komplette Discovery-Liste (offen + abgelehnt).</span></span></h3>
+          <h3 class="field-head">📦 Daten-Import &amp; -Export<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Leads und Prospects als Datei sichern oder importieren. Die CSV verwendet das Trennzeichen „;“ und öffnet sich direkt in Excel.<br><br>Erkannte Spalten beim Lead-Import (deutsch oder englisch): Name, Firma, E-Mail, Telefon, Quelle, Status, Wert, Notizen, Nächster Schritt, Wiedervorlage sowie „KI-Bewertung (JSON)“ und „Dossier (JSON)“ aus dem Export. Bei Lead-Dubletten (gleiche E-Mail oder Firma) wird kein zweiter Datensatz angelegt; stattdessen werden nur fehlende Felder des bestehenden Leads ergänzt.<br><br>Prospect-Import erkennt u. a.: Name, Website, Ort, Branche, Größe, Potenzial, Begründung, Quelle, Status, „Kriterien (JSON)“. Dubletten (gegen vorhandene Prospects und Leads) werden übersprungen. Der Prospect-Export enthält die komplette Discovery-Liste (offen + abgelehnt).</span></span></h3>
           <div class="io-group">
             <span class="io-group-label">Leads</span>
             <div class="io-row">
@@ -183,6 +183,12 @@
             <span class="io-group-label">Prospects</span>
             <div class="io-row">
               <button type="button" class="btn" id="exportProspectsCsvBtn">⬇️ CSV exportieren</button>
+            </div>
+            <label class="io-import">CSV importieren
+              <input type="file" id="importProspectsCsvInput" accept=".csv,text/csv" />
+            </label>
+            <div class="io-row">
+              <button type="button" class="btn btn-primary" id="importProspectsCsvBtn">⬆️ Importieren</button>
             </div>
           </div>
         </div>
@@ -298,6 +304,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=32"></script>
+  <script src="app.js?v=33"></script>
 </body>
 </html>

@@ -76,6 +76,27 @@ const IMPORT_MAP = {
   "dossier (json)": "researchJson", "dossier": "researchJson", "research": "researchJson",
 };
 
+// Import-Überschriften für Prospects (klein geschrieben) → internes Feld.
+// "Erstellt"/"Aktualisiert" werden bewusst nicht übernommen – die Datenbank
+// setzt diese Zeitstempel selbst. "Kriterien (JSON)" kommt als JSON-String an
+// und wird serverseitig zurück in ein Objekt geparst.
+const PROSPECT_IMPORT_MAP = {
+  "name": "name",
+  "website": "website", "webseite": "website", "url": "website",
+  "domain": "domain",
+  "ort": "ort", "stadt": "ort", "city": "ort",
+  "branche": "branche", "industry": "branche",
+  "größe": "groesse", "groesse": "groesse", "grösse": "groesse",
+  "unternehmensgröße": "groesse", "size": "groesse",
+  "potenzial": "potenzial", "potential": "potenzial",
+  "potenzial-grund": "potenzialGrund", "potenzial grund": "potenzialGrund",
+  "potenzialgrund": "potenzialGrund",
+  "begründung": "begruendung", "begruendung": "begruendung", "reason": "begruendung",
+  "quelle": "quelle", "source": "quelle",
+  "status": "status",
+  "kriterien (json)": "kriterienJson", "kriterien": "kriterienJson", "criteria": "kriterienJson",
+};
+
 // --- CSV -------------------------------------------------------------------
 
 // Schützt vor CSV-Formel-Injection (Excel/LibreOffice werten Zellen, die mit
@@ -162,16 +183,16 @@ function parseCsv(text) {
   return rows;
 }
 
-// Wandelt geparste CSV-Zeilen in Lead-Rohobjekte um (nur erkannte Spalten).
-// Leere Zeilen werden übersprungen. Liefert { leads, recognized } – recognized
-// sind die zugeordneten Überschriften (für eine sprechende Rückmeldung).
-function csvRowsToLeads(rows) {
-  if (!rows.length) return { leads: [], recognized: [] };
+// Wandelt geparste CSV-Zeilen anhand einer Spalten-Map (Überschrift→Feld) in
+// Rohobjekte um (nur erkannte Spalten). Leere Zeilen werden übersprungen.
+// Liefert { items, recognized } – recognized sind die zugeordneten Überschriften.
+function csvRowsToObjects(rows, map) {
+  if (!rows.length) return { items: [], recognized: [] };
   const header = rows[0].map((h) => String(h || "").trim().toLowerCase());
-  const fields = header.map((h) => IMPORT_MAP[h] || null);
+  const fields = header.map((h) => map[h] || null);
   const recognized = fields.filter(Boolean);
 
-  const leads = [];
+  const items = [];
   for (let r = 1; r < rows.length; r++) {
     const cells = rows[r];
     if (!cells || cells.every((c) => String(c == null ? "" : c).trim() === "")) continue;
@@ -179,9 +200,22 @@ function csvRowsToLeads(rows) {
     fields.forEach((field, c) => {
       if (field) obj[field] = cells[c] != null ? String(cells[c]).trim() : "";
     });
-    leads.push(obj);
+    items.push(obj);
   }
-  return { leads, recognized };
+  return { items, recognized };
+}
+
+// Lead-Rohobjekte aus CSV-Zeilen (recognized = erkannte Überschriften für eine
+// sprechende Rückmeldung).
+function csvRowsToLeads(rows) {
+  const { items, recognized } = csvRowsToObjects(rows, IMPORT_MAP);
+  return { leads: items, recognized };
+}
+
+// Prospect-Rohobjekte aus CSV-Zeilen.
+function csvRowsToProspects(rows) {
+  const { items, recognized } = csvRowsToObjects(rows, PROSPECT_IMPORT_MAP);
+  return { prospects: items, recognized };
 }
 
 // Normalisiert einen Wert-/Zahlenstring aus fremden Tabellen ("5.000 €",
@@ -259,10 +293,12 @@ function leadsToXlsxXml(leads) {
 module.exports = {
   LEAD_COLUMNS,
   PROSPECT_COLUMNS,
+  PROSPECT_IMPORT_MAP,
   leadsToCsv,
   prospectsToCsv,
   parseCsv,
   csvRowsToLeads,
+  csvRowsToProspects,
   parseNumber,
   leadsToXlsxXml,
 };
