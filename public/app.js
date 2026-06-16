@@ -7,6 +7,11 @@ let aiEnabled = false;
 let activeFilter = "alle";
 let searchTerm = "";
 let dueOnly = false; // Filter: nur fällige/überfällige Wiedervorlagen
+let staleOnly = false; // Filter: nur "kalte" Leads (lange keine Aktivität)
+let tagFilter = ""; // aktiver Tag-Filter ("" = alle)
+let sortBy = localStorage.getItem("leadpilot_sort") || "created_desc";
+let selectMode = false; // Mehrfachauswahl (Bulk) aktiv?
+const selectedIds = new Set(); // ausgewählte Lead-IDs (Bulk)
 let models = [];
 let currentModel = "";
 let stageProbabilities = {};
@@ -145,6 +150,8 @@ async function init() {
     renderStatusFilters();
     renderViewToggle();
     populateStatusSelect();
+    const sb = $("#sortBy");
+    if (sb) sb.value = sortBy;
     await refresh();
   } catch (err) {
     toast(err.message, "error");
@@ -249,8 +256,8 @@ function populateStatusSelect() {
     .join("");
 }
 
-// --- Routing (Liste ⇄ Detail ⇄ Berichte) -----------------------------------
-const VIEWS = ["listView", "detailView", "reportsView"];
+// --- Routing (Liste ⇄ Detail ⇄ Heute ⇄ Berichte) ---------------------------
+const VIEWS = ["listView", "detailView", "agendaView", "reportsView"];
 function showOnly(viewId) {
   for (const v of VIEWS) $("#" + v).classList.toggle("hidden", v !== viewId);
 }
@@ -263,6 +270,7 @@ function setActiveNav(name) {
 function router() {
   const lead = location.hash.match(/^#\/lead\/(.+)$/);
   if (lead) return showDetail(decodeURIComponent(lead[1]));
+  if (location.hash === "#/heute") return showAgenda();
   if (location.hash === "#/reports") return showReports();
   showList();
 }
@@ -303,10 +311,15 @@ function showReports() {
 // --- Daten laden + rendern -------------------------------------------------
 async function refresh() {
   leads = await api("/api/leads");
+  renderTagFilter();
+  updateAgendaBadge();
   renderStats(await api("/api/stats"));
+  // Die jeweils aktive Ansicht neu zeichnen (Detail, Heute oder Liste/Board).
   if (detailId) {
     renderDetail();
     loadDetailExtras(detailId);
+  } else if (location.hash === "#/heute") {
+    renderAgenda();
   } else {
     renderLeads();
   }
@@ -323,17 +336,58 @@ function renderStats(stats) {
   $("#statConversion").textContent = stats.conversion + " %";
 }
 
-function filteredLeads() {
+// Tage ohne Aktivität, ab denen ein offener Lead als „kalt"/stillstehend gilt.
+const STALE_DAYS = 14;
+
+// Offener Lead ohne Aktivität (bzw. seit Anlage) seit mehr als STALE_DAYS Tagen.
+function isStale(l) {
+  if (l.status === "gewonnen" || l.status === "verloren") return false;
+  const iso = l.lastActivityAt || l.createdAt;
+  if (!iso) return false;
+  return Date.now() - new Date(iso).getTime() > STALE_DAYS * 86400000;
+}
+
+// Gemeinsame Filter (Suche, Fällig, Kalt, Tag) – ohne Status, da dieser je nach
+// Ansicht anders behandelt wird (Chips in der Liste, Spalten im Board).
+function matchesCommon(l) {
   const today = todayYMD();
-  return leads.filter((l) => {
+  if (dueOnly && !(l.nextStepAt && l.nextStepAt <= today)) return false;
+  if (staleOnly && !isStale(l)) return false;
+  if (tagFilter && !(Array.isArray(l.tags) && l.tags.includes(tagFilter))) return false;
+  if (searchTerm) {
+    const hay = `${l.name} ${l.company} ${l.email} ${l.source} ${(l.tags || []).join(" ")}`.toLowerCase();
+    if (!hay.includes(searchTerm)) return false;
+  }
+  return true;
+}
+
+// Sortiert eine Lead-Liste nach der aktuell gewählten Sortierung (sortBy).
+function sortLeads(arr) {
+  const out = arr.slice();
+  const t = (iso) => (iso ? new Date(iso).getTime() : 0);
+  const act = (l) => t(l.lastActivityAt) || t(l.createdAt);
+  const score = (l) => (l.ai && Number.isFinite(l.ai.score) ? l.ai.score : -1);
+  const ns = (l) => (l.nextStepAt ? new Date(l.nextStepAt).getTime() : Infinity);
+  const cmp = {
+    created_asc: (a, b) => t(a.createdAt) - t(b.createdAt),
+    created_desc: (a, b) => t(b.createdAt) - t(a.createdAt),
+    activity_desc: (a, b) => act(b) - act(a),
+    activity_asc: (a, b) => act(a) - act(b),
+    next_step_asc: (a, b) => ns(a) - ns(b),
+    score_desc: (a, b) => score(b) - score(a),
+    value_desc: (a, b) => (Number(b.value) || 0) - (Number(a.value) || 0),
+    company_asc: (a, b) =>
+      (a.company || a.name || "").localeCompare(b.company || b.name || "", "de", { sensitivity: "base" }),
+  };
+  out.sort(cmp[sortBy] || cmp.created_desc);
+  return out;
+}
+
+function filteredLeads() {
+  return sortLeads(leads.filter((l) => {
     if (activeFilter !== "alle" && l.status !== activeFilter) return false;
-    if (dueOnly && !(l.nextStepAt && l.nextStepAt <= today)) return false;
-    if (searchTerm) {
-      const hay = `${l.name} ${l.company} ${l.email} ${l.source}`.toLowerCase();
-      if (!hay.includes(searchTerm)) return false;
-    }
-    return true;
-  });
+    return matchesCommon(l);
+  }));
 }
 
 // Anzahl fälliger/überfälliger Wiedervorlagen (für den Toolbar-Chip).
@@ -349,18 +403,10 @@ function scoreColor(score) {
   return "var(--red)";
 }
 
-// Such- und Fällig-Filter anwenden (für das Kanban-Board, das nach Status
-// spaltet – der Status-Filter entfällt hier, da jede Spalte ein Status ist).
+// Gemeinsame Filter + Sortierung fürs Kanban-Board (der Status-Filter entfällt –
+// jede Spalte IST ein Status).
 function searchFiltered() {
-  const today = todayYMD();
-  return leads.filter((l) => {
-    if (dueOnly && !(l.nextStepAt && l.nextStepAt <= today)) return false;
-    if (searchTerm) {
-      const hay = `${l.name} ${l.company} ${l.email} ${l.source}`.toLowerCase();
-      if (!hay.includes(searchTerm)) return false;
-    }
-    return true;
-  });
+  return sortLeads(leads.filter(matchesCommon));
 }
 
 function renderViewToggle() {
@@ -394,7 +440,9 @@ function renderLeads() {
 }
 
 function renderList() {
-  $("#leadList").innerHTML = filteredLeads().map(leadCard).join("");
+  const list = $("#leadList");
+  list.classList.toggle("selecting", selectMode);
+  list.innerHTML = filteredLeads().map(leadCard).join("");
 }
 
 function renderKanban() {
@@ -490,10 +538,36 @@ function nextStepBadge(l) {
   return `<span class="next-step-badge ${info.state}" title="${esc(l.nextStep || "Wiedervorlage")}">⏰ ${esc(info.label)}</span>`;
 }
 
+// Tag-Chips (für Karten, Board, Detail).
+function tagsHtml(tags, cls = "lead-card-tags") {
+  if (!Array.isArray(tags) || !tags.length) return "";
+  return `<div class="${cls}">${tags.map((t) => `<span class="tag-chip">${esc(t)}</span>`).join("")}</div>`;
+}
+
+// Hinweis auf die letzte Aktivität ("vor 3 Tg."), bei Stillstand als "kalt"
+// hervorgehoben (💤). Basis: lastActivityAt bzw. Anlagedatum.
+function activityHint(l) {
+  const iso = l.lastActivityAt || l.createdAt;
+  if (!iso) return "";
+  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+  const stale = isStale(l);
+  const label = days <= 0 ? "heute aktiv" : `vor ${days} Tg.`;
+  return `<span class="act-age${stale ? " stale" : ""}" title="Letzte Aktivität: ${esc(fmtDateTime(iso))}">${stale ? "💤" : "🕓"} ${esc(label)}</span>`;
+}
+
+// Auswahl-Checkbox (nur im Mehrfachauswahl-Modus).
+function selectBoxHtml(l) {
+  if (!selectMode) return "";
+  return `<label class="lead-select" title="Auswählen">
+    <input type="checkbox" data-select="${l.id}" ${selectedIds.has(l.id) ? "checked" : ""} aria-label="Lead auswählen" />
+  </label>`;
+}
+
 // Kartenansicht: nur Firma, Ansprechpartner, Status, Branche, Wert, KI-Score.
 function leadCard(l) {
   const branche = l.research ? fieldVal(l.research.fields && l.research.fields.branche) : "";
-  return `<article class="lead-card" data-nav="${l.id}" tabindex="0" role="button" aria-label="Lead öffnen">
+  return `<article class="lead-card${selectedIds.has(l.id) ? " selected" : ""}" data-nav="${l.id}" tabindex="0" role="button" aria-label="Lead öffnen">
+    ${selectBoxHtml(l)}
     <div class="lead-card-head">
       <div class="lead-card-title">${esc(l.company) || esc(l.name) || "—"}</div>
       <span class="status-pill s-${l.status}">${l.status}</span>
@@ -501,8 +575,10 @@ function leadCard(l) {
     <div class="lead-card-sub">
       ${l.company && l.name ? `<span>👤 ${esc(l.name)}</span>` : ""}
       ${branche ? `<span>🏷️ ${esc(branche)}</span>` : ""}
+      ${activityHint(l)}
       ${!l.research ? `<span class="muted-note">keine Recherche</span>` : ""}
     </div>
+    ${tagsHtml(l.tags)}
     ${nextStepBadge(l) ? `<div class="lead-card-next">${nextStepBadge(l)}</div>` : ""}
     <div class="lead-card-foot">
       <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
@@ -518,6 +594,7 @@ function kanbanCard(l) {
       ${scoreBadge(l, "kanban-score")}
     </div>
     ${l.name && l.company ? `<div class="kanban-card-sub">${esc(l.name)}</div>` : ""}
+    ${tagsHtml(l.tags, "kanban-card-tags")}
     <div class="kanban-card-foot">
       <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
       ${nextStepBadge(l)}
@@ -691,6 +768,8 @@ function leadAboutHtml(l) {
     l.phone ? ["Telefon", esc(l.phone)] : null,
     ["Quelle", l.source ? esc(l.source) : "—"],
     ["Wert", esc(fmtEuro(l.value))],
+    Array.isArray(l.tags) && l.tags.length ? ["Tags", tagsHtml(l.tags, "about-tags")] : null,
+    l.lastActivityAt ? ["Letzte Aktivität", esc(fmtDateTime(l.lastActivityAt))] : null,
     ["Angelegt", esc(dt(l.createdAt))],
     ["Aktualisiert", esc(dt(l.updatedAt))],
   ].filter(Boolean);
@@ -975,6 +1054,7 @@ function detailEditHtml(l) {
           ${input("ed_next_step", "Nächster Schritt", l.nextStep || "")}
           ${input("ed_next_step_at", "Wiedervorlage am", l.nextStepAt || "", "date")}
         </div>
+        ${input("ed_tags", "Tags (mit Komma getrennt)", Array.isArray(l.tags) ? l.tags.join(", ") : "")}
         ${textarea("ed_notes", "Notizen", l.notes)}
       </div>
       ${researchEdit}
@@ -995,6 +1075,7 @@ function collectStammdaten() {
     status: g("ed_status"),
     nextStep: g("ed_next_step"),
     nextStepAt: g("ed_next_step_at"),
+    tags: parseTags(g("ed_tags")),
     notes: g("ed_notes"),
   };
 }
@@ -1184,6 +1265,54 @@ function bindEvents() {
     renderLeads();
   });
 
+  // Sortierung
+  $("#sortBy").addEventListener("change", (e) => {
+    sortBy = e.target.value;
+    localStorage.setItem("leadpilot_sort", sortBy);
+    renderLeads();
+  });
+  // Tag-Filter
+  $("#tagFilter").addEventListener("change", (e) => { tagFilter = e.target.value; renderLeads(); });
+  // „Kalt"-Filter (Stillstand)
+  $("#staleFilter").addEventListener("click", () => {
+    staleOnly = !staleOnly;
+    $("#staleFilter").classList.toggle("active", staleOnly);
+    renderLeads();
+  });
+  // Mehrfachauswahl ein/aus
+  $("#selectToggle").addEventListener("click", () => setSelectMode(!selectMode));
+  // Auswahl-Checkboxen in der Liste
+  $("#leadList").addEventListener("change", (e) => {
+    const cb = e.target.closest("[data-select]");
+    if (cb) toggleSelect(cb.dataset.select, cb.checked);
+  });
+
+  // Globale Schnellsuche (Topbar)
+  const gsInput = $("#globalSearchInput");
+  if (gsInput) {
+    gsInput.addEventListener("input", (e) => renderGlobalResults(e.target.value));
+    gsInput.addEventListener("keydown", onGlobalSearchKey);
+    gsInput.addEventListener("focus", (e) => { if (e.target.value.trim()) renderGlobalResults(e.target.value); });
+  }
+  $("#globalSearchResults").addEventListener("click", (e) => {
+    const item = e.target.closest("[data-gs]");
+    if (item) gotoLead(item.dataset.gs);
+  });
+  // Klick außerhalb schließt die Trefferliste.
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#globalSearch")) hideGlobalResults();
+  });
+
+  // Heute/Agenda: öffnen, erledigen, verschieben/planen.
+  $("#agendaView").addEventListener("click", (e) => {
+    const done = e.target.closest("[data-agenda-done]");
+    if (done) { completeNextStep(done.dataset.agendaDone); return; }
+    const edit = e.target.closest("[data-agenda-edit]");
+    if (edit) { openNextStepModal(edit.dataset.agendaEdit); return; }
+    const open = e.target.closest("[data-nav]");
+    if (open) location.hash = "#/lead/" + encodeURIComponent(open.dataset.nav);
+  });
+
   $("#viewToggle").addEventListener("click", (e) => {
     const btn = e.target.closest("[data-view]");
     if (!btn) return;
@@ -1195,6 +1324,7 @@ function bindEvents() {
 
   // Klick auf eine Karte (Liste oder Board) öffnet die Detailseite.
   const onCardNav = (e) => {
+    if (e.target.closest(".lead-select")) return; // Auswahl-Checkbox: nicht navigieren
     const card = e.target.closest("[data-nav]");
     if (!card) return;
     if (dragMoved) return; // war ein Drag im Board, keine Navigation
@@ -1255,6 +1385,7 @@ function openLeadModal(id) {
     $("#f_status").value = l.status;
     $("#f_next_step").value = l.nextStep || "";
     $("#f_next_step_at").value = l.nextStepAt || "";
+    $("#f_tags").value = Array.isArray(l.tags) ? l.tags.join(", ") : "";
     $("#f_notes").value = l.notes;
   } else {
     $("#modalTitle").textContent = "Neuer Lead";
@@ -1282,6 +1413,7 @@ async function saveLead(e) {
     status: $("#f_status").value,
     nextStep: $("#f_next_step").value,
     nextStepAt: $("#f_next_step_at").value,
+    tags: parseTags($("#f_tags").value),
     notes: $("#f_notes").value,
   };
   try {
@@ -1359,9 +1491,7 @@ async function completeNextStep(id) {
       }),
     });
     toast("Wiedervorlage erledigt", "success");
-    await refresh();
-    renderDetail();
-    loadDetailExtras(id);
+    await refresh(); // view-aware: zeichnet Detail/Heute/Liste passend neu
   } catch (err) {
     toast(err.message, "error");
   }
@@ -2350,6 +2480,218 @@ async function renderReportsView() {
   `;
 
   wireCostChart(v);
+}
+
+// --- Tags-Helfer -----------------------------------------------------------
+// Komma-getrennte Eingabe → bereinigtes String-Array (Server dedupliziert/deckelt).
+function parseTags(str) {
+  return String(str || "").split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+// Befüllt den Tag-Filter im Toolbar mit allen vorkommenden Tags.
+function renderTagFilter() {
+  const sel = $("#tagFilter");
+  if (!sel) return;
+  const all = new Set();
+  for (const l of leads) for (const t of l.tags || []) all.add(t);
+  const sorted = [...all].sort((a, b) => a.localeCompare(b, "de", { sensitivity: "base" }));
+  if (!sorted.includes(tagFilter)) tagFilter = ""; // Tag verschwunden → Filter zurücksetzen
+  sel.innerHTML = `<option value="">Alle Tags</option>` +
+    sorted.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+  sel.value = tagFilter;
+}
+
+// --- Heute / Agenda --------------------------------------------------------
+function showAgenda() {
+  detailId = null;
+  detailEditing = false;
+  showOnly("agendaView");
+  setActiveNav("agenda");
+  renderAgenda();
+  window.scrollTo(0, 0);
+}
+
+// Zahl fälliger Wiedervorlagen im „Heute"-Navigationspunkt anzeigen.
+function updateAgendaBadge() {
+  const n = dueLeadCount();
+  const b = $("#agendaDue");
+  if (b) { b.textContent = n; b.classList.toggle("hidden", n === 0); }
+}
+
+function agendaItemHtml(l) {
+  const info = dueInfo(l.nextStepAt);
+  const due = info ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>` : "";
+  const hasPlan = !!(l.nextStep || l.nextStepAt);
+  const actions = hasPlan
+    ? `<button type="button" class="btn btn-sm" data-agenda-done="${l.id}">✓ Erledigt</button>
+       <button type="button" class="btn btn-sm" data-agenda-edit="${l.id}">Verschieben</button>`
+    : `<button type="button" class="btn btn-sm" data-agenda-edit="${l.id}">+ Planen</button>`;
+  return `<div class="agenda-item">
+    <button type="button" class="agenda-open" data-nav="${l.id}">
+      <span class="agenda-title">${esc(l.company || l.name || "—")}</span>
+      <span class="status-pill s-${l.status}">${l.status}</span>
+      <span class="agenda-step">${esc(l.nextStep || "Kein nächster Schritt")} ${due} ${activityHint(l)}</span>
+    </button>
+    <div class="agenda-actions">${actions}</div>
+  </div>`;
+}
+
+function renderAgenda() {
+  const v = $("#agendaView");
+  const open = leads.filter((l) => l.status !== "gewonnen" && l.status !== "verloren");
+  const withStep = open
+    .filter((l) => l.nextStepAt)
+    .sort((a, b) => (a.nextStepAt < b.nextStepAt ? -1 : a.nextStepAt > b.nextStepAt ? 1 : 0));
+  const today = todayYMD();
+  const overdue = withStep.filter((l) => l.nextStepAt < today);
+  const todays = withStep.filter((l) => l.nextStepAt === today);
+  const upcoming = withStep.filter((l) => l.nextStepAt > today);
+  const noStep = open.filter((l) => !l.nextStepAt);
+
+  const section = (title, arr, cls = "") => arr.length
+    ? `<section class="card agenda-section ${cls}">
+         <h3>${esc(title)} <span class="agenda-n">${arr.length}</span></h3>
+         ${arr.map(agendaItemHtml).join("")}
+       </section>`
+    : "";
+
+  const planned = overdue.length || todays.length || upcoming.length
+    ? section("Überfällig", overdue, "overdue") + section("Heute", todays, "today") + section("Demnächst", upcoming)
+    : `<section class="card"><p class="d-muted">Keine geplanten Wiedervorlagen. 🎉</p></section>`;
+
+  v.innerHTML = `
+    <div class="view-head"><h2>📅 Heute</h2><p class="d-muted">Anstehende Wiedervorlagen &amp; nächste Schritte</p></div>
+    ${planned}
+    ${noStep.length ? `<section class="card agenda-section nostep">
+        <h3>Offen ohne Wiedervorlage <span class="agenda-n">${noStep.length}</span></h3>
+        <p class="d-muted">Diese offenen Leads haben keinen geplanten nächsten Schritt.</p>
+        ${noStep.slice(0, 25).map(agendaItemHtml).join("")}
+      </section>` : ""}
+  `;
+}
+
+// --- Mehrfachauswahl (Bulk) ------------------------------------------------
+function setSelectMode(on) {
+  selectMode = on;
+  const btn = $("#selectToggle");
+  if (btn) btn.classList.toggle("active", on);
+  if (!on) selectedIds.clear();
+  renderBulkBar();
+  renderLeads();
+}
+
+function toggleSelect(id, on) {
+  if (on) selectedIds.add(id); else selectedIds.delete(id);
+  const card = document.querySelector(`.lead-card[data-nav="${CSS.escape(id)}"]`);
+  if (card) card.classList.toggle("selected", on);
+  renderBulkBar();
+}
+
+function clearSelection() {
+  selectedIds.clear();
+  renderBulkBar();
+  renderLeads();
+}
+
+function renderBulkBar() {
+  const bar = $("#bulkBar");
+  if (!bar) return;
+  const n = selectedIds.size;
+  bar.classList.toggle("hidden", n === 0);
+  if (!n) { bar.innerHTML = ""; return; }
+  const statusOpts = statuses.map((s) => `<option value="${s}">${s}</option>`).join("");
+  bar.innerHTML = `
+    <span class="bulk-count">${n} ausgewählt</span>
+    <select id="bulkStatus" class="bulk-select"><option value="">Status setzen…</option>${statusOpts}</select>
+    <button class="btn btn-sm" id="bulkTagBtn">🏷️ Tag</button>
+    <button class="btn btn-sm btn-danger" id="bulkDeleteBtn">🗑️ Löschen</button>
+    <button class="btn btn-sm" id="bulkClearBtn">Aufheben</button>`;
+  $("#bulkStatus").onchange = (e) => { if (e.target.value) applyBulkStatus(e.target.value); };
+  $("#bulkTagBtn").onclick = applyBulkTag;
+  $("#bulkDeleteBtn").onclick = applyBulkDelete;
+  $("#bulkClearBtn").onclick = clearSelection;
+}
+
+// Führt eine Aktion sequenziell für alle ausgewählten Leads aus (nutzt die
+// bestehenden Endpunkte, damit Aktivitäten/Logik erhalten bleiben).
+async function bulkRun(label, fn) {
+  const ids = [...selectedIds];
+  let ok = 0;
+  for (const id of ids) {
+    try { await fn(id); ok++; } catch (err) { /* einzelne Fehler tolerieren */ }
+  }
+  toast(`${label}: ${ok}/${ids.length}`, ok ? "success" : "error");
+  selectedIds.clear();
+  await refresh();
+  renderBulkBar();
+}
+
+function applyBulkStatus(status) {
+  bulkRun(`Status → ${status}`, (id) =>
+    api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ status }) }));
+}
+
+function applyBulkTag() {
+  const tag = prompt("Tag für die ausgewählten Leads:");
+  if (tag === null) return;
+  const t = tag.trim();
+  if (!t) return;
+  bulkRun(`Tag „${t}"`, (id) => {
+    const l = getLead(id);
+    const tags = Array.isArray(l && l.tags) ? [...l.tags] : [];
+    if (!tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(t);
+    return api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ tags }) });
+  });
+}
+
+function applyBulkDelete() {
+  if (!confirm(`${selectedIds.size} Lead(s) endgültig löschen?`)) return;
+  bulkRun("Gelöscht", (id) => api(`/api/leads/${id}`, { method: "DELETE" }));
+}
+
+// --- Globale Schnellsuche (Topbar) -----------------------------------------
+function renderGlobalResults(raw) {
+  const q = (raw || "").toLowerCase().trim();
+  const box = $("#globalSearchResults");
+  if (!box) return;
+  if (!q) { hideGlobalResults(); return; }
+  const matches = leads
+    .filter((l) => `${l.name} ${l.company} ${l.email} ${l.source} ${(l.tags || []).join(" ")}`.toLowerCase().includes(q))
+    .slice(0, 8);
+  box.innerHTML = matches.length
+    ? matches.map((l, i) => `
+        <button type="button" class="gs-item${i === 0 ? " active" : ""}" data-gs="${l.id}" role="option">
+          <span class="gs-item-title">${esc(l.company || l.name || "—")}</span>
+          <span class="gs-item-sub">${esc([l.name && l.company ? l.name : "", l.status].filter(Boolean).join(" · "))}</span>
+        </button>`).join("")
+    : `<div class="gs-empty">Keine Treffer</div>`;
+  box.classList.remove("hidden");
+}
+
+function hideGlobalResults() {
+  const box = $("#globalSearchResults");
+  if (box) box.classList.add("hidden");
+}
+
+function gotoLead(id) {
+  hideGlobalResults();
+  const inp = $("#globalSearchInput");
+  if (inp) inp.value = "";
+  location.hash = "#/lead/" + encodeURIComponent(id);
+}
+
+function onGlobalSearchKey(e) {
+  const box = $("#globalSearchResults");
+  if (!box) return;
+  if (e.key === "Escape") { hideGlobalResults(); e.target.blur(); return; }
+  const items = [...box.querySelectorAll(".gs-item")];
+  if (!items.length) return;
+  let idx = items.findIndex((x) => x.classList.contains("active"));
+  if (e.key === "ArrowDown") { e.preventDefault(); idx = Math.min(items.length - 1, idx + 1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); idx = Math.max(0, idx - 1); }
+  else if (e.key === "Enter") { e.preventDefault(); const sel = items[idx] || items[0]; if (sel) gotoLead(sel.dataset.gs); return; }
+  else return;
+  items.forEach((x, i) => x.classList.toggle("active", i === idx));
 }
 
 // --- Toast -----------------------------------------------------------------

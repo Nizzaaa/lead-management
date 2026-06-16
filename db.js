@@ -39,6 +39,12 @@ function rowToLead(row) {
     nextStepAt: toYMD(row.next_step_at),
     ai: row.ai, // JSONB → bereits als Objekt/null geparst
     research: row.research, // JSONB → strukturierte Lead-Recherche (oder null)
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    // Zeitpunkt der jüngsten Aktivität (nur bei Abfragen mit LATERAL-Join
+    // gesetzt) – Basis für „letzte Aktivität" / Stillstand-Erkennung.
+    lastActivityAt: row.last_activity_at
+      ? (row.last_activity_at instanceof Date ? row.last_activity_at.toISOString() : row.last_activity_at)
+      : null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
   };
@@ -72,8 +78,10 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS research JSONB;");
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_step TEXT NOT NULL DEFAULT '';");
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_step_at DATE;");
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_next_step ON leads(next_step_at);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_tags ON leads USING GIN(tags);");
       // Schlüssel/Wert-Tabelle für App-Einstellungen (z. B. gewähltes KI-Modell).
       await pool.query(`
         CREATE TABLE IF NOT EXISTS app_settings (
@@ -131,23 +139,32 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
   }
 }
 
+// Jüngste Aktivität je Lead per LATERAL-Subquery mitliefern (für „letzte
+// Aktivität" / Stillstand). Ein gemeinsamer Ausdruck für Liste und Einzelabruf.
+const LEADS_WITH_ACTIVITY = `
+  SELECT l.*, la.last_activity_at
+    FROM leads l
+    LEFT JOIN LATERAL (
+      SELECT max(created_at) AS last_activity_at FROM activities WHERE lead_id = l.id
+    ) la ON true`;
+
 async function listLeads() {
-  const { rows } = await pool.query("SELECT * FROM leads ORDER BY created_at DESC");
+  const { rows } = await pool.query(`${LEADS_WITH_ACTIVITY} ORDER BY l.created_at DESC`);
   return rows.map(rowToLead);
 }
 
 async function getLead(id) {
-  const { rows } = await pool.query("SELECT * FROM leads WHERE id = $1", [id]);
+  const { rows } = await pool.query(`${LEADS_WITH_ACTIVITY} WHERE l.id = $1`, [id]);
   return rows[0] ? rowToLead(rows[0]) : null;
 }
 
 async function createLead(data, research = null) {
   const { rows } = await pool.query(
-    `INSERT INTO leads (id, name, company, email, phone, source, status, value, notes, next_step, next_step_at, research)
-     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `INSERT INTO leads (id, name, company, email, phone, source, status, value, notes, next_step, next_step_at, research, tags)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING *`,
     [data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes,
-     data.nextStep || "", data.nextStepAt || null, research]
+     data.nextStep || "", data.nextStepAt || null, research, Array.isArray(data.tags) ? data.tags : []]
   );
   return rowToLead(rows[0]);
 }
@@ -156,11 +173,12 @@ async function updateLead(id, data) {
   const { rows } = await pool.query(
     `UPDATE leads
      SET name = $2, company = $3, email = $4, phone = $5, source = $6,
-         status = $7, value = $8, notes = $9, next_step = $10, next_step_at = $11, updated_at = now()
+         status = $7, value = $8, notes = $9, next_step = $10, next_step_at = $11,
+         tags = COALESCE($12::text[], tags), updated_at = now()
      WHERE id = $1
      RETURNING *`,
     [id, data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes,
-     data.nextStep || "", data.nextStepAt || null]
+     data.nextStep || "", data.nextStepAt || null, Array.isArray(data.tags) ? data.tags : null]
   );
   return rows[0] ? rowToLead(rows[0]) : null;
 }

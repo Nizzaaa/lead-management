@@ -950,11 +950,127 @@ a { color: inherit; }
   .navlink { font-size: 0.82rem; padding: 5px 8px; }
 }
 
+/* ===== Globale Schnellsuche (Topbar) ===== */
+.global-search { position: relative; }
+.gs-input {
+  width: 200px; max-width: 38vw;
+  background: var(--glass-bg-subtle);
+  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  backdrop-filter: blur(12px) saturate(150%);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 8px 14px; color: var(--text); font-size: 13px;
+}
+.gs-input:focus { outline: none; border-color: var(--primary); }
+.gs-results {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0; min-width: 280px;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur-strong);
+  backdrop-filter: var(--glass-blur-strong);
+  border: 1px solid var(--glass-border); border-radius: 12px;
+  box-shadow: var(--glass-shadow-strong);
+  max-height: 360px; overflow-y: auto; z-index: 40; padding: 6px;
+}
+.gs-item {
+  display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left;
+  background: none; border: none; border-radius: 8px; padding: 8px 10px; cursor: pointer;
+}
+.gs-item:hover, .gs-item.active { background: rgba(29,219,111,0.14); }
+.gs-item-title { font-weight: 600; font-size: 13px; color: var(--text); }
+.gs-item-sub { font-size: 12px; color: var(--muted); text-transform: capitalize; }
+.gs-empty { padding: 10px; color: var(--muted); font-size: 13px; }
+
+.nav-badge {
+  display: inline-block; min-width: 18px; text-align: center;
+  background: var(--amber); color: #fff; font-size: 11px; font-weight: 700;
+  border-radius: 999px; padding: 1px 6px; margin-left: 2px;
+}
+
+/* ===== Sortier-/Tag-Auswahl im Toolbar ===== */
+.sort-select, .tag-filter {
+  background: var(--glass-bg-subtle);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  backdrop-filter: blur(10px) saturate(140%);
+  border: 1px solid var(--glass-border); color: var(--text);
+  border-radius: 10px; padding: 9px 12px; font-size: 13px; cursor: pointer;
+}
+.sort-select:focus, .tag-filter:focus { outline: none; border-color: var(--primary); }
+.tag-filter { border-radius: 999px; }
+
+/* ===== Tags ===== */
+.tag-chip {
+  display: inline-block; font-size: 11px; font-weight: 600;
+  background: rgba(10,122,59,0.10); color: var(--accent);
+  border: 1px solid rgba(10,122,59,0.22);
+  border-radius: 999px; padding: 2px 9px; line-height: 1.5;
+}
+.lead-card-tags, .kanban-card-tags, .about-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.kanban-card-tags { margin-top: 2px; }
+.about-tags { margin-top: 2px; }
+
+/* Aktivitäts-/Stillstand-Hinweis auf Karten */
+.act-age { font-size: 12px; color: var(--muted); }
+.act-age.stale { color: var(--amber); font-weight: 600; }
+
+/* ===== Mehrfachauswahl (Bulk) ===== */
+.lead-card { position: relative; }
+.lead-select {
+  position: absolute; top: 16px; left: 12px; z-index: 2;
+  display: inline-flex; cursor: pointer;
+}
+.lead-select input { width: 18px; height: 18px; cursor: pointer; accent-color: var(--primary); }
+/* Im Auswahlmodus den Kartenkopf einrücken, damit die Checkbox nicht den Titel überlappt. */
+.lead-grid.selecting .lead-card-head { padding-left: 26px; }
+.lead-card.selected { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(29,219,111,0.45), var(--glass-shadow); }
+
+.bulk-bar {
+  position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: var(--glass-blur-strong);
+  backdrop-filter: var(--glass-blur-strong);
+  border: 1px solid var(--glass-border); border-radius: 999px;
+  box-shadow: var(--glass-shadow-strong); padding: 10px 16px; z-index: 30;
+}
+.bulk-count { font-weight: 700; font-size: 13px; }
+.bulk-select {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px; font-size: 13px; cursor: pointer;
+}
+
+/* ===== Heute / Agenda ===== */
+.view-head { margin-bottom: 18px; }
+.view-head h2 { margin: 0 0 2px; font-size: 22px; letter-spacing: -0.4px; }
+.agenda-section { margin-bottom: 16px; }
+.agenda-section h3 { margin: 0 0 10px; font-size: 15px; display: flex; align-items: center; gap: 8px; }
+.agenda-section.overdue h3 { color: var(--red); }
+.agenda-section.today h3 { color: var(--amber); }
+.agenda-n {
+  font-size: 12px; font-weight: 700; color: var(--muted);
+  background: var(--surface-2); border-radius: 999px; padding: 1px 8px;
+}
+.agenda-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 4px; border-top: 1px solid var(--border);
+}
+.agenda-item:first-of-type { border-top: none; }
+.agenda-open {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: none; border: none; text-align: left; cursor: pointer; flex: 1; padding: 0;
+}
+.agenda-title { font-weight: 600; font-size: 14px; color: var(--text); }
+.agenda-step { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.agenda-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.ns-due { font-size: 12px; font-weight: 600; }
+.ns-due.overdue { color: var(--red); }
+.ns-due.today { color: var(--amber); }
+
 /* Fallback: near-opaque surfaces where backdrop-filter is unsupported */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .topbar, .modal, .toast, .job-chip { background: rgba(255,255,255,0.96); }
   .stat-card, .lead-card, .card, .detail-hero, .kanban-col { background: rgba(255,255,255,0.94); }
   .search, .chip, .btn { background: rgba(255,255,255,0.92); }
   .act-card, .ai-score-card, .kanban-card, .act-composer { background: rgba(255,255,255,0.96); }
+  .gs-results, .bulk-bar { background: rgba(255,255,255,0.97); }
   .modal-overlay { background: rgba(31,41,30,0.55); }
 }

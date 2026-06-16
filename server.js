@@ -166,6 +166,19 @@ function sanitizeLead(body = {}) {
   let nextStepAt = null;
   const ns = clean(body.nextStepAt);
   if (/^\d{4}-\d{2}-\d{2}$/.test(ns) && !Number.isNaN(new Date(ns).getTime())) nextStepAt = ns;
+  // Tags: kurze Labels, getrimmt, dedupliziert (case-insensitiv) und gedeckelt.
+  // undefined lassen, wenn nicht übergeben → updateLead behält die Bestands-Tags.
+  let tags;
+  if (Array.isArray(body.tags)) {
+    const seen = new Set();
+    tags = [];
+    for (const t of body.tags) {
+      const v = typeof t === "string" ? t.trim().slice(0, 40) : "";
+      const key = v.toLowerCase();
+      if (v && !seen.has(key)) { seen.add(key); tags.push(v); }
+      if (tags.length >= 30) break;
+    }
+  }
   return {
     name: clean(body.name, 300),
     company: clean(body.company, 300),
@@ -177,6 +190,7 @@ function sanitizeLead(body = {}) {
     notes: clean(body.notes, 5000),
     nextStep: clean(body.nextStep, 500),
     nextStepAt,
+    tags,
   };
 }
 

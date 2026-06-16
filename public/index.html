@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=24" />
+  <link rel="stylesheet" href="styles.css?v=25" />
   <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
@@ -18,7 +18,12 @@
       </div>
     </a>
     <div class="topbar-actions">
+      <div class="global-search" id="globalSearch">
+        <input type="search" id="globalSearchInput" class="gs-input" placeholder="🔍 Schnellsuche…" autocomplete="off" aria-label="Schnellsuche über alle Leads" />
+        <div id="globalSearchResults" class="gs-results hidden" role="listbox"></div>
+      </div>
       <a class="navlink" href="#/" data-nav-link="list">🗂 Leads</a>
+      <a class="navlink" href="#/heute" data-nav-link="agenda">📅 Heute <span id="agendaDue" class="nav-badge hidden">0</span></a>
       <a class="navlink" href="#/reports" data-nav-link="reports">📊 Berichte</a>
       <span id="aiBadge" class="badge badge-off" title="KI-Status">KI: …</span>
       <button id="settingsBtn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">⚙️</button>
@@ -41,6 +46,16 @@
     <section class="toolbar">
       <div class="toolbar-top">
         <input type="search" id="search" class="search" placeholder="🔍 Suche nach Name, Firma, E-Mail…" />
+        <select id="sortBy" class="sort-select" aria-label="Sortierung" title="Sortierung">
+          <option value="created_desc">Neueste zuerst</option>
+          <option value="created_asc">Älteste zuerst</option>
+          <option value="activity_desc">Zuletzt aktiv</option>
+          <option value="activity_asc">Längste Inaktivität</option>
+          <option value="next_step_asc">Wiedervorlage (früheste)</option>
+          <option value="score_desc">KI-Score (hoch→niedrig)</option>
+          <option value="value_desc">Wert (hoch→niedrig)</option>
+          <option value="company_asc">Firma A–Z</option>
+        </select>
         <div class="view-switch" id="viewToggle" role="tablist" aria-label="Ansicht wählen">
           <button class="vs-option active" data-view="list" role="tab" title="Kartenansicht">🗂 Karten</button>
           <button class="vs-option" data-view="kanban" role="tab" title="Kanban-Board nach Status">▦ Board</button>
@@ -50,6 +65,11 @@
       <div class="toolbar-filters">
         <div class="filters" id="statusFilters"></div>
         <button class="chip due-chip" id="dueFilter" title="Nur fällige/überfällige Wiedervorlagen">⏰ Fällig <span id="dueCount" class="due-count hidden">0</span></button>
+        <button class="chip" id="staleFilter" title="Offene Leads ohne Aktivität der letzten 14 Tage">💤 Kalt</button>
+        <select id="tagFilter" class="tag-filter" aria-label="Nach Tag filtern" title="Nach Tag filtern">
+          <option value="">Alle Tags</option>
+        </select>
+        <button class="chip" id="selectToggle" title="Mehrere Leads auswählen und gemeinsam bearbeiten">☑️ Auswählen</button>
       </div>
     </section>
 
@@ -64,6 +84,9 @@
 
   <!-- ============ DETAIL-ANSICHT (eine Seite pro Lead) ============ -->
   <main class="container hidden" id="detailView" aria-live="polite"></main>
+
+  <!-- ============ HEUTE / AGENDA-ANSICHT ============ -->
+  <main class="container hidden" id="agendaView" aria-live="polite"></main>
 
   <!-- ============ BERICHTE-ANSICHT ============ -->
   <main class="container hidden" id="reportsView" aria-live="polite"></main>
@@ -159,6 +182,7 @@
           <label>Nächster Schritt<input type="text" id="f_next_step" placeholder="z. B. Angebot nachfassen" /></label>
           <label>Wiedervorlage am<input type="date" id="f_next_step_at" /></label>
         </div>
+        <label>Tags (mit Komma getrennt)<input type="text" id="f_tags" placeholder="z. B. heiß, Q4, Empfehlung" /></label>
         <label>Notizen<textarea id="f_notes" rows="3" placeholder="Bedarf, Gesprächsnotizen, nächste Schritte…"></textarea></label>
         <div class="form-actions">
           <button type="button" class="btn" id="cancelBtn">Abbrechen</button>
@@ -208,8 +232,11 @@
   <!-- Dock für laufende Recherche-Jobs (unten rechts) -->
   <div id="jobDock" class="job-dock hidden" aria-live="polite"></div>
 
+  <!-- Aktionsleiste für Mehrfachauswahl (Bulk) -->
+  <div id="bulkBar" class="bulk-bar hidden" aria-live="polite"></div>
+
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=26"></script>
+  <script src="app.js?v=27"></script>
 </body>
 </html>
