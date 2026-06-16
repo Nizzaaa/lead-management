@@ -262,8 +262,8 @@ function populateStatusSelect() {
     .join("");
 }
 
-// --- Routing (Liste ⇄ Detail ⇄ Heute ⇄ Discovery ⇄ Berichte) ---------------
-const VIEWS = ["listView", "detailView", "agendaView", "discoveryView", "prospectsView", "reportsView"];
+// --- Routing (Liste ⇄ Detail ⇄ Heute ⇄ Prospects ⇄ Berichte) ---------------
+const VIEWS = ["listView", "detailView", "agendaView", "prospectsView", "reportsView"];
 function showOnly(viewId) {
   for (const v of VIEWS) $("#" + v).classList.toggle("hidden", v !== viewId);
 }
@@ -277,7 +277,8 @@ function router() {
   const lead = location.hash.match(/^#\/lead\/(.+)$/);
   if (lead) return showDetail(decodeURIComponent(lead[1]));
   if (location.hash === "#/heute") return showAgenda();
-  if (location.hash === "#/discovery") return showDiscovery();
+  // Discovery ist jetzt ein Modal auf der Prospects-Seite (keine eigene Seite mehr).
+  if (location.hash === "#/discovery") { location.hash = "#/prospects"; return; }
   if (location.hash === "#/prospects") return showProspects();
   if (location.hash === "#/reports") return showReports();
   showList();
@@ -1244,6 +1245,9 @@ function bindEvents() {
 
   $("#closeResearchModal").addEventListener("click", closeResearchModal);
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
+  $("#closeDiscoveryModal").addEventListener("click", closeDiscoveryModal);
+  $("#cancelDiscoveryBtn").addEventListener("click", closeDiscoveryModal);
+  $("#discoveryForm").addEventListener("submit", (e) => { e.preventDefault(); submitDiscovery(); });
   $("#abortResearchBtn").addEventListener("click", () => { if (modalJobId) cancelJob(modalJobId); });
   $("#researchForm").addEventListener("submit", submitResearch);
 
@@ -1262,6 +1266,7 @@ function bindEvents() {
   $("#stageProbFields").addEventListener("input", onProbInput);
   $("#exportCsvBtn").addEventListener("click", () => downloadFile("/api/leads/export.csv"));
   $("#exportXlsxBtn").addEventListener("click", () => downloadFile("/api/leads/export.xlsx"));
+  $("#exportProspectsCsvBtn").addEventListener("click", () => downloadFile("/api/prospects/export.csv"));
   $("#importCsvBtn").addEventListener("click", importCsv);
 
   $("#search").addEventListener("input", (e) => {
@@ -1325,11 +1330,6 @@ function bindEvents() {
     if (open) location.hash = "#/lead/" + encodeURIComponent(open.dataset.nav);
   });
 
-  // Discovery: nur das Kriterien-Formular abschicken (Treffer landen als Prospects).
-  $("#discoveryView").addEventListener("submit", (e) => {
-    if (e.target.id === "discoveryForm") { e.preventDefault(); submitDiscovery(); }
-  });
-
   // Prospects-Seite: Live-Suche (nur Gruppen neu zeichnen), Auswahl, Aktionen.
   $("#prospectsView").addEventListener("input", (e) => {
     if (e.target.id === "prospectSearch") { prospectSearch = e.target.value.toLowerCase().trim(); renderProspectGroups(); }
@@ -1339,8 +1339,8 @@ function bindEvents() {
     if (cb) toggleProspectSelect(cb.dataset.prospectSel, cb.checked);
   });
   $("#prospectsView").addEventListener("click", (e) => {
-    const ex = e.target.closest("[data-prospect-export]");
-    if (ex) { downloadFile("/api/prospects/export.csv"); return; }
+    const dco = e.target.closest("[data-discovery-open]");
+    if (dco) { openDiscoveryModal(); return; }
     const g = e.target.closest("[data-prospect-group]");
     if (g) { prospectGroupBy = g.dataset.prospectGroup; localStorage.setItem("leadpilot_prospect_group", prospectGroupBy); renderProspects(); return; }
     const s = e.target.closest("[data-prospect-status]");
@@ -1920,8 +1920,8 @@ function openResearchModal() {
 function openJobModal(jobId) {
   const job = jobs.get(jobId);
   if (!job) return;
-  // Discovery-Jobs haben kein Lead-Modal – stattdessen zur Discovery-Seite.
-  if (job.kind === "discovery") { location.hash = "#/discovery"; return; }
+  // Discovery-Jobs haben kein Lead-Modal – stattdessen zur Prospects-Seite.
+  if (job.kind === "discovery") { location.hash = "#/prospects"; return; }
   modalJobId = jobId;
   $("#researchInput").value = job.label;
   $("#researchInput").disabled = true;
@@ -2058,9 +2058,9 @@ async function pollJob(jobId) {
         dropJob(jobId);
         const r = data.result || { added: 0, skippedDuplicate: 0, total: 0 };
         toast(`✅ Discovery: ${r.added} neue Prospects · ${r.skippedDuplicate} Dublette(n) übersprungen`, "success");
-        // Treffer sind serverseitig bereits als Prospects gespeichert.
-        if (location.hash === "#/discovery") location.hash = "#/prospects"; // zur Liste wechseln
-        else loadProspects(); // Liste/Counter im Hintergrund aktualisieren
+        // Treffer sind serverseitig bereits als Prospects gespeichert →
+        // Liste aktualisieren (zeichnet sich neu, falls gerade sichtbar).
+        loadProspects();
         return;
       }
       const wasOpen = modalJobId === jobId;
@@ -2754,49 +2754,24 @@ function onGlobalSearchKey(e) {
 }
 
 // --- Lead-Discovery --------------------------------------------------------
-function showDiscovery() {
-  detailId = null;
-  detailEditing = false;
-  showOnly("discoveryView");
-  setActiveNav("discovery");
-  renderDiscovery();
-  window.scrollTo(0, 0);
-}
-
-function discoveryFormHtml() {
+// Öffnet das Discovery-Modal (Button auf der Prospects-Seite). Füllt die Felder
+// mit den zuletzt genutzten Kriterien vor und spiegelt den KI-Status wider.
+function openDiscoveryModal() {
   const c = discoveryCriteria || {};
-  return `<section class="card discovery-form">
-    <h3>Neue Leads finden</h3>
-    <p class="d-muted">Kriterien angeben – die KI sucht passende, reale Unternehmen und legt sie (dedupliziert) als <strong>Prospects</strong> an. Bereits vorhandene Prospects oder Leads werden übersprungen.</p>
-    <form id="discoveryForm" class="form">
-      <div class="form-row">
-        <label>Branche<input type="text" id="dc_branche" value="${esc(c.branche || "")}" placeholder="z. B. Steuerberatung, SHK, Autohaus" /></label>
-        <label>Region / Ort<input type="text" id="dc_region" value="${esc(c.region || "")}" placeholder="z. B. Berlin, Raum München, NRW" /></label>
-      </div>
-      <div class="form-row">
-        <label>Unternehmensgröße<input type="text" id="dc_groesse" value="${esc(c.groesse || "")}" placeholder="z. B. 10–50 Mitarbeitende" /></label>
-        <label>Anzahl Treffer<input type="number" id="dc_anzahl" min="1" max="25" value="${esc(c.anzahl || 10)}" /></label>
-      </div>
-      <label>Stichworte / Signale<input type="text" id="dc_stichworte" value="${esc(c.stichworte || "")}" placeholder="z. B. terminintensiv, mehrere Standorte, veraltete Website" /></label>
-      <label>Weitere Wünsche (frei)<textarea id="dc_freitext" rows="2" placeholder="Beschreibe deinen Wunschkunden …">${esc(c.freitext || "")}</textarea></label>
-      <div class="form-actions">
-        <button type="submit" class="btn btn-primary" id="dcSubmit" ${aiEnabled ? "" : "disabled"}>🔎 Discovery starten</button>
-        ${aiEnabled ? "" : `<span class="d-muted">KI nicht konfiguriert (ANTHROPIC_API_KEY fehlt)</span>`}
-      </div>
-    </form>
-  </section>`;
+  $("#dc_branche").value = c.branche || "";
+  $("#dc_region").value = c.region || "";
+  $("#dc_groesse").value = c.groesse || "";
+  $("#dc_stichworte").value = c.stichworte || "";
+  $("#dc_freitext").value = c.freitext || "";
+  $("#dc_anzahl").value = c.anzahl || 10;
+  $("#dcSubmit").disabled = !aiEnabled;
+  $("#discoveryAiHint").classList.toggle("hidden", aiEnabled);
+  $("#discoveryModal").classList.remove("hidden");
+  setTimeout(() => $("#dc_branche").focus(), 0);
 }
 
-function renderDiscovery() {
-  const v = $("#discoveryView");
-  const openCount = prospects.filter((p) => (p.status || "offen") !== "abgelehnt").length;
-  v.innerHTML = `
-    <div class="view-head"><h2>🧭 Discovery</h2><p class="d-muted">Neue Prospects anhand von Kriterien finden</p></div>
-    ${discoveryFormHtml()}
-    <section class="card disc-hint">
-      <p class="d-muted">Gefundene Unternehmen landen als Prospects in <a href="#/prospects">📇 Prospects</a>${openCount ? ` (aktuell ${openCount} offen)` : ""}. Dort wählst du aus, welche zu Leads recherchiert werden.</p>
-    </section>
-  `;
+function closeDiscoveryModal() {
+  $("#discoveryModal").classList.add("hidden");
 }
 
 async function submitDiscovery() {
@@ -2817,6 +2792,7 @@ async function submitDiscovery() {
     const { jobId } = await api("/api/discovery", { method: "POST", body: JSON.stringify(criteria) });
     const label = criteria.branche || criteria.region || criteria.stichworte || "Discovery";
     addJob(jobId, "Discovery: " + label, undefined, "discovery");
+    closeDiscoveryModal();
     toast("Discovery läuft… (Fortschritt unten rechts)", "");
   } catch (err) {
     toast(err.message, "error");
@@ -2915,10 +2891,7 @@ function renderProspects() {
   v.innerHTML = `
     <div class="view-head view-head-row">
       <div><h2>📇 Prospects</h2><p class="d-muted">Mögliche Leads aus der Discovery – gegliedert &amp; recherchierbar</p></div>
-      <div class="view-head-actions">
-        <button type="button" class="btn" data-prospect-export ${prospects.length ? "" : "disabled"} title="Alle Prospects als CSV exportieren">⬇️ CSV exportieren</button>
-        <a class="btn btn-primary" href="#/discovery">🧭 Discovery starten</a>
-      </div>
+      <button type="button" class="btn btn-primary" data-discovery-open>🧭 Discovery starten</button>
     </div>
     <section class="toolbar prospect-toolbar">
       <div class="toolbar-top">

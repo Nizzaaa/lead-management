@@ -505,6 +505,8 @@ a { color: inherit; }
 /* Daten-Import & -Export (Einstellungen) */
 .settings-section { border-top: 1px solid var(--border); padding-top: 14px; margin-top: 4px; display: flex; flex-direction: column; gap: 8px; }
 .settings-section h3 { margin: 0; font-size: 14px; }
+.io-group { display: flex; flex-direction: column; gap: 8px; }
+.io-group-label { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .io-row { display: flex; flex-wrap: wrap; gap: 10px; }
 .io-import { gap: 6px; }
 .io-import input[type="file"] { font-size: 13px; }
@@ -1066,43 +1068,8 @@ a { color: inherit; }
 .ns-due.overdue { color: var(--red); }
 .ns-due.today { color: var(--amber); }
 
-/* ===== Discovery ===== */
-/* Das Formular liegt bereits in einer .card – daher keine doppelte Polsterung. */
-.discovery-form .form { padding: 0; }
-.discovery-form h3 { margin-top: 0; }
-.discovery-form .form-actions { margin-top: 8px; }
-.discovery-results { margin-top: 16px; }
-.disc-results-head {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; flex-wrap: wrap; margin-bottom: 8px;
-}
-.disc-results-head h3 { margin: 0; display: flex; align-items: center; gap: 8px; }
-.disc-bulk { display: flex; gap: 8px; flex-wrap: wrap; }
-.disc-item {
-  display: flex; align-items: flex-start; gap: 12px;
-  padding: 12px 4px; border-top: 1px solid var(--border);
-}
-.disc-item:first-of-type { border-top: none; }
-.disc-item.exists { opacity: 0.55; }
-.disc-check { padding-top: 2px; }
-.disc-check input { width: 18px; height: 18px; cursor: pointer; accent-color: var(--primary); }
-.disc-main { flex: 1; min-width: 0; }
-.disc-title { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.disc-flag {
-  font-size: 11px; font-weight: 600; color: var(--muted);
-  background: var(--surface-2); border-radius: 999px; padding: 1px 8px;
-}
-.disc-sub { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); margin-top: 3px; }
-.disc-sub a { color: var(--accent); text-decoration: none; }
-.disc-sub a:hover { text-decoration: underline; }
-.disc-reason { font-size: 13px; color: var(--text); margin-top: 5px; }
-.disc-hint { margin-top: 14px; }
-.disc-hint a { color: var(--accent); text-decoration: none; }
-.disc-hint a:hover { text-decoration: underline; }
-
 /* ===== Prospects ===== */
 .view-head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.view-head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .prospect-toolbar { margin-top: 16px; }
 .prospect-groupby { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .prospect-group { margin-bottom: 14px; }
@@ -1173,7 +1140,7 @@ a { color: inherit; }
   .bn-fab:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 
   /* Platz für die fixe Leiste + FAB schaffen (Inhalte nicht verdecken) */
-  #listView, #detailView, #reportsView, #agendaView, #discoveryView { padding-bottom: calc(92px + env(safe-area-inset-bottom)); }
+  #listView, #detailView, #reportsView, #agendaView, #prospectsView { padding-bottom: calc(92px + env(safe-area-inset-bottom)); }
   /* Toast über die Leiste + FAB heben (Job-Dock siehe Regel oben) */
   .toast { bottom: calc(92px + env(safe-area-inset-bottom)); left: 50%; }
 

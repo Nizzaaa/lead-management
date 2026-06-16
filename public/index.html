@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=28" />
+  <link rel="stylesheet" href="styles.css?v=29" />
   <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
@@ -24,7 +24,6 @@
       </div>
       <a class="navlink" href="#/" data-nav-link="list">🗂 Leads</a>
       <a class="navlink" href="#/heute" data-nav-link="agenda">📅 Heute <span id="agendaDue" class="nav-badge agenda-due hidden">0</span></a>
-      <a class="navlink" href="#/discovery" data-nav-link="discovery">🧭 Discovery</a>
       <a class="navlink" href="#/prospects" data-nav-link="prospects">📇 Prospects</a>
       <a class="navlink" href="#/reports" data-nav-link="reports">📊 Berichte</a>
       <span id="aiBadge" class="badge badge-off" title="KI-Status">KI: …</span>
@@ -90,9 +89,6 @@
   <!-- ============ HEUTE / AGENDA-ANSICHT ============ -->
   <main class="container hidden" id="agendaView" aria-live="polite"></main>
 
-  <!-- ============ DISCOVERY-ANSICHT ============ -->
-  <main class="container hidden" id="discoveryView" aria-live="polite"></main>
-
   <!-- ============ PROSPECTS-ANSICHT ============ -->
   <main class="container hidden" id="prospectsView" aria-live="polite"></main>
 
@@ -122,6 +118,34 @@
     </div>
   </div>
 
+  <!-- Discovery-Modal: neue Prospects anhand von Kriterien finden -->
+  <div class="modal-overlay hidden" id="discoveryModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>🧭 Discovery</h2>
+        <button class="icon-btn" id="closeDiscoveryModal" aria-label="Schließen">✕</button>
+      </div>
+      <form id="discoveryForm" class="form">
+        <p class="hint">Kriterien angeben – die KI sucht passende, reale Unternehmen und legt sie (dedupliziert) als <strong>Prospects</strong> an. Bereits vorhandene Prospects oder Leads werden übersprungen. Die Suche läuft im Hintergrund (Fortschritt unten rechts).</p>
+        <div class="form-row">
+          <label>Branche<input type="text" id="dc_branche" placeholder="z. B. Steuerberatung, SHK, Autohaus" /></label>
+          <label>Region / Ort<input type="text" id="dc_region" placeholder="z. B. Berlin, Raum München, NRW" /></label>
+        </div>
+        <div class="form-row">
+          <label>Unternehmensgröße<input type="text" id="dc_groesse" placeholder="z. B. 10–50 Mitarbeitende" /></label>
+          <label>Anzahl Treffer<input type="number" id="dc_anzahl" min="1" max="25" value="10" /></label>
+        </div>
+        <label>Stichworte / Signale<input type="text" id="dc_stichworte" placeholder="z. B. terminintensiv, mehrere Standorte, veraltete Website" /></label>
+        <label>Weitere Wünsche (frei)<textarea id="dc_freitext" rows="2" placeholder="Beschreibe deinen Wunschkunden …"></textarea></label>
+        <p class="hint hidden" id="discoveryAiHint">KI nicht konfiguriert (ANTHROPIC_API_KEY fehlt).</p>
+        <div class="form-actions">
+          <button type="button" class="btn" id="cancelDiscoveryBtn">Abbrechen</button>
+          <button type="submit" class="btn btn-primary" id="dcSubmit">🔎 Discovery starten</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- Einstellungen: KI-Modell auswählen -->
   <div class="modal-overlay hidden" id="settingsModal">
     <div class="modal" role="dialog" aria-modal="true">
@@ -141,16 +165,25 @@
         </label>
 
         <div class="settings-section">
-          <h3 class="field-head">📦 Daten-Import &amp; -Export<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Alle Leads als Datei sichern oder eine Liste importieren. Die CSV verwendet das Trennzeichen „;“ und öffnet sich direkt in Excel.<br><br>Erkannte Spalten (deutsch oder englisch): Name, Firma, E-Mail, Telefon, Quelle, Status, Wert, Notizen, Nächster Schritt, Wiedervorlage sowie „KI-Bewertung (JSON)“ und „Dossier (JSON)“ aus dem Export. Bei Dubletten (gleiche E-Mail oder Firma) wird kein zweiter Datensatz angelegt; stattdessen werden nur fehlende Felder des bestehenden Leads ergänzt.</span></span></h3>
-          <div class="io-row">
-            <button type="button" class="btn" id="exportCsvBtn">⬇️ CSV exportieren</button>
-            <button type="button" class="btn" id="exportXlsxBtn">⬇️ Excel exportieren</button>
+          <h3 class="field-head">📦 Daten-Import &amp; -Export<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Leads und Prospects als Datei sichern oder eine Lead-Liste importieren. Die CSV verwendet das Trennzeichen „;“ und öffnet sich direkt in Excel.<br><br>Erkannte Spalten beim Lead-Import (deutsch oder englisch): Name, Firma, E-Mail, Telefon, Quelle, Status, Wert, Notizen, Nächster Schritt, Wiedervorlage sowie „KI-Bewertung (JSON)“ und „Dossier (JSON)“ aus dem Export. Bei Dubletten (gleiche E-Mail oder Firma) wird kein zweiter Datensatz angelegt; stattdessen werden nur fehlende Felder des bestehenden Leads ergänzt. Der Prospect-Export enthält die komplette Discovery-Liste (offen + abgelehnt).</span></span></h3>
+          <div class="io-group">
+            <span class="io-group-label">Leads</span>
+            <div class="io-row">
+              <button type="button" class="btn" id="exportCsvBtn">⬇️ CSV exportieren</button>
+              <button type="button" class="btn" id="exportXlsxBtn">⬇️ Excel exportieren</button>
+            </div>
+            <label class="io-import">CSV importieren
+              <input type="file" id="importCsvInput" accept=".csv,text/csv" />
+            </label>
+            <div class="io-row">
+              <button type="button" class="btn btn-primary" id="importCsvBtn">⬆️ Importieren</button>
+            </div>
           </div>
-          <label class="io-import">CSV importieren
-            <input type="file" id="importCsvInput" accept=".csv,text/csv" />
-          </label>
-          <div class="io-row">
-            <button type="button" class="btn btn-primary" id="importCsvBtn">⬆️ Importieren</button>
+          <div class="io-group">
+            <span class="io-group-label">Prospects</span>
+            <div class="io-row">
+              <button type="button" class="btn" id="exportProspectsCsvBtn">⬇️ CSV exportieren</button>
+            </div>
           </div>
         </div>
 
@@ -265,6 +298,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=31"></script>
+  <script src="app.js?v=32"></script>
 </body>
 </html>
