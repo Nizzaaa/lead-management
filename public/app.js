@@ -712,13 +712,13 @@ function detailViewHtml(l) {
 
   return `
     <div class="detail-bar">
-      <a class="btn btn-sm" href="#/">← Zurück</a>
+      <a class="btn btn-sm" href="#/" title="Zurück zur Übersicht">← <span class="btn-text">Zurück</span></a>
       <div class="detail-bar-actions">
-        ${aiEnabled && r ? `<button class="btn btn-sm" data-action="research">🔄 Neu recherchieren</button>` : ""}
-        <button class="btn btn-sm" data-action="pdf" title="Lead-Details als PDF (Drucken / Als PDF speichern)">📄 PDF</button>
-        <button class="btn btn-sm" data-action="export" title="Alle Daten dieses Leads als JSON (DSGVO-Auskunft)">⬇️ Datenauskunft</button>
-        <button class="btn btn-sm" data-action="edit">✏️ Bearbeiten</button>
-        <button class="btn btn-sm btn-danger" data-action="delete">🗑️ Löschen</button>
+        ${aiEnabled && r ? `<button class="btn btn-sm" data-action="research" title="Neu recherchieren">🔄 <span class="btn-text">Neu recherchieren</span></button>` : ""}
+        <button class="btn btn-sm" data-action="pdf" title="Lead-Details als PDF (Drucken / Als PDF speichern)">📄 <span class="btn-text">PDF</span></button>
+        <button class="btn btn-sm" data-action="export" title="Alle Daten dieses Leads als JSON (DSGVO-Auskunft)">⬇️ <span class="btn-text">Datenauskunft</span></button>
+        <button class="btn btn-sm" data-action="edit" title="Lead bearbeiten">✏️ <span class="btn-text">Bearbeiten</span></button>
+        <button class="btn btn-sm btn-danger" data-action="delete" title="Lead löschen">🗑️ <span class="btn-text">Löschen</span></button>
       </div>
     </div>
 
@@ -1204,6 +1204,8 @@ function onDetailClick(e) {
 // --- Events ----------------------------------------------------------------
 function bindEvents() {
   $("#addLeadBtn").addEventListener("click", openResearchModal);
+  // FAB der mobilen Tab-Leiste öffnet denselben Recherche-Dialog.
+  $("#fabResearchBtn")?.addEventListener("click", openResearchModal);
   // Logo-Fallback auf Wortmarke (zuvor inline onerror – wegen strikter CSP
   // ausgelagert).
   const brandLogo = $("#brandLogo");
@@ -2549,8 +2551,10 @@ function showAgenda() {
 // Zahl fälliger Wiedervorlagen im „Heute"-Navigationspunkt anzeigen.
 function updateAgendaBadge() {
   const n = dueLeadCount();
-  const b = $("#agendaDue");
-  if (b) { b.textContent = n; b.classList.toggle("hidden", n === 0); }
+  document.querySelectorAll(".agenda-due").forEach((b) => {
+    b.textContent = n;
+    b.classList.toggle("hidden", n === 0);
+  });
 }
 
 function agendaItemHtml(l) {

@@ -2,9 +2,9 @@
 <html lang="de">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=25" />
+  <link rel="stylesheet" href="styles.css?v=26" />
   <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
@@ -23,12 +23,12 @@
         <div id="globalSearchResults" class="gs-results hidden" role="listbox"></div>
       </div>
       <a class="navlink" href="#/" data-nav-link="list">🗂 Leads</a>
-      <a class="navlink" href="#/heute" data-nav-link="agenda">📅 Heute <span id="agendaDue" class="nav-badge hidden">0</span></a>
+      <a class="navlink" href="#/heute" data-nav-link="agenda">📅 Heute <span id="agendaDue" class="nav-badge agenda-due hidden">0</span></a>
       <a class="navlink" href="#/discovery" data-nav-link="discovery">🧭 Discovery</a>
       <a class="navlink" href="#/reports" data-nav-link="reports">📊 Berichte</a>
       <span id="aiBadge" class="badge badge-off" title="KI-Status">KI: …</span>
       <button id="settingsBtn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">⚙️</button>
-      <button id="manualLeadBtn" class="btn">+ Manuell</button>
+      <button id="manualLeadBtn" class="btn" title="Lead manuell anlegen">+ <span class="btn-text">Manuell</span></button>
       <button id="addLeadBtn" class="btn btn-primary">🔎 Lead recherchieren</button>
       <span id="userInfo" class="user-chip" hidden></span>
       <a id="logoutLink" class="navlink" href="#" target="_top" rel="noopener" title="Abmelden" hidden>⎋ Logout</a>
@@ -233,6 +233,26 @@
     </div>
   </div>
 
+  <!-- Untere Tab-Leiste + FAB (nur auf Mobilgeräten sichtbar) -->
+  <nav class="bottom-nav" aria-label="Hauptnavigation">
+    <a class="bn-item" href="#/" data-nav-link="list">
+      <span class="bn-icon" aria-hidden="true">🗂</span><span class="bn-label">Leads</span>
+    </a>
+    <a class="bn-item" href="#/heute" data-nav-link="agenda">
+      <span class="bn-icon" aria-hidden="true">📅</span><span class="bn-label">Heute</span>
+      <span class="bn-badge agenda-due hidden">0</span>
+    </a>
+    <button id="fabResearchBtn" class="bn-fab" title="Lead recherchieren" aria-label="Lead recherchieren">
+      <span aria-hidden="true">🔎</span>
+    </button>
+    <a class="bn-item" href="#/discovery" data-nav-link="discovery">
+      <span class="bn-icon" aria-hidden="true">🧭</span><span class="bn-label">Discovery</span>
+    </a>
+    <a class="bn-item" href="#/reports" data-nav-link="reports">
+      <span class="bn-icon" aria-hidden="true">📊</span><span class="bn-label">Berichte</span>
+    </a>
+  </nav>
+
   <!-- Dock für laufende Recherche-Jobs (unten rechts) -->
   <div id="jobDock" class="job-dock hidden" aria-live="polite"></div>
 
@@ -241,6 +261,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=28"></script>
+  <script src="app.js?v=29"></script>
 </body>
 </html>
