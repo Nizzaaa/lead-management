@@ -733,10 +733,9 @@ app.post("/api/research/:jobId/cancel", (req, res) => {
   res.json({ status: job.status });
 });
 
-// Lead-Discovery: findet anhand von Kriterien reale Unternehmen als Kandidaten.
-// Läuft als Hintergrund-Job (gleiche Mechanik wie die Recherche); das Ergebnis
-// (Kandidatenliste) wird per /api/research/:jobId gepollt. Das eigentliche
-// Anlegen erfolgt anschließend über die normale Recherche der Auswahl.
+// Lead-Discovery: findet anhand von Kriterien reale Unternehmen und legt sie als
+// (deduplizierte) Prospects an. Läuft als Hintergrund-Job; das Ergebnis ist eine
+// Zusammenfassung { added, skippedDuplicate, total }, gepollt per /api/research/:jobId.
 app.post("/api/discovery", aiLimiter, wrap(async (req, res) => {
   if (!requireAi(res)) return;
   if (!allowNewResearch(res)) return;
@@ -753,12 +752,69 @@ app.post("/api/discovery", aiLimiter, wrap(async (req, res) => {
   if (!criteria.branche && !criteria.region && !criteria.stichworte && !criteria.freitext) {
     return res.status(400).json({ error: "Bitte mindestens ein Kriterium angeben (Branche, Region oder Stichworte)." });
   }
-  const job = startResearchJob(
-    (onProgress, signal) =>
-      discoverCompanies(anthropic, criteria, currentModel, onProgress, signal,
-        (u) => recordClaudeUsage(u.model, u.kind, u.usage)),
-    "discovery"
-  );
+  const job = startResearchJob(async (onProgress, signal) => {
+    const result = await discoverCompanies(anthropic, criteria, currentModel, onProgress, signal,
+      (u) => recordClaudeUsage(u.model, u.kind, u.usage));
+    const cands = Array.isArray(result.kandidaten) ? result.kandidaten : [];
+    // Treffer dedupliziert als Prospects anlegen (Dedup gegen Prospects + Leads).
+    let added = 0, skippedDuplicate = 0;
+    for (const c of cands) {
+      const prospect = await db.createProspect({
+        name: c.name,
+        website: c.website && c.website !== "k.A." ? c.website : "",
+        ort: c.ort, branche: c.branche, groesse: c.groesse,
+        potenzial: c.potenzial, potenzialGrund: c.potenzialGrund,
+        begruendung: c.begruendung, quelle: c.quelle, kriterien: criteria,
+      });
+      if (prospect) added++; else skippedDuplicate++;
+    }
+    onProgress(`✅ ${added} neue Prospects · ${skippedDuplicate} Dublette(n) übersprungen`);
+    return { added, skippedDuplicate, total: cands.length };
+  }, "discovery");
+  res.status(202).json({ jobId: job.id });
+}));
+
+// --- Prospects (Discovery-Liste) -------------------------------------------
+// Alle Prospects (Frontend filtert nach Status: offen/abgelehnt).
+app.get("/api/prospects", wrap(async (req, res) => {
+  res.json(await db.listProspects());
+}));
+
+// Status setzen: verwerfen ('abgelehnt', bleibt für Dedup erhalten) oder
+// wiederherstellen ('offen').
+app.put("/api/prospects/:id", wrap(async (req, res) => {
+  const status = req.body && req.body.status === "abgelehnt" ? "abgelehnt" : "offen";
+  const prospect = await db.setProspectStatus(req.params.id, status);
+  if (!prospect) return res.status(404).json({ error: "Prospect nicht gefunden." });
+  res.json(prospect);
+}));
+
+// Endgültige Löschung (DSGVO) – entfernt den Prospect vollständig.
+app.delete("/api/prospects/:id", wrap(async (req, res) => {
+  const ok = await db.deleteProspect(req.params.id);
+  if (!ok) return res.status(404).json({ error: "Prospect nicht gefunden." });
+  res.status(204).end();
+}));
+
+// Prospect recherchieren → vollwertigen Lead anlegen (wie /api/leads/research)
+// und den Prospect anschließend aus der Liste entfernen (er ist jetzt Lead).
+app.post("/api/prospects/:id/research", aiLimiter, wrap(async (req, res) => {
+  if (!requireAi(res)) return;
+  if (!allowNewResearch(res)) return;
+  const prospect = await db.getProspect(req.params.id);
+  if (!prospect) return res.status(404).json({ error: "Prospect nicht gefunden." });
+  const input = (prospect.website && prospect.website.trim()) || prospect.name;
+  if (!input) return res.status(400).json({ error: "Kein Recherche-Input vorhanden." });
+  const job = startResearchJob(async (onProgress, signal) => {
+    const research = await researchCompany(anthropic, input, currentModel, onProgress, signal,
+      (u) => recordClaudeUsage(u.model, u.kind, u.usage));
+    const data = { ...leadFromResearch(research, input), status: "neu", value: 0, notes: "" };
+    const lead = await db.createLead(data, research);
+    await logActivity(lead.id, { type: "system", title: "Aus Prospect recherchiert", body: `Input: ${input}` }, "KI-Recherche");
+    const scored = await scoreAfterResearch(lead, onProgress);
+    await db.deleteProspect(prospect.id); // wird zum Lead → aus Prospect-Liste entfernen
+    return scored;
+  });
   res.status(202).json({ jobId: job.id });
 }));
 

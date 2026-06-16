@@ -422,9 +422,13 @@ const DISCOVERY_SYSTEM = `Du bist der Lead-Discovery-Assistent von FU/GE Solutio
 ## Vorgehen
 Nutze web_search aktiv: Branchenverzeichnisse, Google, Das Örtliche/Gelbe Seiten, Regionalportale, Innungen/Verbände, LinkedIn. Identifiziere passende Betriebe und sammle für jeden die Quell-URL und – wenn auffindbar – die offizielle Website.
 
+## Bewertung je Treffer
+- **Potenzial (A–D)**: Erstbewertung des Fits zu FU/GE – A = sehr hoch, B = hoch, C = mittel, D = gering. Belege die Einschätzung aus erkennbaren Signalen (Größe, Branche, Telefon-/Terminlast, sichtbare Digitalisierungs-/Automatisierungslücken).
+- **Größe**: ordne einer Klasse zu: 1–10, 11–50, 51–200, 201–1000, 1000+ oder k.A.
+
 ## Output
 Gib am Ende AUSSCHLIESSLICH eine Markdown-Liste der besten Treffer aus (genau die gewünschte Anzahl, sofern belegbar), ein Eintrag pro Firma in exakt dieser Form:
-- **[Name]** — Website: [Domain oder k.A.] · Ort: [Ort oder k.A.] · Branche: [Branche] · Größe: [z. B. 10–50 MA oder k.A.] · Begründung: [1 Satz, warum passend / Signal] · Quelle: [URL]`;
+- **[Name]** — Website: [Domain oder k.A.] · Ort: [Ort oder k.A.] · Branche: [Branche] · Größe: [Klasse] · Potenzial: [A–D] ([kurze Begründung]) · Begründung: [1 Satz, warum passend / Signal] · Quelle: [URL]`;
 
 // Striktes Schema für die Extraktion der Kandidatenliste.
 const DISCOVERY_SCHEMA = {
@@ -438,12 +442,14 @@ const DISCOVERY_SCHEMA = {
           name: { type: "string" },
           website: { type: "string", description: "Domain/URL oder 'k.A.'." },
           ort: { type: "string" },
-          branche: { type: "string" },
-          groesse: { type: "string", description: "z. B. '10–50 MA' oder 'k.A.'." },
+          branche: { type: "string", description: "Kurze Branchenbezeichnung (z. B. 'Dachdecker', 'Steuerberatung')." },
+          groesse: { type: "string", enum: ["1–10", "11–50", "51–200", "201–1000", "1000+", "k.A."], description: "Geschätzte Mitarbeiter-Größenklasse." },
+          potenzial: { type: "string", enum: ["A", "B", "C", "D"], description: "Erstbewertung Fit zu FU/GE: A=sehr hoch … D=gering." },
+          potenzialGrund: { type: "string", description: "1 kurzer Satz zur Potenzial-Einschätzung (belegtes Signal)." },
           begruendung: { type: "string", description: "1 Satz: warum passend (Signal)." },
           quelle: { type: "string", description: "Quell-URL oder leer." },
         },
-        required: ["name", "website", "ort", "branche", "groesse", "begruendung", "quelle"],
+        required: ["name", "website", "ort", "branche", "groesse", "potenzial", "potenzialGrund", "begruendung", "quelle"],
         additionalProperties: false,
       },
     },
