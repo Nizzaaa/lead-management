@@ -1269,6 +1269,8 @@ function bindEvents() {
   $("#exportProspectsCsvBtn").addEventListener("click", () => downloadFile("/api/prospects/export.csv"));
   $("#importCsvBtn").addEventListener("click", importCsv);
   $("#importProspectsCsvBtn").addEventListener("click", importProspectsCsv);
+  setupDropzone("importCsvInput", "importCsvBtn");
+  setupDropzone("importProspectsCsvInput", "importProspectsCsvBtn");
 
   $("#search").addEventListener("input", (e) => {
     searchTerm = e.target.value.toLowerCase().trim();
@@ -1859,6 +1861,44 @@ function downloadFile(url) {
   a.remove();
 }
 
+// Verwandelt ein <label class="dropzone"> mit verstecktem File-Input in eine
+// klickbare Drag&Drop-Zone: zeigt Dateiname/-größe an und (de)aktiviert den
+// zugehörigen Import-Button. Reagiert auch auf programmatisches Leeren des
+// Inputs (dispatch "change") nach erfolgreichem Import.
+function setupDropzone(inputId, btnId) {
+  const input = $("#" + inputId);
+  const btn = $("#" + btnId);
+  if (!input || !btn) return;
+  const zone = input.closest(".dropzone");
+  if (!zone) return;
+  const icon = zone.querySelector(".dz-icon");
+  const title = zone.querySelector(".dz-title");
+  const hint = zone.querySelector(".dz-hint");
+  const def = { icon: icon ? icon.textContent : "", title: title.textContent, hint: hint.textContent };
+
+  const update = () => {
+    const file = input.files && input.files[0];
+    zone.classList.toggle("has-file", !!file);
+    btn.disabled = !file;
+    if (icon) icon.textContent = file ? "✅" : def.icon;
+    title.textContent = file ? file.name : def.title;
+    hint.textContent = file ? `${Math.max(1, Math.round(file.size / 1024))} KB · klicken zum Ändern` : def.hint;
+  };
+
+  input.addEventListener("change", update);
+  zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("dragover"); });
+  zone.addEventListener("dragleave", (e) => { if (!zone.contains(e.relatedTarget)) zone.classList.remove("dragover"); });
+  zone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    zone.classList.remove("dragover");
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (!files || !files.length) return;
+    try { input.files = files; } catch (_) { /* manche Browser erlauben kein Setzen – Klick-Auswahl bleibt */ }
+    update();
+  });
+  update(); // Initialzustand: kein File → Button deaktiviert
+}
+
 // CSV-Import: liest die gewählte Datei, schickt sie an den Server und meldet das
 // Ergebnis. Anschließend wird die Lead-Liste aktualisiert.
 async function importCsv() {
@@ -1885,12 +1925,13 @@ async function importCsv() {
     if (res.errors && res.errors.length) parts.push(`${res.errors.length} fehlerhaft`);
     toast("Import: " + parts.join(" · "), res.created || res.enriched ? "success" : "");
     input.value = "";
+    input.dispatchEvent(new Event("change")); // Dropzone zurücksetzen (Datei geleert)
     await refresh();
   } catch (err) {
     toast(err.message, "error");
   } finally {
-    btn.disabled = false;
     btn.textContent = prev;
+    btn.disabled = !(input.files && input.files[0]); // ohne Datei deaktiviert
   }
 }
 
@@ -1919,12 +1960,13 @@ async function importProspectsCsv() {
     if (res.errors && res.errors.length) parts.push(`${res.errors.length} fehlerhaft`);
     toast("Prospect-Import: " + parts.join(" · "), res.created ? "success" : "");
     input.value = "";
+    input.dispatchEvent(new Event("change")); // Dropzone zurücksetzen (Datei geleert)
     await loadProspects();
   } catch (err) {
     toast(err.message, "error");
   } finally {
-    btn.disabled = false;
     btn.textContent = prev;
+    btn.disabled = !(input.files && input.files[0]); // ohne Datei deaktiviert
   }
 }
 

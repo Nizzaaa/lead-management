@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=29" />
+  <link rel="stylesheet" href="styles.css?v=30" />
   <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
@@ -172,11 +172,16 @@
               <button type="button" class="btn" id="exportCsvBtn">⬇️ CSV exportieren</button>
               <button type="button" class="btn" id="exportXlsxBtn">⬇️ Excel exportieren</button>
             </div>
-            <label class="io-import">CSV importieren
-              <input type="file" id="importCsvInput" accept=".csv,text/csv" />
-            </label>
-            <div class="io-row">
-              <button type="button" class="btn btn-primary" id="importCsvBtn">⬆️ Importieren</button>
+            <div class="io-import">
+              <label class="dropzone">
+                <input type="file" id="importCsvInput" accept=".csv,text/csv" />
+                <span class="dz-icon" aria-hidden="true">📄</span>
+                <span class="dz-body">
+                  <span class="dz-title">CSV-Datei wählen</span>
+                  <span class="dz-hint">klicken oder hierher ziehen</span>
+                </span>
+              </label>
+              <button type="button" class="btn btn-primary" id="importCsvBtn" disabled>⬆️ Importieren</button>
             </div>
           </div>
           <div class="io-group">
@@ -184,11 +189,16 @@
             <div class="io-row">
               <button type="button" class="btn" id="exportProspectsCsvBtn">⬇️ CSV exportieren</button>
             </div>
-            <label class="io-import">CSV importieren
-              <input type="file" id="importProspectsCsvInput" accept=".csv,text/csv" />
-            </label>
-            <div class="io-row">
-              <button type="button" class="btn btn-primary" id="importProspectsCsvBtn">⬆️ Importieren</button>
+            <div class="io-import">
+              <label class="dropzone">
+                <input type="file" id="importProspectsCsvInput" accept=".csv,text/csv" />
+                <span class="dz-icon" aria-hidden="true">📄</span>
+                <span class="dz-body">
+                  <span class="dz-title">CSV-Datei wählen</span>
+                  <span class="dz-hint">klicken oder hierher ziehen</span>
+                </span>
+              </label>
+              <button type="button" class="btn btn-primary" id="importProspectsCsvBtn" disabled>⬆️ Importieren</button>
             </div>
           </div>
         </div>
@@ -304,6 +314,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=33"></script>
+  <script src="app.js?v=34"></script>
 </body>
 </html>
