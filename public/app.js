@@ -13,8 +13,11 @@ let sortBy = localStorage.getItem("leadpilot_sort") || "created_desc";
 let selectMode = false; // Mehrfachauswahl (Bulk) aktiv?
 const selectedIds = new Set(); // ausgewählte Lead-IDs (Bulk)
 let discoveryCriteria = null; // zuletzt genutzte Discovery-Kriterien
-let discoveryResult = null;   // letztes Discovery-Ergebnis { kandidaten: [...] }
-const discoverySelected = new Set(); // Indizes ausgewählter Kandidaten
+let prospects = [];           // persistente Prospect-Liste (Discovery-Treffer)
+let prospectGroupBy = localStorage.getItem("leadpilot_prospect_group") || "potenzial"; // branche|groesse|potenzial
+let prospectStatusFilter = "offen"; // offen|abgelehnt
+let prospectSearch = "";
+const prospectSelected = new Set(); // ausgewählte Prospect-IDs (Bulk)
 let models = [];
 let currentModel = "";
 let stageProbabilities = {};
@@ -260,7 +263,7 @@ function populateStatusSelect() {
 }
 
 // --- Routing (Liste ⇄ Detail ⇄ Heute ⇄ Discovery ⇄ Berichte) ---------------
-const VIEWS = ["listView", "detailView", "agendaView", "discoveryView", "reportsView"];
+const VIEWS = ["listView", "detailView", "agendaView", "discoveryView", "prospectsView", "reportsView"];
 function showOnly(viewId) {
   for (const v of VIEWS) $("#" + v).classList.toggle("hidden", v !== viewId);
 }
@@ -275,6 +278,7 @@ function router() {
   if (lead) return showDetail(decodeURIComponent(lead[1]));
   if (location.hash === "#/heute") return showAgenda();
   if (location.hash === "#/discovery") return showDiscovery();
+  if (location.hash === "#/prospects") return showProspects();
   if (location.hash === "#/reports") return showReports();
   showList();
 }
@@ -324,6 +328,8 @@ async function refresh() {
     loadDetailExtras(detailId);
   } else if (location.hash === "#/heute") {
     renderAgenda();
+  } else if (location.hash === "#/prospects") {
+    loadProspects();
   } else {
     renderLeads();
   }
@@ -1319,20 +1325,32 @@ function bindEvents() {
     if (open) location.hash = "#/lead/" + encodeURIComponent(open.dataset.nav);
   });
 
-  // Discovery: Formular abschicken, Kandidaten auswählen, Auswahl recherchieren.
+  // Discovery: nur das Kriterien-Formular abschicken (Treffer landen als Prospects).
   $("#discoveryView").addEventListener("submit", (e) => {
     if (e.target.id === "discoveryForm") { e.preventDefault(); submitDiscovery(); }
   });
-  $("#discoveryView").addEventListener("change", (e) => {
-    const cb = e.target.closest("[data-disc]");
-    if (!cb) return;
-    const i = Number(cb.dataset.disc);
-    if (cb.checked) discoverySelected.add(i); else discoverySelected.delete(i);
-    updateDiscoveryCount();
+
+  // Prospects-Seite: Live-Suche (nur Gruppen neu zeichnen), Auswahl, Aktionen.
+  $("#prospectsView").addEventListener("input", (e) => {
+    if (e.target.id === "prospectSearch") { prospectSearch = e.target.value.toLowerCase().trim(); renderProspectGroups(); }
   });
-  $("#discoveryView").addEventListener("click", (e) => {
-    if (e.target.closest("#discSelectAll")) { selectAllDiscovery(); return; }
-    if (e.target.closest("#discResearch")) { researchSelectedDiscovery(); return; }
+  $("#prospectsView").addEventListener("change", (e) => {
+    const cb = e.target.closest("[data-prospect-sel]");
+    if (cb) toggleProspectSelect(cb.dataset.prospectSel, cb.checked);
+  });
+  $("#prospectsView").addEventListener("click", (e) => {
+    const g = e.target.closest("[data-prospect-group]");
+    if (g) { prospectGroupBy = g.dataset.prospectGroup; localStorage.setItem("leadpilot_prospect_group", prospectGroupBy); renderProspects(); return; }
+    const s = e.target.closest("[data-prospect-status]");
+    if (s) { prospectStatusFilter = s.dataset.prospectStatus; prospectSelected.clear(); renderProspects(); return; }
+    const rr = e.target.closest("[data-prospect-research]");
+    if (rr) { prospectSelected.clear(); prospectSelected.add(rr.dataset.prospectResearch); researchSelectedProspects(); return; }
+    const rj = e.target.closest("[data-prospect-reject]");
+    if (rj) { rejectProspect(rj.dataset.prospectReject); return; }
+    const re = e.target.closest("[data-prospect-restore]");
+    if (re) { restoreProspect(re.dataset.prospectRestore); return; }
+    const dl = e.target.closest("[data-prospect-delete]");
+    if (dl) { deleteProspectHard(dl.dataset.prospectDelete); return; }
   });
 
   $("#viewToggle").addEventListener("click", (e) => {
@@ -2036,14 +2054,11 @@ async function pollJob(jobId) {
     if (data.status === "done") {
       if (job.kind === "discovery") {
         dropJob(jobId);
-        discoveryResult = data.result || { kandidaten: [] };
-        discoverySelected.clear();
-        const n = (discoveryResult.kandidaten || []).length;
-        toast(`✅ Discovery fertig: ${n} Kandidat(en) – siehe 🧭 Discovery`, "success");
-        // Nur aktualisieren, wenn der Nutzer bereits auf der Discovery-Seite ist
-        // (sonst nicht aus der aktuellen Ansicht herausreißen – Ergebnis bleibt
-        // gespeichert und erscheint beim nächsten Öffnen).
-        if (location.hash === "#/discovery") renderDiscovery();
+        const r = data.result || { added: 0, skippedDuplicate: 0, total: 0 };
+        toast(`✅ Discovery: ${r.added} neue Prospects · ${r.skippedDuplicate} Dublette(n) übersprungen`, "success");
+        // Treffer sind serverseitig bereits als Prospects gespeichert.
+        if (location.hash === "#/discovery") location.hash = "#/prospects"; // zur Liste wechseln
+        else loadProspects(); // Liste/Counter im Hintergrund aktualisieren
         return;
       }
       const wasOpen = modalJobId === jobId;
@@ -2462,6 +2477,8 @@ async function renderReportsView() {
   }
   const s = r.stats;
   const eur = (v) => fmtEuro(Math.round(v));
+  const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
+  const prospectsOpen = (r.prospects && r.prospects.open) || 0;
 
   const kpis = [
     ["Leads gesamt", s.total],
@@ -2470,6 +2487,8 @@ async function renderReportsView() {
     ["Abschlussquote", s.conversion + " %"],
     ["Ø Auftragswert", eur(r.avgWon)],
     ["Ø Vertriebszyklus", r.avgCycleDays ? r.avgCycleDays + " Tage" : "—"],
+    ["Prospects offen", prospectsOpen],
+    ["Discovery-Kosten (14 T)", usd(r.discoveryCost14d)],
   ].map(([label, val]) => `<div class="stat-card"><span class="stat-value">${esc(String(val))}</span><span class="stat-label">${esc(label)}</span></div>`).join("");
 
   const wonLeads = r.wonLeadsByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
@@ -2477,7 +2496,6 @@ async function renderReportsView() {
   // KI-Kosten je Tag (USD, aus den Tokens + Tool-Gebühren errechnet).
   const costByDay = r.costByDay || [];
   const costTotal = costByDay.reduce((a, d) => a + (d.value || 0), 0);
-  const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
 
   // Verlust-Übersicht: Anzahl, Wert und Verlustquote (gegen abgeschlossene Deals).
   const lost = r.funnel.find((f) => f.status === "verloren") || { count: 0, value: 0 };
@@ -2743,33 +2761,11 @@ function showDiscovery() {
   window.scrollTo(0, 0);
 }
 
-// Domain aus URL/Quelle normalisieren (für den Dublettenabgleich).
-function normalizeDomain(s) {
-  if (!s) return "";
-  const v = String(s).toLowerCase().trim()
-    .replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
-  return v.includes(".") ? v : "";
-}
-
-// Existiert für einen Kandidaten bereits ein Lead (Firma oder Domain)?
-function candidateExisting(cand) {
-  const name = (cand.name || "").toLowerCase().trim();
-  const web = normalizeDomain(cand.website);
-  return leads.some((l) => {
-    if (name && (l.company || "").toLowerCase().trim() === name) return true;
-    if (web) {
-      const lw = normalizeDomain(l.source) || normalizeDomain(l.research && l.research.input);
-      if (lw && lw === web) return true;
-    }
-    return false;
-  });
-}
-
 function discoveryFormHtml() {
   const c = discoveryCriteria || {};
   return `<section class="card discovery-form">
     <h3>Neue Leads finden</h3>
-    <p class="d-muted">Kriterien angeben – die KI sucht passende, reale Unternehmen. Danach wählst du aus, welche tatsächlich recherchiert werden (jeweils als Hintergrund-Job).</p>
+    <p class="d-muted">Kriterien angeben – die KI sucht passende, reale Unternehmen und legt sie (dedupliziert) als <strong>Prospects</strong> an. Bereits vorhandene Prospects oder Leads werden übersprungen.</p>
     <form id="discoveryForm" class="form">
       <div class="form-row">
         <label>Branche<input type="text" id="dc_branche" value="${esc(c.branche || "")}" placeholder="z. B. Steuerberatung, SHK, Autohaus" /></label>
@@ -2789,60 +2785,16 @@ function discoveryFormHtml() {
   </section>`;
 }
 
-function candidateRowHtml(cand, i) {
-  const exists = candidateExisting(cand);
-  const web = cand.website && cand.website !== "k.A." ? extUrl(cand.website) : "";
-  const ok = (x) => x && x !== "k.A.";
-  return `<div class="disc-item${exists ? " exists" : ""}">
-    <label class="disc-check">
-      <input type="checkbox" data-disc="${i}" ${discoverySelected.has(i) ? "checked" : ""} ${exists ? "disabled" : ""} aria-label="Kandidat auswählen" />
-    </label>
-    <div class="disc-main">
-      <div class="disc-title">${esc(cand.name || "—")}${exists ? ` <span class="disc-flag">bereits vorhanden</span>` : ""}</div>
-      <div class="disc-sub">
-        ${ok(cand.branche) ? `<span>🏷️ ${esc(cand.branche)}</span>` : ""}
-        ${ok(cand.ort) ? `<span>📍 ${esc(cand.ort)}</span>` : ""}
-        ${ok(cand.groesse) ? `<span>👥 ${esc(cand.groesse)}</span>` : ""}
-        ${web ? `<a href="${esc(web)}" target="_blank" rel="noopener">🌐 Website</a>` : ""}
-      </div>
-      ${cand.begruendung ? `<div class="disc-reason">${esc(cand.begruendung)}</div>` : ""}
-    </div>
-  </div>`;
-}
-
 function renderDiscovery() {
   const v = $("#discoveryView");
-  let resultsHtml = "";
-  if (discoveryResult && Array.isArray(discoveryResult.kandidaten)) {
-    const cands = discoveryResult.kandidaten;
-    if (!cands.length) {
-      resultsHtml = `<section class="card"><p class="d-muted">Keine Kandidaten gefunden. Versuche andere Kriterien.</p></section>`;
-    } else {
-      resultsHtml = `<section class="card discovery-results">
-        <div class="disc-results-head">
-          <h3>Gefundene Unternehmen <span class="agenda-n">${cands.length}</span></h3>
-          <div class="disc-bulk">
-            <button type="button" class="btn btn-sm" id="discSelectAll">Alle auswählen</button>
-            <button type="button" class="btn btn-primary btn-sm" id="discResearch" disabled>🔎 Auswahl recherchieren (<span id="discCount">0</span>)</button>
-          </div>
-        </div>
-        ${cands.map(candidateRowHtml).join("")}
-      </section>`;
-    }
-  }
+  const openCount = prospects.filter((p) => (p.status || "offen") !== "abgelehnt").length;
   v.innerHTML = `
-    <div class="view-head"><h2>🧭 Discovery</h2><p class="d-muted">Neue Leads anhand von Kriterien finden</p></div>
+    <div class="view-head"><h2>🧭 Discovery</h2><p class="d-muted">Neue Prospects anhand von Kriterien finden</p></div>
     ${discoveryFormHtml()}
-    ${resultsHtml}
+    <section class="card disc-hint">
+      <p class="d-muted">Gefundene Unternehmen landen als Prospects in <a href="#/prospects">📇 Prospects</a>${openCount ? ` (aktuell ${openCount} offen)` : ""}. Dort wählst du aus, welche zu Leads recherchiert werden.</p>
+    </section>
   `;
-  updateDiscoveryCount();
-}
-
-function updateDiscoveryCount() {
-  const el = $("#discCount");
-  if (el) el.textContent = discoverySelected.size;
-  const btn = $("#discResearch");
-  if (btn) btn.disabled = discoverySelected.size === 0;
 }
 
 async function submitDiscovery() {
@@ -2869,41 +2821,181 @@ async function submitDiscovery() {
   }
 }
 
-// Alle noch nicht vorhandenen Kandidaten an-/abwählen.
-function selectAllDiscovery() {
-  const cands = (discoveryResult && discoveryResult.kandidaten) || [];
-  const selectable = cands.map((c, i) => (candidateExisting(c) ? -1 : i)).filter((i) => i >= 0);
-  const allOn = selectable.length > 0 && selectable.every((i) => discoverySelected.has(i));
-  discoverySelected.clear();
-  if (!allOn) selectable.forEach((i) => discoverySelected.add(i));
-  renderDiscovery();
+// --- Prospects (persistente Discovery-Liste) -------------------------------
+const POTENZIAL_COLORS = { A: "var(--green)", B: "var(--amber)", C: "#E8703A", D: "var(--red)" };
+function potenzialColor(p) { return POTENZIAL_COLORS[p] || "var(--muted)"; }
+
+function showProspects() {
+  detailId = null;
+  detailEditing = false;
+  showOnly("prospectsView");
+  setActiveNav("prospects");
+  loadProspects();
+  window.scrollTo(0, 0);
 }
 
-// Startet für jeden ausgewählten Kandidaten eine normale Recherche – gedrosselt
-// auf 3 gleichzeitig (Server deckelt ebenfalls bei 3). Jeder Treffer wird so zu
-// einem ganz normalen Recherche-Job im Dock.
-async function researchSelectedDiscovery() {
-  const cands = (discoveryResult && discoveryResult.kandidaten) || [];
-  const picks = [...discoverySelected].map((i) => cands[i]).filter(Boolean);
-  const queue = picks
-    .map((c) => (c.website && c.website !== "k.A." ? c.website : c.name))
-    .filter(Boolean);
-  if (!queue.length) return;
-  toast(`Starte Recherche für ${queue.length} Lead(s)…`, "");
-  discoverySelected.clear();
-  updateDiscoveryCount();
+async function loadProspects() {
+  try { prospects = await api("/api/prospects"); } catch (err) { /* Liste bleibt */ }
+  renderProspects();
+}
 
+function filteredProspects() {
+  const q = prospectSearch;
+  return prospects.filter((p) => {
+    if ((p.status || "offen") !== prospectStatusFilter) return false;
+    if (q) {
+      const hay = `${p.name} ${p.branche} ${p.ort} ${p.groesse}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+function prospectCardHtml(p) {
+  const web = p.website && p.website !== "k.A." ? extUrl(p.website) : "";
+  const ok = (x) => x && x !== "k.A.";
+  const rejected = p.status === "abgelehnt";
+  const actions = rejected
+    ? `<button type="button" class="btn btn-sm" data-prospect-restore="${p.id}">↩︎ Wiederherstellen</button>
+       <button type="button" class="btn btn-sm btn-danger" data-prospect-delete="${p.id}">🗑️ Endgültig löschen</button>`
+    : `<button type="button" class="btn btn-sm btn-primary" data-prospect-research="${p.id}" ${aiEnabled ? "" : "disabled"}>🔎 Recherchieren</button>
+       <button type="button" class="btn btn-sm" data-prospect-reject="${p.id}">🚫 Verwerfen</button>`;
+  return `<div class="prospect-item">
+    ${rejected ? "" : `<label class="prospect-check"><input type="checkbox" data-prospect-sel="${p.id}" ${prospectSelected.has(p.id) ? "checked" : ""} aria-label="Prospect auswählen" /></label>`}
+    <span class="potenzial-badge" style="color:${potenzialColor(p.potenzial)};border-color:${potenzialColor(p.potenzial)}" title="${esc(p.potenzialGrund || "Erstbewertung Potenzial")}">${esc(p.potenzial || "—")}</span>
+    <div class="prospect-main">
+      <div class="prospect-title">${esc(p.name || "—")}</div>
+      <div class="prospect-sub">
+        ${ok(p.branche) ? `<span>🏷️ ${esc(p.branche)}</span>` : ""}
+        ${ok(p.ort) ? `<span>📍 ${esc(p.ort)}</span>` : ""}
+        ${ok(p.groesse) ? `<span>👥 ${esc(p.groesse)}</span>` : ""}
+        ${web ? `<a href="${esc(web)}" target="_blank" rel="noopener">🌐 Website</a>` : ""}
+      </div>
+      ${p.begruendung ? `<div class="prospect-reason">${esc(p.begruendung)}</div>` : ""}
+    </div>
+    <div class="prospect-actions">${actions}</div>
+  </div>`;
+}
+
+// Gruppen-HTML (gefiltert + nach gewählter Achse gruppiert) – separat, damit die
+// Live-Suche nur diesen Teil neu zeichnet (Eingabefokus bleibt erhalten).
+function prospectGroupsHtml() {
+  const items = filteredProspects();
+  if (!items.length) {
+    return `<section class="card"><p class="d-muted">${prospectStatusFilter === "abgelehnt" ? "Keine abgelehnten Prospects." : "Noch keine Prospects. Starte eine Discovery (🧭)."}</p></section>`;
+  }
+  const keyFn = {
+    branche: (p) => p.branche || "Ohne Branche",
+    groesse: (p) => p.groesse || "k.A.",
+    potenzial: (p) => "Potenzial " + (p.potenzial || "—"),
+  }[prospectGroupBy] || ((p) => "Potenzial " + (p.potenzial || "—"));
+  const groups = {};
+  for (const p of items) { const k = keyFn(p); (groups[k] = groups[k] || []).push(p); }
+  return Object.keys(groups).sort((a, b) => a.localeCompare(b, "de")).map((k) =>
+    `<section class="card prospect-group">
+       <h3>${esc(k)} <span class="agenda-n">${groups[k].length}</span></h3>
+       ${groups[k].map(prospectCardHtml).join("")}
+     </section>`).join("");
+}
+
+function renderProspectGroups() {
+  const el = $("#prospectGroups");
+  if (el) el.innerHTML = prospectGroupsHtml();
+  renderProspectBulkBar();
+}
+
+function renderProspects() {
+  const v = $("#prospectsView");
+  const groupBtn = (key, label) => `<button type="button" class="chip ${prospectGroupBy === key ? "active" : ""}" data-prospect-group="${key}">${label}</button>`;
+  const statusBtn = (key, label) => `<button type="button" class="chip ${prospectStatusFilter === key ? "active" : ""}" data-prospect-status="${key}">${label}</button>`;
+  const openN = prospects.filter((p) => (p.status || "offen") !== "abgelehnt").length;
+  const rejN = prospects.filter((p) => p.status === "abgelehnt").length;
+  v.innerHTML = `
+    <div class="view-head view-head-row">
+      <div><h2>📇 Prospects</h2><p class="d-muted">Mögliche Leads aus der Discovery – gegliedert &amp; recherchierbar</p></div>
+      <a class="btn btn-primary" href="#/discovery">🧭 Discovery starten</a>
+    </div>
+    <section class="toolbar prospect-toolbar">
+      <div class="toolbar-top">
+        <input type="search" id="prospectSearch" class="search" placeholder="🔍 Prospect suchen…" value="${esc(prospectSearch)}" />
+        <div class="prospect-groupby">
+          <span class="d-muted">Gruppieren:</span>
+          ${groupBtn("potenzial", "Potenzial")} ${groupBtn("branche", "Branche")} ${groupBtn("groesse", "Größe")}
+        </div>
+      </div>
+      <div class="toolbar-filters">
+        ${statusBtn("offen", `Offen (${openN})`)} ${statusBtn("abgelehnt", `Abgelehnt (${rejN})`)}
+      </div>
+    </section>
+    <div id="prospectGroups">${prospectGroupsHtml()}</div>
+  `;
+  renderProspectBulkBar();
+}
+
+// Bulk-Leiste (nur im Offen-Filter mit Auswahl) – nutzt das vorhandene #bulkBar.
+function renderProspectBulkBar() {
+  const bar = $("#bulkBar");
+  if (!bar) return;
+  const n = prospectSelected.size;
+  if (!n || prospectStatusFilter !== "offen") { bar.classList.add("hidden"); bar.innerHTML = ""; return; }
+  bar.classList.remove("hidden");
+  bar.innerHTML = `
+    <span class="bulk-count">${n} ausgewählt</span>
+    <button class="btn btn-sm btn-primary" id="prospectBulkResearch" ${aiEnabled ? "" : "disabled"}>🔎 Recherchieren</button>
+    <button class="btn btn-sm" id="prospectBulkReject">🚫 Verwerfen</button>
+    <button class="btn btn-sm" id="prospectBulkClear">Aufheben</button>`;
+  $("#prospectBulkResearch").onclick = () => researchSelectedProspects();
+  $("#prospectBulkReject").onclick = () => rejectSelectedProspects();
+  $("#prospectBulkClear").onclick = () => { prospectSelected.clear(); renderProspects(); };
+}
+
+function toggleProspectSelect(id, on) {
+  if (on) prospectSelected.add(id); else prospectSelected.delete(id);
+  renderProspectBulkBar();
+}
+
+async function rejectProspect(id) {
+  try { await api(`/api/prospects/${id}`, { method: "PUT", body: JSON.stringify({ status: "abgelehnt" }) }); prospectSelected.delete(id); await loadProspects(); }
+  catch (err) { toast(err.message, "error"); }
+}
+async function restoreProspect(id) {
+  try { await api(`/api/prospects/${id}`, { method: "PUT", body: JSON.stringify({ status: "offen" }) }); await loadProspects(); }
+  catch (err) { toast(err.message, "error"); }
+}
+async function deleteProspectHard(id) {
+  if (!confirm("Diesen Prospect endgültig löschen? (DSGVO – nicht umkehrbar)")) return;
+  try { await api(`/api/prospects/${id}`, { method: "DELETE" }); prospectSelected.delete(id); await loadProspects(); toast("Prospect gelöscht", "success"); }
+  catch (err) { toast(err.message, "error"); }
+}
+async function rejectSelectedProspects() {
+  const ids = [...prospectSelected];
+  for (const id of ids) { try { await api(`/api/prospects/${id}`, { method: "PUT", body: JSON.stringify({ status: "abgelehnt" }) }); } catch {} }
+  prospectSelected.clear();
+  toast(`${ids.length} verworfen`, "success");
+  await loadProspects();
+}
+
+// Ausgewählte Prospects recherchieren → je ein normaler Recherche-Job (gedrosselt
+// auf 3 gleichzeitig). Der Server entfernt den Prospect nach erfolgreicher Recherche.
+async function researchSelectedProspects() {
+  const ids = [...prospectSelected];
+  if (!ids.length) return;
+  prospectSelected.clear();
+  renderProspectBulkBar();
+  toast(`Starte Recherche für ${ids.length} Prospect(s)…`, "");
+  const queue = ids.slice();
   let started = 0;
   const worker = async () => {
     while (queue.length) {
-      const input = queue.shift();
+      const id = queue.shift();
+      const p = prospects.find((x) => x.id === id);
       try {
-        const { jobId } = await api("/api/leads/research", { method: "POST", body: JSON.stringify({ input }) });
-        addJob(jobId, input, undefined, "research");
+        const { jobId } = await api(`/api/prospects/${id}/research`, { method: "POST" });
+        addJob(jobId, (p && (p.name || p.website)) || "Prospect", undefined, "research");
         started++;
       } catch (err) {
-        if (err.status === 429) { queue.unshift(input); await sleep(4000); } // Server ausgelastet → später erneut
-        else toast(`„${input}": ${err.message}`, "error");
+        if (err.status === 429) { queue.unshift(id); await sleep(4000); }
+        else toast(`${p ? p.name : id}: ${err.message}`, "error");
       }
       await sleep(400);
     }
