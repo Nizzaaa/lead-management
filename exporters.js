@@ -34,6 +34,27 @@ const LEAD_COLUMNS = [
 // Spalten, die beim Excel-Export numerisch ausgegeben werden.
 const NUMERIC_HEADERS = new Set(["Wert", "KI-Score"]);
 
+// Spalten der Prospect-Export-Datei (Discovery-Liste). Eigenes Schema, da
+// Prospects ein anderes Datenmodell als Leads haben (Branche/Größe/Potenzial
+// statt E-Mail/Wert/Status-Pipeline). "Kriterien (JSON)" hält die
+// Discovery-Suchkriterien verlustfrei fest.
+const PROSPECT_COLUMNS = [
+  ["Name", (p) => p.name || ""],
+  ["Website", (p) => p.website || ""],
+  ["Domain", (p) => p.domain || ""],
+  ["Ort", (p) => p.ort || ""],
+  ["Branche", (p) => p.branche || ""],
+  ["Größe", (p) => p.groesse || ""],
+  ["Potenzial", (p) => p.potenzial || ""],
+  ["Potenzial-Grund", (p) => p.potenzialGrund || ""],
+  ["Begründung", (p) => p.begruendung || ""],
+  ["Quelle", (p) => p.quelle || ""],
+  ["Status", (p) => p.status || ""],
+  ["Erstellt", (p) => p.createdAt || ""],
+  ["Aktualisiert", (p) => p.updatedAt || ""],
+  ["Kriterien (JSON)", (p) => (p.kriterien ? JSON.stringify(p.kriterien) : "")],
+];
+
 // Erlaubte Überschriften beim Import (klein geschrieben) → internes Feld.
 // Akzeptiert deutsche und englische Varianten, damit auch fremde Tabellen
 // importiert werden können.
@@ -78,15 +99,27 @@ function csvCell(value, delimiter) {
   return s;
 }
 
-// Erzeugt eine CSV aus Leads. Default-Trennzeichen ";" (deutsches Excel öffnet
-// es ohne Textimport-Assistenten korrekt). Ohne BOM – das ergänzt der Aufrufer.
-function leadsToCsv(leads, delimiter = ";") {
+// Erzeugt eine CSV aus Zeilen-Objekten anhand einer Spaltendefinition
+// [Überschrift, Wert-Funktion]. Default-Trennzeichen ";" (deutsches Excel
+// öffnet es ohne Textimport-Assistenten korrekt). Ohne BOM – das ergänzt der
+// Aufrufer.
+function rowsToCsv(items, columns, delimiter = ";") {
   const lines = [];
-  lines.push(LEAD_COLUMNS.map((c) => csvCell(c[0], delimiter)).join(delimiter));
-  for (const l of leads) {
-    lines.push(LEAD_COLUMNS.map((c) => csvCell(c[1](l), delimiter)).join(delimiter));
+  lines.push(columns.map((c) => csvCell(c[0], delimiter)).join(delimiter));
+  for (const it of items) {
+    lines.push(columns.map((c) => csvCell(c[1](it), delimiter)).join(delimiter));
   }
   return lines.join("\r\n");
+}
+
+// CSV aller Leads.
+function leadsToCsv(leads, delimiter = ";") {
+  return rowsToCsv(leads, LEAD_COLUMNS, delimiter);
+}
+
+// CSV aller Prospects (Discovery-Liste).
+function prospectsToCsv(prospects, delimiter = ";") {
+  return rowsToCsv(prospects, PROSPECT_COLUMNS, delimiter);
 }
 
 // Parst CSV-Text in ein Array von Zeilen (jede Zeile = Array von Zellen).
@@ -225,7 +258,9 @@ function leadsToXlsxXml(leads) {
 
 module.exports = {
   LEAD_COLUMNS,
+  PROSPECT_COLUMNS,
   leadsToCsv,
+  prospectsToCsv,
   parseCsv,
   csvRowsToLeads,
   parseNumber,

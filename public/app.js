@@ -1339,6 +1339,8 @@ function bindEvents() {
     if (cb) toggleProspectSelect(cb.dataset.prospectSel, cb.checked);
   });
   $("#prospectsView").addEventListener("click", (e) => {
+    const ex = e.target.closest("[data-prospect-export]");
+    if (ex) { downloadFile("/api/prospects/export.csv"); return; }
     const g = e.target.closest("[data-prospect-group]");
     if (g) { prospectGroupBy = g.dataset.prospectGroup; localStorage.setItem("leadpilot_prospect_group", prospectGroupBy); renderProspects(); return; }
     const s = e.target.closest("[data-prospect-status]");
@@ -2913,7 +2915,10 @@ function renderProspects() {
   v.innerHTML = `
     <div class="view-head view-head-row">
       <div><h2>📇 Prospects</h2><p class="d-muted">Mögliche Leads aus der Discovery – gegliedert &amp; recherchierbar</p></div>
-      <a class="btn btn-primary" href="#/discovery">🧭 Discovery starten</a>
+      <div class="view-head-actions">
+        <button type="button" class="btn" data-prospect-export ${prospects.length ? "" : "disabled"} title="Alle Prospects als CSV exportieren">⬇️ CSV exportieren</button>
+        <a class="btn btn-primary" href="#/discovery">🧭 Discovery starten</a>
+      </div>
     </div>
     <section class="toolbar prospect-toolbar">
       <div class="toolbar-top">

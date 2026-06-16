@@ -6,7 +6,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const db = require("./db");
 const { researchCompany, discoverCompanies } = require("./research");
-const { leadsToCsv, parseCsv, csvRowsToLeads, parseNumber, leadsToXlsxXml } = require("./exporters");
+const { leadsToCsv, prospectsToCsv, parseCsv, csvRowsToLeads, parseNumber, leadsToXlsxXml } = require("./exporters");
 const { logger, httpLogger } = require("./logger");
 const cfAccess = require("./cfAccess");
 
@@ -778,6 +778,16 @@ app.post("/api/discovery", aiLimiter, wrap(async (req, res) => {
 // Alle Prospects (Frontend filtert nach Status: offen/abgelehnt).
 app.get("/api/prospects", wrap(async (req, res) => {
   res.json(await db.listProspects());
+}));
+
+// CSV-Export aller Prospects (offen + abgelehnt; die Status-Spalte
+// unterscheidet sie). Mit UTF-8-BOM, damit Excel Umlaute korrekt anzeigt.
+app.get("/api/prospects/export.csv", wrap(async (req, res) => {
+  const prospects = await db.listProspects();
+  const csv = prospectsToCsv(prospects);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="prospects-${ymd()}.csv"`);
+  res.send("﻿" + csv);
 }));
 
 // Status setzen: verwerfen ('abgelehnt', bleibt für Dedup erhalten) oder

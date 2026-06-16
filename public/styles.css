@@ -1102,6 +1102,7 @@ a { color: inherit; }
 
 /* ===== Prospects ===== */
 .view-head-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.view-head-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .prospect-toolbar { margin-top: 16px; }
 .prospect-groupby { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .prospect-group { margin-bottom: 14px; }
