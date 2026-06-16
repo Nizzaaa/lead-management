@@ -5,7 +5,7 @@ const path = require("path");
 const crypto = require("crypto");
 const fs = require("fs");
 const db = require("./db");
-const { researchCompany } = require("./research");
+const { researchCompany, discoverCompanies } = require("./research");
 const { leadsToCsv, parseCsv, csvRowsToLeads, parseNumber, leadsToXlsxXml } = require("./exporters");
 const { logger, httpLogger } = require("./logger");
 const cfAccess = require("./cfAccess");
@@ -352,10 +352,14 @@ function friendlyResearchError(raw) {
   return msg ? `Recherche fehlgeschlagen: ${msg.slice(0, 300)}` : "Recherche fehlgeschlagen. Bitte erneut versuchen.";
 }
 
-function startResearchJob(runner) {
+// Hintergrund-Job für lang laufende KI-Aufgaben. `kind` unterscheidet die Art
+// ("research" → Ergebnis ist ein Lead; "discovery" → Ergebnis ist eine
+// Kandidatenliste). Das Ergebnis liegt generisch in job.result; für die
+// Recherche wird zusätzlich job.lead gesetzt (Rückwärtskompatibilität).
+function startResearchJob(runner, kind = "research") {
   const id = crypto.randomUUID();
   const controller = new AbortController();
-  const job = { id, status: "running", steps: [], lead: null, error: null, finishedAt: 0, controller };
+  const job = { id, kind, status: "running", steps: [], result: null, lead: null, error: null, finishedAt: 0, controller };
   researchJobs.set(id, job);
 
   const onProgress = (text) => {
@@ -366,7 +370,9 @@ function startResearchJob(runner) {
 
   (async () => {
     try {
-      job.lead = await runner(onProgress, controller.signal);
+      const out = await runner(onProgress, controller.signal);
+      job.result = out;
+      if (kind === "research") job.lead = out;
       job.status = "done";
     } catch (err) {
       if (controller.signal.aborted) {
@@ -713,7 +719,7 @@ app.post("/api/leads/:id/research", aiLimiter, wrap(async (req, res) => {
 app.get("/api/research/:jobId", (req, res) => {
   const job = researchJobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: "Recherche-Job nicht gefunden." });
-  res.json({ status: job.status, steps: job.steps, lead: job.lead, error: job.error });
+  res.json({ status: job.status, steps: job.steps, lead: job.lead, result: job.result, kind: job.kind, error: job.error });
 });
 
 // Laufende Recherche abbrechen (bricht den KI-Stream via AbortController ab).
@@ -726,6 +732,35 @@ app.post("/api/research/:jobId/cancel", (req, res) => {
   }
   res.json({ status: job.status });
 });
+
+// Lead-Discovery: findet anhand von Kriterien reale Unternehmen als Kandidaten.
+// Läuft als Hintergrund-Job (gleiche Mechanik wie die Recherche); das Ergebnis
+// (Kandidatenliste) wird per /api/research/:jobId gepollt. Das eigentliche
+// Anlegen erfolgt anschließend über die normale Recherche der Auswahl.
+app.post("/api/discovery", aiLimiter, wrap(async (req, res) => {
+  if (!requireAi(res)) return;
+  if (!allowNewResearch(res)) return;
+  const b = req.body || {};
+  const clean = (v, max = 200) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  const criteria = {
+    branche: clean(b.branche),
+    region: clean(b.region),
+    groesse: clean(b.groesse),
+    stichworte: clean(b.stichworte),
+    freitext: clean(b.freitext, 500),
+    anzahl: Math.max(1, Math.min(25, Math.round(Number(b.anzahl) || 10))),
+  };
+  if (!criteria.branche && !criteria.region && !criteria.stichworte && !criteria.freitext) {
+    return res.status(400).json({ error: "Bitte mindestens ein Kriterium angeben (Branche, Region oder Stichworte)." });
+  }
+  const job = startResearchJob(
+    (onProgress, signal) =>
+      discoverCompanies(anthropic, criteria, currentModel, onProgress, signal,
+        (u) => recordClaudeUsage(u.model, u.kind, u.usage)),
+    "discovery"
+  );
+  res.status(202).json({ jobId: job.id });
+}));
 
 // Recherche-Dossier manuell bearbeiten (ohne KI neu zu starten).
 app.put("/api/leads/:id/research", wrap(async (req, res) => {

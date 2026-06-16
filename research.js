@@ -408,4 +408,162 @@ async function researchCompany(anthropic, input, model = DEFAULT_MODEL, onProgre
   };
 }
 
-module.exports = { researchCompany, DEFAULT_MODEL };
+// --- Lead-Discovery --------------------------------------------------------
+// Findet anhand von Kriterien REALE Unternehmen als Lead-Kandidaten. Gleiche
+// zweistufige Mechanik wie die Recherche: (1) agentische Web-Suche → Markdown-
+// Liste, (2) Extraktion in striktes JSON. Liefert nur Kandidaten – das Anlegen
+// als Lead erfolgt erst über die normale Recherche der ausgewählten Treffer.
+const DISCOVERY_SYSTEM = `Du bist der Lead-Discovery-Assistent von FU/GE Solutions. Anhand von Kriterien findest du REALE, existierende Unternehmen, die als Cold-Call-Leads für FU/GE Solutions in Frage kommen (Integration & Entwicklung individueller KI-Systeme im Mittelstand/Handwerk, DACH – sofern keine andere Region genannt ist).
+
+## Eiserne Regel: Keine Halluzination
+- Nur reale, über eine Quelle (URL) belegbare Unternehmen. Niemals Namen erfinden.
+- Im Zweifel weglassen. Lieber wenige belegte Treffer als viele unsichere.
+
+## Vorgehen
+Nutze web_search aktiv: Branchenverzeichnisse, Google, Das Örtliche/Gelbe Seiten, Regionalportale, Innungen/Verbände, LinkedIn. Identifiziere passende Betriebe und sammle für jeden die Quell-URL und – wenn auffindbar – die offizielle Website.
+
+## Output
+Gib am Ende AUSSCHLIESSLICH eine Markdown-Liste der besten Treffer aus (genau die gewünschte Anzahl, sofern belegbar), ein Eintrag pro Firma in exakt dieser Form:
+- **[Name]** — Website: [Domain oder k.A.] · Ort: [Ort oder k.A.] · Branche: [Branche] · Größe: [z. B. 10–50 MA oder k.A.] · Begründung: [1 Satz, warum passend / Signal] · Quelle: [URL]`;
+
+// Striktes Schema für die Extraktion der Kandidatenliste.
+const DISCOVERY_SCHEMA = {
+  type: "object",
+  properties: {
+    kandidaten: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          website: { type: "string", description: "Domain/URL oder 'k.A.'." },
+          ort: { type: "string" },
+          branche: { type: "string" },
+          groesse: { type: "string", description: "z. B. '10–50 MA' oder 'k.A.'." },
+          begruendung: { type: "string", description: "1 Satz: warum passend (Signal)." },
+          quelle: { type: "string", description: "Quell-URL oder leer." },
+        },
+        required: ["name", "website", "ort", "branche", "groesse", "begruendung", "quelle"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["kandidaten"],
+  additionalProperties: false,
+};
+
+// Kriterien-Objekt → Klartext für den Prompt.
+function formatCriteria(c = {}) {
+  const lines = [];
+  if (c.branche) lines.push(`Branche: ${c.branche}`);
+  if (c.region) lines.push(`Region/Ort: ${c.region}`);
+  if (c.groesse) lines.push(`Unternehmensgröße: ${c.groesse}`);
+  if (c.stichworte) lines.push(`Stichworte/Signale: ${c.stichworte}`);
+  if (c.freitext) lines.push(`Weitere Wünsche: ${c.freitext}`);
+  const n = Number(c.anzahl) > 0 ? Math.min(25, Math.round(Number(c.anzahl))) : 10;
+  lines.push(`Anzahl gewünschter Treffer: ${n}`);
+  return lines.join("\n");
+}
+
+// Phase 1: agentische Web-Suche → Markdown-Liste (analog runResearch).
+async function runDiscovery(anthropic, criteriaText, model, onProgress, signal, onUsage = () => {}) {
+  const messages = [{
+    role: "user",
+    content: `Finde passende Unternehmen für diese Kriterien und gib die Markdown-Liste exakt im vorgegebenen Format aus.\n\nKriterien:\n${criteriaText}`,
+  }];
+  const thinking = thinkingFor(model);
+  let listText = "";
+  let toolOk = 0;
+  for (let i = 0; i < 16; i++) {
+    const params = {
+      model,
+      max_tokens: 8000,
+      system: [{ type: "text", text: DISCOVERY_SYSTEM, cache_control: { type: "ephemeral" } }],
+      tools: WEB_TOOLS,
+      messages,
+    };
+    if (thinking) params.thinking = thinking;
+    const effort = effortFor(model);
+    if (effort) params.output_config = { effort };
+    const stream = anthropic.messages.stream(params, { signal });
+    stream.on("contentBlock", (block) => {
+      if (!block) return;
+      if (block.type === "server_tool_use") {
+        const inp = block.input || {};
+        if (block.name === "web_search" && inp.query) onProgress(`🔍 Suche: ${inp.query}`);
+        else if (block.name === "web_fetch" && inp.url) onProgress(`🌐 Öffne: ${inp.url}`);
+        return;
+      }
+      if (block.type === "web_search_tool_result" || block.type === "web_fetch_tool_result") {
+        const c = block.content;
+        if (Array.isArray(c)) { toolOk++; onProgress(`✓ ${c.length} Treffer gefunden`); }
+        else if (c && typeof c === "object" && typeof c.type === "string" && c.type.endsWith("_error")) onProgress(`⚠️ Abruf fehlgeschlagen (${c.error_code || "Fehler"})`);
+        else if (c) { toolOk++; onProgress("✓ Seite geladen"); }
+      }
+    });
+    const msg = await stream.finalMessage();
+    try { onUsage({ model, kind: "discovery", usage: msg.usage }); } catch {}
+    if (msg.stop_reason === "pause_turn") {
+      messages.push({ role: "assistant", content: msg.content });
+      setRollingCache(messages);
+      onProgress("… suche weiter");
+      continue;
+    }
+    listText = msg.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
+    break;
+  }
+  if (!listText) throw new Error("Discovery lieferte keine Liste.");
+  if (toolOk === 0) {
+    throw new Error(
+      "Web-Suche lieferte keine Ergebnisse – die Such-Tools waren nicht erreichbar " +
+        "(oft Rate-Limit auf niedrigem Tier). Bitte erneut versuchen oder das Modell wechseln."
+    );
+  }
+  return listText;
+}
+
+// Phase 2: Kandidaten aus der Liste in striktes JSON extrahieren (mit Fallback).
+async function extractCandidates(anthropic, listText, model, signal, onUsage = () => {}) {
+  const sys =
+    "Du extrahierst die gefundenen Unternehmen aus einer Liste in das geforderte JSON. " +
+    "Übernimm ausschließlich, was in der Liste steht. Erfinde nichts. Fehlende Felder als 'k.A.'.";
+  const userText = `Liste:\n\n${listText}`;
+  const tryStructured = async () => {
+    const msg = await anthropic.messages.create({
+      model, max_tokens: 8000, system: sys,
+      messages: [{ role: "user", content: userText }],
+      output_config: { format: { type: "json_schema", schema: DISCOVERY_SCHEMA } },
+    }, { signal });
+    try { onUsage({ model, kind: "discovery-extract", usage: msg.usage }); } catch {}
+    return readExtractionJson(msg, "Discovery-Extraktion");
+  };
+  const tryPlain = async () => {
+    const msg = await anthropic.messages.create({
+      model, max_tokens: 8000,
+      system: sys + " Antworte AUSSCHLIESSLICH mit einem JSON-Objekt nach diesem Schema " +
+        "(keine Erklärungen, kein Markdown, keine Codefences):\n" + JSON.stringify(DISCOVERY_SCHEMA),
+      messages: [{ role: "user", content: userText }],
+    }, { signal });
+    try { onUsage({ model, kind: "discovery-extract", usage: msg.usage }); } catch {}
+    return readExtractionJson(msg, "Discovery-Extraktion (Text)");
+  };
+  let lastErr;
+  for (const attempt of [tryStructured, tryStructured, tryPlain]) {
+    if (signal && signal.aborted) throw new Error("Discovery abgebrochen.");
+    try { return await attempt(); } catch (err) { if (signal && signal.aborted) throw err; lastErr = err; }
+  }
+  throw new Error(`Kandidaten-Extraktion fehlgeschlagen: ${lastErr ? lastErr.message : "unbekannt"}`);
+}
+
+// Öffentliche API: Discovery → { kriterien, kandidaten[], markdown, model, recherchiertAm }.
+async function discoverCompanies(anthropic, criteria, model = DEFAULT_MODEL, onProgress = () => {}, signal, onUsage = () => {}) {
+  onProgress("Starte Lead-Discovery…");
+  const listText = await runDiscovery(anthropic, formatCriteria(criteria), model, onProgress, signal, onUsage);
+  onProgress("📝 Treffer gefunden – extrahiere Kandidaten…");
+  const extracted = await extractCandidates(anthropic, listText, EXTRACT_MODEL, signal, onUsage);
+  const kandidaten = Array.isArray(extracted.kandidaten) ? extracted.kandidaten : [];
+  onProgress(`✅ Discovery abgeschlossen: ${kandidaten.length} Kandidaten.`);
+  return { kriterien: criteria, kandidaten, markdown: listText, model, recherchiertAm: new Date().toISOString() };
+}
+
+module.exports = { researchCompany, discoverCompanies, DEFAULT_MODEL };

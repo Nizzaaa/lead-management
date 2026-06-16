@@ -24,6 +24,7 @@
       </div>
       <a class="navlink" href="#/" data-nav-link="list">🗂 Leads</a>
       <a class="navlink" href="#/heute" data-nav-link="agenda">📅 Heute <span id="agendaDue" class="nav-badge hidden">0</span></a>
+      <a class="navlink" href="#/discovery" data-nav-link="discovery">🧭 Discovery</a>
       <a class="navlink" href="#/reports" data-nav-link="reports">📊 Berichte</a>
       <span id="aiBadge" class="badge badge-off" title="KI-Status">KI: …</span>
       <button id="settingsBtn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">⚙️</button>
@@ -87,6 +88,9 @@
 
   <!-- ============ HEUTE / AGENDA-ANSICHT ============ -->
   <main class="container hidden" id="agendaView" aria-live="polite"></main>
+
+  <!-- ============ DISCOVERY-ANSICHT ============ -->
+  <main class="container hidden" id="discoveryView" aria-live="polite"></main>
 
   <!-- ============ BERICHTE-ANSICHT ============ -->
   <main class="container hidden" id="reportsView" aria-live="polite"></main>
@@ -237,6 +241,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=27"></script>
+  <script src="app.js?v=28"></script>
 </body>
 </html>

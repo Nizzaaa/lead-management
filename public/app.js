@@ -12,6 +12,9 @@ let tagFilter = ""; // aktiver Tag-Filter ("" = alle)
 let sortBy = localStorage.getItem("leadpilot_sort") || "created_desc";
 let selectMode = false; // Mehrfachauswahl (Bulk) aktiv?
 const selectedIds = new Set(); // ausgewählte Lead-IDs (Bulk)
+let discoveryCriteria = null; // zuletzt genutzte Discovery-Kriterien
+let discoveryResult = null;   // letztes Discovery-Ergebnis { kandidaten: [...] }
+const discoverySelected = new Set(); // Indizes ausgewählter Kandidaten
 let models = [];
 let currentModel = "";
 let stageProbabilities = {};
@@ -256,8 +259,8 @@ function populateStatusSelect() {
     .join("");
 }
 
-// --- Routing (Liste ⇄ Detail ⇄ Heute ⇄ Berichte) ---------------------------
-const VIEWS = ["listView", "detailView", "agendaView", "reportsView"];
+// --- Routing (Liste ⇄ Detail ⇄ Heute ⇄ Discovery ⇄ Berichte) ---------------
+const VIEWS = ["listView", "detailView", "agendaView", "discoveryView", "reportsView"];
 function showOnly(viewId) {
   for (const v of VIEWS) $("#" + v).classList.toggle("hidden", v !== viewId);
 }
@@ -271,6 +274,7 @@ function router() {
   const lead = location.hash.match(/^#\/lead\/(.+)$/);
   if (lead) return showDetail(decodeURIComponent(lead[1]));
   if (location.hash === "#/heute") return showAgenda();
+  if (location.hash === "#/discovery") return showDiscovery();
   if (location.hash === "#/reports") return showReports();
   showList();
 }
@@ -1313,6 +1317,22 @@ function bindEvents() {
     if (open) location.hash = "#/lead/" + encodeURIComponent(open.dataset.nav);
   });
 
+  // Discovery: Formular abschicken, Kandidaten auswählen, Auswahl recherchieren.
+  $("#discoveryView").addEventListener("submit", (e) => {
+    if (e.target.id === "discoveryForm") { e.preventDefault(); submitDiscovery(); }
+  });
+  $("#discoveryView").addEventListener("change", (e) => {
+    const cb = e.target.closest("[data-disc]");
+    if (!cb) return;
+    const i = Number(cb.dataset.disc);
+    if (cb.checked) discoverySelected.add(i); else discoverySelected.delete(i);
+    updateDiscoveryCount();
+  });
+  $("#discoveryView").addEventListener("click", (e) => {
+    if (e.target.closest("#discSelectAll")) { selectAllDiscovery(); return; }
+    if (e.target.closest("#discResearch")) { researchSelectedDiscovery(); return; }
+  });
+
   $("#viewToggle").addEventListener("click", (e) => {
     const btn = e.target.closest("[data-view]");
     if (!btn) return;
@@ -1878,6 +1898,8 @@ function openResearchModal() {
 function openJobModal(jobId) {
   const job = jobs.get(jobId);
   if (!job) return;
+  // Discovery-Jobs haben kein Lead-Modal – stattdessen zur Discovery-Seite.
+  if (job.kind === "discovery") { location.hash = "#/discovery"; return; }
   modalJobId = jobId;
   $("#researchInput").value = job.label;
   $("#researchInput").disabled = true;
@@ -1940,7 +1962,7 @@ function closeResearchModal() {
 // übersteht (die Recherche läuft serverseitig weiter).
 const JOBS_KEY = "leadpilot_jobs";
 function persistJobs() {
-  const arr = [...jobs.values()].map((j) => ({ id: j.id, label: j.label, startTs: j.startTs }));
+  const arr = [...jobs.values()].map((j) => ({ id: j.id, label: j.label, startTs: j.startTs, kind: j.kind }));
   try { localStorage.setItem(JOBS_KEY, JSON.stringify(arr)); } catch {}
 }
 function dropJob(jobId) {
@@ -1965,8 +1987,9 @@ async function cancelJob(jobId) {
 }
 
 // Job registrieren und Polling starten. startTs optional (für Wiederaufnahme).
-function addJob(jobId, label, startTs) {
-  jobs.set(jobId, { id: jobId, label, status: "running", steps: [], startTs: startTs || Date.now(), leadId: null });
+// kind: "research" (Standard) oder "discovery".
+function addJob(jobId, label, startTs, kind = "research") {
+  jobs.set(jobId, { id: jobId, label, status: "running", steps: [], startTs: startTs || Date.now(), leadId: null, kind });
   persistJobs();
   renderDock();
   pollJob(jobId);
@@ -1978,7 +2001,7 @@ function resumeJobs() {
   try { arr = JSON.parse(localStorage.getItem(JOBS_KEY) || "[]"); } catch {}
   if (!Array.isArray(arr)) return;
   for (const j of arr) {
-    if (j && j.id && !jobs.has(j.id)) addJob(j.id, j.label || "Recherche", j.startTs);
+    if (j && j.id && !jobs.has(j.id)) addJob(j.id, j.label || "Recherche", j.startTs, j.kind || "research");
   }
 }
 
@@ -2009,6 +2032,18 @@ async function pollJob(jobId) {
     renderDock();
 
     if (data.status === "done") {
+      if (job.kind === "discovery") {
+        dropJob(jobId);
+        discoveryResult = data.result || { kandidaten: [] };
+        discoverySelected.clear();
+        const n = (discoveryResult.kandidaten || []).length;
+        toast(`✅ Discovery fertig: ${n} Kandidat(en) – siehe 🧭 Discovery`, "success");
+        // Nur aktualisieren, wenn der Nutzer bereits auf der Discovery-Seite ist
+        // (sonst nicht aus der aktuellen Ansicht herausreißen – Ergebnis bleibt
+        // gespeichert und erscheint beim nächsten Öffnen).
+        if (location.hash === "#/discovery") renderDiscovery();
+        return;
+      }
       const wasOpen = modalJobId === jobId;
       dropJob(jobId);
       toast(`✅ Recherche fertig: ${job.label}`, "success");
@@ -2059,8 +2094,8 @@ function renderDock() {
         `<span class="job-chip-body">` +
         `<span class="job-chip-title"></span>` +
         `<span class="job-chip-step"></span></span>` +
-        `<span class="job-chip-x" data-cancel="${j.id}" role="button" title="Recherche abbrechen">✕</span>`;
-      chip.querySelector(".job-chip-title").textContent = "🔎 " + j.label;
+        `<span class="job-chip-x" data-cancel="${j.id}" role="button" title="Abbrechen">✕</span>`;
+      chip.querySelector(".job-chip-title").textContent = (j.kind === "discovery" ? "🧭 " : "🔎 ") + j.label;
       dock.appendChild(chip);
     }
     const stepEl = chip.querySelector(".job-chip-step");
@@ -2692,6 +2727,185 @@ function onGlobalSearchKey(e) {
   else if (e.key === "Enter") { e.preventDefault(); const sel = items[idx] || items[0]; if (sel) gotoLead(sel.dataset.gs); return; }
   else return;
   items.forEach((x, i) => x.classList.toggle("active", i === idx));
+}
+
+// --- Lead-Discovery --------------------------------------------------------
+function showDiscovery() {
+  detailId = null;
+  detailEditing = false;
+  showOnly("discoveryView");
+  setActiveNav("discovery");
+  renderDiscovery();
+  window.scrollTo(0, 0);
+}
+
+// Domain aus URL/Quelle normalisieren (für den Dublettenabgleich).
+function normalizeDomain(s) {
+  if (!s) return "";
+  const v = String(s).toLowerCase().trim()
+    .replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
+  return v.includes(".") ? v : "";
+}
+
+// Existiert für einen Kandidaten bereits ein Lead (Firma oder Domain)?
+function candidateExisting(cand) {
+  const name = (cand.name || "").toLowerCase().trim();
+  const web = normalizeDomain(cand.website);
+  return leads.some((l) => {
+    if (name && (l.company || "").toLowerCase().trim() === name) return true;
+    if (web) {
+      const lw = normalizeDomain(l.source) || normalizeDomain(l.research && l.research.input);
+      if (lw && lw === web) return true;
+    }
+    return false;
+  });
+}
+
+function discoveryFormHtml() {
+  const c = discoveryCriteria || {};
+  return `<section class="card discovery-form">
+    <h3>Neue Leads finden</h3>
+    <p class="d-muted">Kriterien angeben – die KI sucht passende, reale Unternehmen. Danach wählst du aus, welche tatsächlich recherchiert werden (jeweils als Hintergrund-Job).</p>
+    <form id="discoveryForm">
+      <div class="form-row">
+        <label>Branche<input type="text" id="dc_branche" value="${esc(c.branche || "")}" placeholder="z. B. Steuerberatung, SHK, Autohaus" /></label>
+        <label>Region / Ort<input type="text" id="dc_region" value="${esc(c.region || "")}" placeholder="z. B. Berlin, Raum München, NRW" /></label>
+      </div>
+      <div class="form-row">
+        <label>Unternehmensgröße<input type="text" id="dc_groesse" value="${esc(c.groesse || "")}" placeholder="z. B. 10–50 Mitarbeitende" /></label>
+        <label>Anzahl Treffer<input type="number" id="dc_anzahl" min="1" max="25" value="${esc(c.anzahl || 10)}" /></label>
+      </div>
+      <label>Stichworte / Signale<input type="text" id="dc_stichworte" value="${esc(c.stichworte || "")}" placeholder="z. B. terminintensiv, mehrere Standorte, veraltete Website" /></label>
+      <label>Weitere Wünsche (frei)<textarea id="dc_freitext" rows="2" placeholder="Beschreibe deinen Wunschkunden …">${esc(c.freitext || "")}</textarea></label>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary" id="dcSubmit" ${aiEnabled ? "" : "disabled"}>🔎 Discovery starten</button>
+        ${aiEnabled ? "" : `<span class="d-muted">KI nicht konfiguriert (ANTHROPIC_API_KEY fehlt)</span>`}
+      </div>
+    </form>
+  </section>`;
+}
+
+function candidateRowHtml(cand, i) {
+  const exists = candidateExisting(cand);
+  const web = cand.website && cand.website !== "k.A." ? extUrl(cand.website) : "";
+  const ok = (x) => x && x !== "k.A.";
+  return `<div class="disc-item${exists ? " exists" : ""}">
+    <label class="disc-check">
+      <input type="checkbox" data-disc="${i}" ${discoverySelected.has(i) ? "checked" : ""} ${exists ? "disabled" : ""} aria-label="Kandidat auswählen" />
+    </label>
+    <div class="disc-main">
+      <div class="disc-title">${esc(cand.name || "—")}${exists ? ` <span class="disc-flag">bereits vorhanden</span>` : ""}</div>
+      <div class="disc-sub">
+        ${ok(cand.branche) ? `<span>🏷️ ${esc(cand.branche)}</span>` : ""}
+        ${ok(cand.ort) ? `<span>📍 ${esc(cand.ort)}</span>` : ""}
+        ${ok(cand.groesse) ? `<span>👥 ${esc(cand.groesse)}</span>` : ""}
+        ${web ? `<a href="${esc(web)}" target="_blank" rel="noopener">🌐 Website</a>` : ""}
+      </div>
+      ${cand.begruendung ? `<div class="disc-reason">${esc(cand.begruendung)}</div>` : ""}
+    </div>
+  </div>`;
+}
+
+function renderDiscovery() {
+  const v = $("#discoveryView");
+  let resultsHtml = "";
+  if (discoveryResult && Array.isArray(discoveryResult.kandidaten)) {
+    const cands = discoveryResult.kandidaten;
+    if (!cands.length) {
+      resultsHtml = `<section class="card"><p class="d-muted">Keine Kandidaten gefunden. Versuche andere Kriterien.</p></section>`;
+    } else {
+      resultsHtml = `<section class="card discovery-results">
+        <div class="disc-results-head">
+          <h3>Gefundene Unternehmen <span class="agenda-n">${cands.length}</span></h3>
+          <div class="disc-bulk">
+            <button type="button" class="btn btn-sm" id="discSelectAll">Alle auswählen</button>
+            <button type="button" class="btn btn-primary btn-sm" id="discResearch" disabled>🔎 Auswahl recherchieren (<span id="discCount">0</span>)</button>
+          </div>
+        </div>
+        ${cands.map(candidateRowHtml).join("")}
+      </section>`;
+    }
+  }
+  v.innerHTML = `
+    <div class="view-head"><h2>🧭 Discovery</h2><p class="d-muted">Neue Leads anhand von Kriterien finden</p></div>
+    ${discoveryFormHtml()}
+    ${resultsHtml}
+  `;
+  updateDiscoveryCount();
+}
+
+function updateDiscoveryCount() {
+  const el = $("#discCount");
+  if (el) el.textContent = discoverySelected.size;
+  const btn = $("#discResearch");
+  if (btn) btn.disabled = discoverySelected.size === 0;
+}
+
+async function submitDiscovery() {
+  const criteria = {
+    branche: $("#dc_branche").value.trim(),
+    region: $("#dc_region").value.trim(),
+    groesse: $("#dc_groesse").value.trim(),
+    stichworte: $("#dc_stichworte").value.trim(),
+    freitext: $("#dc_freitext").value.trim(),
+    anzahl: Number($("#dc_anzahl").value) || 10,
+  };
+  if (!criteria.branche && !criteria.region && !criteria.stichworte && !criteria.freitext) {
+    toast("Bitte mindestens ein Kriterium angeben", "error");
+    return;
+  }
+  discoveryCriteria = criteria;
+  try {
+    const { jobId } = await api("/api/discovery", { method: "POST", body: JSON.stringify(criteria) });
+    const label = criteria.branche || criteria.region || criteria.stichworte || "Discovery";
+    addJob(jobId, "Discovery: " + label, undefined, "discovery");
+    toast("Discovery läuft… (Fortschritt unten rechts)", "");
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// Alle noch nicht vorhandenen Kandidaten an-/abwählen.
+function selectAllDiscovery() {
+  const cands = (discoveryResult && discoveryResult.kandidaten) || [];
+  const selectable = cands.map((c, i) => (candidateExisting(c) ? -1 : i)).filter((i) => i >= 0);
+  const allOn = selectable.length > 0 && selectable.every((i) => discoverySelected.has(i));
+  discoverySelected.clear();
+  if (!allOn) selectable.forEach((i) => discoverySelected.add(i));
+  renderDiscovery();
+}
+
+// Startet für jeden ausgewählten Kandidaten eine normale Recherche – gedrosselt
+// auf 3 gleichzeitig (Server deckelt ebenfalls bei 3). Jeder Treffer wird so zu
+// einem ganz normalen Recherche-Job im Dock.
+async function researchSelectedDiscovery() {
+  const cands = (discoveryResult && discoveryResult.kandidaten) || [];
+  const picks = [...discoverySelected].map((i) => cands[i]).filter(Boolean);
+  const queue = picks
+    .map((c) => (c.website && c.website !== "k.A." ? c.website : c.name))
+    .filter(Boolean);
+  if (!queue.length) return;
+  toast(`Starte Recherche für ${queue.length} Lead(s)…`, "");
+  discoverySelected.clear();
+  updateDiscoveryCount();
+
+  let started = 0;
+  const worker = async () => {
+    while (queue.length) {
+      const input = queue.shift();
+      try {
+        const { jobId } = await api("/api/leads/research", { method: "POST", body: JSON.stringify({ input }) });
+        addJob(jobId, input, undefined, "research");
+        started++;
+      } catch (err) {
+        if (err.status === 429) { queue.unshift(input); await sleep(4000); } // Server ausgelastet → später erneut
+        else toast(`„${input}": ${err.message}`, "error");
+      }
+      await sleep(400);
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  toast(`${started} Recherche-Job(s) gestartet`, started ? "success" : "error");
 }
 
 // --- Toast -----------------------------------------------------------------
