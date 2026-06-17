@@ -2420,7 +2420,8 @@ function costChart(days) {
     const yOther = padT + plotH - hOther;
     const yDisc = yOther - hDisc;
     const payload = esc(JSON.stringify({
-      day: d.day, value: total, discovery: disc, models: d.models || {}, researched: d.researched || 0,
+      day: d.day, value: total, discovery: disc, models: d.models || {},
+      researched: d.researched || 0, discovered: d.discovered || 0,
     }));
     const otherRect = hOther > 0 ? `<rect class="cc-bar" x="${bx}" y="${yOther}" width="${bwid}" height="${hOther}" rx="3" />` : "";
     const discRect = hDisc > 0 ? `<rect class="cc-bar-disc" x="${bx}" y="${yDisc}" width="${bwid}" height="${hDisc}" rx="3" />` : "";
@@ -2468,7 +2469,8 @@ function wireCostChart(root) {
         <div class="tip-row tip-total"><span>Gesamt</span><span>${esc(usd(d.value))}</span></div>
         ${discRow}
         ${rows}
-        <div class="tip-row tip-meta"><span>Recherchierte Leads</span><span>${Number(d.researched) || 0}</span></div>`;
+        <div class="tip-row tip-meta"><span>Recherchierte Leads</span><span>${Number(d.researched) || 0}</span></div>
+        <div class="tip-row tip-meta"><span>Entdeckte Leads</span><span>${Number(d.discovered) || 0}</span></div>`;
       tip.classList.remove("hidden");
 
       const wr = wrap.getBoundingClientRect();

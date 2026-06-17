@@ -540,6 +540,13 @@ async function getReport(statuses, probabilities = {}) {
        AND created_at >= date_trunc('day', now()) - interval '13 days'
      GROUP BY 1`
   );
+  // Entdeckte Leads je Tag = neu angelegte Prospects (aus der Discovery).
+  const discoveredRes = await pool.query(
+    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS n
+     FROM prospects
+     WHERE created_at >= date_trunc('day', now()) - interval '13 days'
+     GROUP BY 1`
+  );
   const byDay = {};
   for (const r of costRes.rows) {
     const e = (byDay[r.day] = byDay[r.day] || { cost: 0, discovery: 0, models: {} });
@@ -550,12 +557,15 @@ async function getReport(statuses, probabilities = {}) {
   }
   const researchedByDay = {};
   for (const r of researchRes.rows) researchedByDay[r.day] = Number(r.n) || 0;
+  const discoveredByDay = {};
+  for (const r of discoveredRes.rows) discoveredByDay[r.day] = Number(r.n) || 0;
   const costByDay = listDays(14).map((day) => ({
     day,
     value: byDay[day] ? byDay[day].cost : 0,
     discovery: byDay[day] ? byDay[day].discovery : 0,
     models: byDay[day] ? byDay[day].models : {},
     researched: researchedByDay[day] || 0,
+    discovered: discoveredByDay[day] || 0,
   }));
 
   // Prospects (Discovery-Pipeline) + Discovery-Kosten der letzten 14 Tage.
