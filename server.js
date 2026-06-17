@@ -148,6 +148,10 @@ const STALE_DAYS_SETTING_KEY = "stale_days";
 const DEFAULT_STALE_DAYS = 14;
 let staleDays = DEFAULT_STALE_DAYS;
 
+// Tag-Farben (global, case-insensitiv pro Tag-Name): { name: "#rrggbb" }.
+const TAG_COLORS_SETTING_KEY = "tag_colors";
+let tagColors = {};
+
 function sanitizeStageProbabilities(input) {
   const out = { ...DEFAULT_STAGE_PROBABILITIES };
   if (input && typeof input === "object") {
@@ -164,6 +168,20 @@ function sanitizeStaleDays(input) {
   const n = Math.round(Number(input));
   if (!Number.isFinite(n)) return DEFAULT_STALE_DAYS;
   return Math.max(1, Math.min(365, n)); // sinnvolle Grenzen: 1–365 Tage
+}
+
+function isHexColor(s) { return typeof s === "string" && /^#[0-9a-fA-F]{6}$/.test(s); }
+
+function sanitizeTagColors(input) {
+  const out = {};
+  if (input && typeof input === "object") {
+    for (const [k, v] of Object.entries(input)) {
+      const key = String(k).trim().toLowerCase().slice(0, 40);
+      if (key && isHexColor(v)) out[key] = String(v).toLowerCase();
+      if (Object.keys(out).length >= 300) break;
+    }
+  }
+  return out;
 }
 
 function sanitizeLead(body = {}) {
@@ -548,6 +566,7 @@ app.get("/api/config", (req, res) => {
     statuses: STATUSES,
     stageProbabilities,
     staleDays,
+    tagColors,
     user: actor(req) !== "—" ? actor(req) : "",
     logoutUrl: LOGOUT_URL,
   });
@@ -577,6 +596,21 @@ app.put("/api/settings", wrap(async (req, res) => {
     await db.setSetting(STALE_DAYS_SETTING_KEY, String(staleDays));
   }
   res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays });
+}));
+
+// Tag-Farbe setzen/ändern (global, case-insensitiv pro Tag-Name). Wird vom
+// Inline-Tag-Editor der Detailansicht aufgerufen.
+app.put("/api/tags/color", wrap(async (req, res) => {
+  const tag = typeof req.body.tag === "string" ? req.body.tag.trim().toLowerCase().slice(0, 40) : "";
+  const color = req.body.color;
+  if (!tag || !isHexColor(color)) {
+    return res.status(400).json({ error: "Ungültiger Tag oder Farbwert (#RRGGBB erwartet)." });
+  }
+  tagColors = { ...tagColors, [tag]: String(color).toLowerCase() };
+  const keys = Object.keys(tagColors);
+  if (keys.length > 300) for (const k of keys.slice(0, keys.length - 300)) delete tagColors[k];
+  await db.setSetting(TAG_COLORS_SETTING_KEY, JSON.stringify(tagColors));
+  res.json({ tagColors });
 }));
 
 // Liste aller Leads
@@ -1252,6 +1286,13 @@ db.init()
       if (savedStale) staleDays = sanitizeStaleDays(savedStale);
     } catch (err) {
       logger.warn("stale_days_load_failed", { error: err.message });
+    }
+    // Gespeicherte Tag-Farben laden.
+    try {
+      const savedTagColors = await db.getSetting(TAG_COLORS_SETTING_KEY);
+      if (savedTagColors) tagColors = sanitizeTagColors(JSON.parse(savedTagColors));
+    } catch (err) {
+      logger.warn("tag_colors_load_failed", { error: err.message });
     }
     if (usingDefaultDbPassword()) {
       logger.warn("default_db_password", {

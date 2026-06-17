@@ -21,6 +21,7 @@ let models = [];
 let currentModel = "";
 let stageProbabilities = {};
 let staleDays = 14; // „Kalt"-Schwelle (Tage ohne Aktivität), kommt aus /api/config
+let tagColors = {}; // { tagNameLowercase: "#rrggbb" } – globale Tag-Farben aus /api/config
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
 // Eingeklappte Board-Spalten (Status-Namen). Persistiert wie `view`, lebt
@@ -152,6 +153,7 @@ async function init() {
     currentModel = cfg.model || "";
     stageProbabilities = cfg.stageProbabilities || {};
     staleDays = cfg.staleDays || 14;
+    tagColors = cfg.tagColors || {};
     renderUserBar(cfg);
     renderStatusFilters();
     renderViewToggle();
@@ -527,10 +529,111 @@ function nextStepBadge(l) {
   return `<span class="next-step-badge ${info.state}" title="${esc(l.nextStep || "Wiedervorlage")}">⏰ ${esc(info.label)}</span>`;
 }
 
-// Tag-Chips (für Karten, Board, Detail).
+// --- Tags (farbig, global) -------------------------------------------------
+// Stabile Default-Farbe aus dem Tag-Namen (falls keine explizit gesetzt ist),
+// damit jeder Tag eine Farbe hat. Explizit gewählte Farben (tagColors) gewinnen.
+function hslToHex(h, s, l) {
+  s /= 100; l /= 100;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n) => {
+    const k = (n + h / 30) % 12;
+    const c = l - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)));
+    return Math.round(255 * c).toString(16).padStart(2, "0");
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+function hashColor(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
+  return hslToHex(h % 360, 55, 42);
+}
+function tagColor(tag) {
+  const key = String(tag || "").toLowerCase();
+  return tagColors[key] || hashColor(key);
+}
+// Lesbare Textfarbe (dunkel/hell) je nach Helligkeit der Chip-Farbe.
+function readableText(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  if (!m) return "#ffffff";
+  const n = parseInt(m[1], 16);
+  const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+  return lum > 0.62 ? "#23261F" : "#ffffff";
+}
+
+// Tag-Chips (Karten, Board, Detail) – farbig nach Tag-Farbe.
 function tagsHtml(tags, cls = "lead-card-tags") {
   if (!Array.isArray(tags) || !tags.length) return "";
-  return `<div class="${cls}">${tags.map((t) => `<span class="tag-chip">${esc(t)}</span>`).join("")}</div>`;
+  return `<div class="${cls}">${tags.map((t) => {
+    const c = tagColor(t);
+    return `<span class="tag-chip" style="background:${c};color:${readableText(c)}">${esc(t)}</span>`;
+  }).join("")}</div>`;
+}
+
+// Alle bisher vergebenen Tag-Namen (für die Autocomplete-Vorschläge).
+function allTags() {
+  const set = new Set();
+  for (const l of leads) for (const t of (l.tags || [])) set.add(t);
+  return [...set].sort((a, b) => a.localeCompare(b, "de", { sensitivity: "base" }));
+}
+
+// Inline-Tag-Editor (Detail-Sidebar): farbige, entfernbare Chips + Eingabe mit
+// Farbwähler und Dropdown-Vorschlägen vorhandener Tags.
+function tagEditorHtml(l) {
+  const tags = Array.isArray(l.tags) ? l.tags : [];
+  const chips = tags.map((t) => {
+    const c = tagColor(t);
+    return `<span class="tag-chip tag-chip-rm" style="background:${c};color:${readableText(c)}">${esc(t)}<button type="button" class="tag-x" data-tag-remove="${esc(t)}" aria-label="Tag entfernen">×</button></span>`;
+  }).join("");
+  const opts = allTags().map((t) => `<option value="${esc(t)}"></option>`).join("");
+  return `<div class="tag-editor" id="tagEditor">
+    <div class="tag-chips">${chips || `<span class="d-muted" style="font-size:12px">Noch keine Tags</span>`}</div>
+    <form class="tag-add" id="tagAddForm" autocomplete="off">
+      <input type="color" id="tagAddColor" class="tag-color" value="#0a7a3b" title="Tag-Farbe" aria-label="Tag-Farbe" />
+      <input type="text" id="tagAddInput" class="tag-add-input" list="tagDatalist" placeholder="Tag hinzufügen…" maxlength="40" aria-label="Tag-Name" />
+      <button type="submit" class="btn btn-sm" title="Tag hinzufügen">+ Tag</button>
+      <datalist id="tagDatalist">${opts}</datalist>
+    </form>
+  </div>`;
+}
+
+// Übernimmt einen vom Server zurückgegebenen Lead in die lokale Liste und
+// zeichnet nur den Tag-Editor neu (ohne die ganze Detailseite zurückzusetzen).
+function applyLeadUpdate(updated) {
+  if (!updated || !updated.id) return;
+  const i = leads.findIndex((x) => x.id === updated.id);
+  if (i >= 0) leads[i] = updated; else leads.push(updated);
+  const el = $("#tagEditor");
+  const lead = getLead(detailId);
+  if (el && lead) el.outerHTML = tagEditorHtml(lead);
+}
+
+async function addTagFromDetail() {
+  const lead = getLead(detailId);
+  if (!lead) return;
+  const name = ($("#tagAddInput").value || "").trim().slice(0, 40);
+  if (!name) return;
+  const color = $("#tagAddColor").value || "#0a7a3b";
+  const tags = Array.isArray(lead.tags) ? [...lead.tags] : [];
+  if (!tags.some((t) => t.toLowerCase() === name.toLowerCase())) tags.push(name);
+  try {
+    const r = await api("/api/tags/color", { method: "PUT", body: JSON.stringify({ tag: name, color }) });
+    if (r && r.tagColors) tagColors = r.tagColors;
+    const updated = await api(`/api/leads/${detailId}`, { method: "PUT", body: JSON.stringify({ tags }) });
+    applyLeadUpdate(updated);
+    renderTagFilter();
+    const inp = $("#tagAddInput"); if (inp) inp.focus();
+  } catch (err) { toast(err.message, "error"); }
+}
+
+async function removeTagFromDetail(name) {
+  const lead = getLead(detailId);
+  if (!lead) return;
+  const tags = (lead.tags || []).filter((t) => t.toLowerCase() !== String(name).toLowerCase());
+  try {
+    const updated = await api(`/api/leads/${detailId}`, { method: "PUT", body: JSON.stringify({ tags }) });
+    applyLeadUpdate(updated);
+    renderTagFilter();
+  } catch (err) { toast(err.message, "error"); }
 }
 
 // Hinweis auf die letzte Aktivität ("vor 3 Tg."), bei Stillstand als "kalt"
@@ -723,6 +826,10 @@ function detailViewHtml(l) {
         <section class="card lead-about">
           <h3>Über</h3>
           ${leadAboutHtml(l)}
+          <div class="tags-block">
+            <div class="tags-block-label">Tags</div>
+            ${tagEditorHtml(l)}
+          </div>
         </section>
         <section class="card">
           <h3>KI-Bewertung</h3>
@@ -757,7 +864,6 @@ function leadAboutHtml(l) {
     l.phone ? ["Telefon", esc(l.phone)] : null,
     ["Quelle", l.source ? esc(l.source) : "—"],
     ["Wert", esc(fmtEuro(l.value))],
-    Array.isArray(l.tags) && l.tags.length ? ["Tags", tagsHtml(l.tags, "about-tags")] : null,
     l.lastActivityAt ? ["Letzte Aktivität", esc(fmtDateTime(l.lastActivityAt))] : null,
     ["Angelegt", esc(dt(l.createdAt))],
     ["Aktualisiert", esc(dt(l.updatedAt))],
@@ -1139,6 +1245,8 @@ function onDetailClick(e) {
   if (fil) { setActivityFilter(fil.dataset.filter); return; }
   const delAct = e.target.closest("[data-del-act]");
   if (delAct) { removeActivity(delAct.dataset.delAct); return; }
+  const tagRm = e.target.closest("[data-tag-remove]");
+  if (tagRm) { removeTagFromDetail(tagRm.dataset.tagRemove); return; }
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
   const action = btn.dataset.action;
@@ -1375,6 +1483,15 @@ function bindEvents() {
   // aufgebaut wird.
   $("#detailView").addEventListener("submit", (e) => {
     if (e.target.id === "activityForm") { e.preventDefault(); addDetailActivity(); }
+    else if (e.target.id === "tagAddForm") { e.preventDefault(); addTagFromDetail(); }
+  });
+  // Tag-Eingabe: Farbwähler auf die Farbe des (bestehenden) Tags setzen.
+  $("#detailView").addEventListener("input", (e) => {
+    if (e.target.id === "tagAddInput") {
+      const c = $("#tagAddColor");
+      const name = e.target.value.trim();
+      if (c && name) c.value = tagColor(name);
+    }
   });
 
   // Schließen per Klick auf Overlay
