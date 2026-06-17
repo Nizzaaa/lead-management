@@ -170,7 +170,8 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
         await pool.query(
           `INSERT INTO report_events (kind, cnt, created_at)
            SELECT 'research', 1, created_at FROM activities
-            WHERE type = 'system' AND title IN ('Per Recherche angelegt', 'Recherche aktualisiert')`
+            WHERE type = 'system'
+              AND title IN ('Per Recherche angelegt', 'Recherche aktualisiert', 'Aus Prospect recherchiert')`
         );
         await pool.query(
           `INSERT INTO report_events (kind, cnt, created_at)

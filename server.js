@@ -899,6 +899,7 @@ app.post("/api/prospects/:id/research", aiLimiter, wrap(async (req, res) => {
     const data = { ...leadFromResearch(research, input), status: "neu", value: 0, notes: "" };
     const lead = await db.createLead(data, research);
     await logActivity(lead.id, { type: "system", title: "Aus Prospect recherchiert", body: `Input: ${input}` }, "KI-Recherche");
+    await db.recordEvent("research", 1); // Prospect→Lead-Konvertierung = Recherche → Kosten, mitzählen
     const scored = await scoreAfterResearch(lead, onProgress);
     await db.deleteProspect(prospect.id); // wird zum Lead → aus Prospect-Liste entfernen
     return scored;
