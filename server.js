@@ -726,6 +726,7 @@ app.post("/api/leads/research", aiLimiter, wrap(async (req, res) => {
     const data = { ...leadFromResearch(research, input), status: "neu", value: 0, notes: "" };
     const lead = await db.createLead(data, research);
     await logActivity(lead.id, { type: "system", title: "Per Recherche angelegt", body: `Input: ${input}` }, "KI-Recherche");
+    await db.recordEvent("research", 1); // verlustfreie Zählung (überlebt Lead-Löschung)
     return scoreAfterResearch(lead, onProgress);
   });
   res.status(202).json({ jobId: job.id });
@@ -751,6 +752,7 @@ app.post("/api/leads/:id/research", aiLimiter, wrap(async (req, res) => {
     const data = leadFromResearch(research, input);
     const updated = await db.setLeadResearch(lead.id, research, data);
     await logActivity(lead.id, { type: "system", title: "Recherche aktualisiert", body: `Input: ${input}` }, "KI-Recherche");
+    await db.recordEvent("research", 1); // verlustfreie Zählung (überlebt Lead-Löschung)
     return scoreAfterResearch(updated, onProgress);
   });
   res.status(202).json({ jobId: job.id });
@@ -809,6 +811,7 @@ app.post("/api/discovery", aiLimiter, wrap(async (req, res) => {
       });
       if (prospect) added++; else skippedDuplicate++;
     }
+    await db.recordEvent("discovery", added); // verlustfreie Zählung entdeckter Leads
     onProgress(`✅ ${added} neue Prospects · ${skippedDuplicate} Dublette(n) übersprungen`);
     return { added, skippedDuplicate, total: cands.length };
   }, "discovery");

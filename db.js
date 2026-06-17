@@ -149,6 +149,34 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
       await pool.query("CREATE INDEX IF NOT EXISTS idx_prospects_potenzial ON prospects(potenzial);");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_prospects_status ON prospects(status);");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_prospects_domain ON prospects(domain);");
+      // Verlustfreie Zähl-Events (Recherche/Discovery): append-only, ohne Bezug
+      // zu Leads/Prospects – bleiben also erhalten, auch wenn diese gelöscht oder
+      // (Prospect → Lead) konvertiert werden. Quelle für die Report-Kennzahlen.
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS report_events (
+          id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+          kind       TEXT        NOT NULL,
+          cnt        INTEGER     NOT NULL DEFAULT 1,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_report_events_created ON report_events(created_at);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_report_events_kind ON report_events(kind);");
+      // Einmaliger Backfill aus den vorhandenen (noch nicht gelöschten) Daten,
+      // damit die letzten Tage nicht auf 0 fallen. Idempotent über den Leer-Check:
+      // sobald irgendein Event existiert, wird nicht erneut backfilled.
+      const { rowCount: hasEvents } = await pool.query("SELECT 1 FROM report_events LIMIT 1");
+      if (!hasEvents) {
+        await pool.query(
+          `INSERT INTO report_events (kind, cnt, created_at)
+           SELECT 'research', 1, created_at FROM activities
+            WHERE type = 'system' AND title IN ('Per Recherche angelegt', 'Recherche aktualisiert')`
+        );
+        await pool.query(
+          `INSERT INTO report_events (kind, cnt, created_at)
+           SELECT 'discovery', 1, created_at FROM prospects`
+        );
+      }
       // Aufgaben-Funktion wurde entfernt: Alttabelle und zugehörige
       // System-Verlaufseinträge idempotent bereinigen.
       await pool.query("DROP TABLE IF EXISTS tasks;");
@@ -272,6 +300,14 @@ async function setSetting(key, value) {
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
     [key, value]
   );
+}
+
+// Verlustfreies Zähl-Event (append-only), z. B. kind 'research' oder 'discovery'.
+// Unabhängig von Leads/Prospects – bleibt erhalten, auch wenn diese gelöscht werden.
+async function recordEvent(kind, count = 1) {
+  const n = Math.max(0, Math.round(Number(count) || 0));
+  if (!kind || n <= 0) return;
+  await pool.query("INSERT INTO report_events (kind, cnt) VALUES ($1, $2)", [String(kind), n]);
 }
 
 // probabilities: { status: Prozent } – gewichtet den offenen Pipeline-Wert nach
@@ -531,21 +567,14 @@ async function getReport(statuses, probabilities = {}) {
      WHERE created_at >= date_trunc('day', now()) - interval '13 days'
      GROUP BY 1, 2, 3`
   );
-  // Recherchierte Leads je Tag (angelegt + aktualisiert über die Recherche).
-  const researchRes = await pool.query(
-    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS n
-     FROM activities
-     WHERE type = 'system'
-       AND title IN ('Per Recherche angelegt', 'Recherche aktualisiert')
-       AND created_at >= date_trunc('day', now()) - interval '13 days'
-     GROUP BY 1`
-  );
-  // Entdeckte Leads je Tag = neu angelegte Prospects (aus der Discovery).
-  const discoveredRes = await pool.query(
-    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS n
-     FROM prospects
+  // Recherchierte & entdeckte Leads je Tag – verlustfrei aus report_events
+  // (bleiben erhalten, auch wenn Leads/Prospects gelöscht oder konvertiert werden).
+  const eventsRes = await pool.query(
+    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, kind,
+            COALESCE(SUM(cnt),0)::int AS n
+     FROM report_events
      WHERE created_at >= date_trunc('day', now()) - interval '13 days'
-     GROUP BY 1`
+     GROUP BY 1, 2`
   );
   const byDay = {};
   for (const r of costRes.rows) {
@@ -556,9 +585,11 @@ async function getReport(statuses, probabilities = {}) {
     if (r.model) e.models[r.model] = (e.models[r.model] || 0) + c;
   }
   const researchedByDay = {};
-  for (const r of researchRes.rows) researchedByDay[r.day] = Number(r.n) || 0;
   const discoveredByDay = {};
-  for (const r of discoveredRes.rows) discoveredByDay[r.day] = Number(r.n) || 0;
+  for (const r of eventsRes.rows) {
+    if (r.kind === "research") researchedByDay[r.day] = Number(r.n) || 0;
+    else if (r.kind === "discovery") discoveredByDay[r.day] = Number(r.n) || 0;
+  }
   const costByDay = listDays(14).map((day) => ({
     day,
     value: byDay[day] ? byDay[day].cost : 0,
@@ -632,6 +663,7 @@ module.exports = {
   deleteLead,
   getSetting,
   setSetting,
+  recordEvent,
   getStats,
   getWidgetStats,
   recordUsage,
