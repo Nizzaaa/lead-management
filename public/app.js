@@ -2407,16 +2407,27 @@ function costChart(days) {
   }
 
   const bw = plotW / days.length;
+  // Gestapelter Balken je Tag: unten KI-Recherche/Übrige (grün), oben Discovery
+  // (amber) – so heben sich die Discovery-Kosten farblich ab.
   const bars = days.map((d, i) => {
     const x = padL + i * bw;
-    const h = top > 0 ? ((d.value || 0) / top) * plotH : 0;
-    const y = padT + plotH - h;
+    const total = d.value || 0;
+    const disc = Math.min(Math.max(0, d.discovery || 0), total);
+    const other = total - disc;
+    const bx = x + bw * 0.18, bwid = bw * 0.64;
+    const hOther = top > 0 ? (other / top) * plotH : 0;
+    const hDisc = top > 0 ? (disc / top) * plotH : 0;
+    const yOther = padT + plotH - hOther;
+    const yDisc = yOther - hDisc;
     const payload = esc(JSON.stringify({
-      day: d.day, value: d.value || 0, models: d.models || {}, researched: d.researched || 0,
+      day: d.day, value: total, discovery: disc, models: d.models || {}, researched: d.researched || 0,
     }));
+    const otherRect = hOther > 0 ? `<rect class="cc-bar" x="${bx}" y="${yOther}" width="${bwid}" height="${hOther}" rx="3" />` : "";
+    const discRect = hDisc > 0 ? `<rect class="cc-bar-disc" x="${bx}" y="${yDisc}" width="${bwid}" height="${hDisc}" rx="3" />` : "";
     return `<g class="cc-col" data-tip="${payload}">
         <rect class="cc-hit" x="${x}" y="${padT}" width="${bw}" height="${plotH}" />
-        <rect class="cc-bar" x="${x + bw * 0.18}" y="${y}" width="${bw * 0.64}" height="${Math.max(0, h)}" rx="3" />
+        ${otherRect}
+        ${discRect}
         <text x="${x + bw / 2}" y="${H - 8}" class="cc-lbl">${esc(dayLabel(d.day))}</text>
       </g>`;
   }).join("");
@@ -2428,6 +2439,10 @@ function costChart(days) {
         ${bars}
       </svg>
       <div class="chart-tip hidden"></div>
+    </div>
+    <div class="cost-legend">
+      <span class="cost-legend-item"><span class="ci-swatch ci-research"></span> KI-Recherche</span>
+      <span class="cost-legend-item"><span class="ci-swatch ci-disc"></span> Discovery</span>
     </div>`;
 }
 
@@ -2446,8 +2461,12 @@ function wireCostChart(root) {
       const rows = models.length
         ? models.map(([m, c]) => `<div class="tip-row"><span>${esc(shortModel(m))}</span><span>${esc(usd(c))}</span></div>`).join("")
         : `<div class="tip-row d-muted"><span>Keine KI-Kosten</span><span></span></div>`;
+      const discRow = (Number(d.discovery) || 0) > 0
+        ? `<div class="tip-row tip-disc"><span>· davon Discovery</span><span>${esc(usd(d.discovery))}</span></div>`
+        : "";
       tip.innerHTML = `<div class="tip-head">${esc(dayLabelLong(d.day))}</div>
         <div class="tip-row tip-total"><span>Gesamt</span><span>${esc(usd(d.value))}</span></div>
+        ${discRow}
         ${rows}
         <div class="tip-row tip-meta"><span>Recherchierte Leads</span><span>${Number(d.researched) || 0}</span></div>`;
       tip.classList.remove("hidden");
@@ -2657,7 +2676,9 @@ function renderAgenda() {
   const overdue = withStep.filter((l) => l.nextStepAt < today);
   const todays = withStep.filter((l) => l.nextStepAt === today);
   const upcoming = withStep.filter((l) => l.nextStepAt > today);
-  const noStep = open.filter((l) => !l.nextStepAt);
+  // Neue Leads (Status "neu") bleiben außen vor – erst bearbeitete offene Leads
+  // ohne geplanten nächsten Schritt brauchen Aufmerksamkeit.
+  const noStep = open.filter((l) => l.status !== "neu" && !l.nextStepAt);
 
   const section = (title, arr, cls = "") => arr.length
     ? `<section class="card agenda-section ${cls}">

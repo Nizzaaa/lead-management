@@ -879,8 +879,16 @@ a { color: inherit; }
 .cost-chart .cc-lbl { fill: var(--muted); font-size: 10px; text-anchor: middle; }
 .cost-chart .cc-hit { fill: transparent; }
 .cost-chart .cc-bar { fill: var(--primary); transition: fill .12s ease; }
+.cost-chart .cc-bar-disc { fill: var(--amber); transition: fill .12s ease; }
 .cost-chart .cc-col:hover .cc-bar { fill: var(--accent); }
+.cost-chart .cc-col:hover .cc-bar-disc { fill: #9A5E00; }
 .cost-chart .cc-col:hover .cc-hit { fill: rgba(10,122,59,0.06); }
+/* Legende unter dem Kosten-Diagramm (Recherche vs. Discovery) */
+.cost-legend { display: flex; gap: 16px; justify-content: flex-end; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.cost-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.ci-swatch { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.ci-research { background: var(--primary); }
+.ci-disc { background: var(--amber); }
 .chart-tip {
   position: absolute; z-index: 6; pointer-events: none;
   min-width: 172px;
