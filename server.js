@@ -5,8 +5,8 @@ const path = require("path");
 const crypto = require("crypto");
 const fs = require("fs");
 const db = require("./db");
-const { researchCompany } = require("./research");
-const { leadsToCsv, parseCsv, csvRowsToLeads, parseNumber, leadsToXlsxXml } = require("./exporters");
+const { researchCompany, discoverCompanies } = require("./research");
+const { leadsToCsv, prospectsToCsv, parseCsv, csvRowsToLeads, csvRowsToProspects, parseNumber, leadsToXlsxXml } = require("./exporters");
 const { logger, httpLogger } = require("./logger");
 const cfAccess = require("./cfAccess");
 
@@ -142,6 +142,16 @@ const DEFAULT_STAGE_PROBABILITIES = {
 const STAGE_PROB_SETTING_KEY = "stage_probabilities";
 let stageProbabilities = { ...DEFAULT_STAGE_PROBABILITIES };
 
+// „Kalt"-Schwelle: ab so vielen Tagen ohne Aktivität gilt ein offener Lead als
+// kalt (clientseitiger 💤-Filter). Hier nur persistiert und ausgeliefert.
+const STALE_DAYS_SETTING_KEY = "stale_days";
+const DEFAULT_STALE_DAYS = 14;
+let staleDays = DEFAULT_STALE_DAYS;
+
+// Tag-Farben (global, case-insensitiv pro Tag-Name): { name: "#rrggbb" }.
+const TAG_COLORS_SETTING_KEY = "tag_colors";
+let tagColors = {};
+
 function sanitizeStageProbabilities(input) {
   const out = { ...DEFAULT_STAGE_PROBABILITIES };
   if (input && typeof input === "object") {
@@ -149,6 +159,26 @@ function sanitizeStageProbabilities(input) {
       if (input[s] === undefined || input[s] === "") continue;
       const n = Math.round(Number(input[s]));
       if (Number.isFinite(n)) out[s] = Math.max(0, Math.min(100, n));
+    }
+  }
+  return out;
+}
+
+function sanitizeStaleDays(input) {
+  const n = Math.round(Number(input));
+  if (!Number.isFinite(n)) return DEFAULT_STALE_DAYS;
+  return Math.max(1, Math.min(365, n)); // sinnvolle Grenzen: 1–365 Tage
+}
+
+function isHexColor(s) { return typeof s === "string" && /^#[0-9a-fA-F]{6}$/.test(s); }
+
+function sanitizeTagColors(input) {
+  const out = {};
+  if (input && typeof input === "object") {
+    for (const [k, v] of Object.entries(input)) {
+      const key = String(k).trim().toLowerCase().slice(0, 40);
+      if (key && isHexColor(v)) out[key] = String(v).toLowerCase();
+      if (Object.keys(out).length >= 300) break;
     }
   }
   return out;
@@ -166,6 +196,19 @@ function sanitizeLead(body = {}) {
   let nextStepAt = null;
   const ns = clean(body.nextStepAt);
   if (/^\d{4}-\d{2}-\d{2}$/.test(ns) && !Number.isNaN(new Date(ns).getTime())) nextStepAt = ns;
+  // Tags: kurze Labels, getrimmt, dedupliziert (case-insensitiv) und gedeckelt.
+  // undefined lassen, wenn nicht übergeben → updateLead behält die Bestands-Tags.
+  let tags;
+  if (Array.isArray(body.tags)) {
+    const seen = new Set();
+    tags = [];
+    for (const t of body.tags) {
+      const v = typeof t === "string" ? t.trim().slice(0, 40) : "";
+      const key = v.toLowerCase();
+      if (v && !seen.has(key)) { seen.add(key); tags.push(v); }
+      if (tags.length >= 30) break;
+    }
+  }
   return {
     name: clean(body.name, 300),
     company: clean(body.company, 300),
@@ -177,6 +220,31 @@ function sanitizeLead(body = {}) {
     notes: clean(body.notes, 5000),
     nextStep: clean(body.nextStep, 500),
     nextStepAt,
+    tags,
+  };
+}
+
+// Wie sanitizeLead, aber für Prospects (Discovery-Liste). Begrenzt Längen,
+// validiert Potenzial (A–D) und Status (offen/abgelehnt) und parst die
+// Kriterien-Spalte (JSON) zurück in ein Objekt.
+function sanitizeProspect(body = {}) {
+  const clean = (v, max = 500) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  let potenzial = clean(body.potenzial, 2).toUpperCase();
+  if (!["A", "B", "C", "D"].includes(potenzial)) potenzial = "C";
+  const status = clean(body.status).toLowerCase() === "abgelehnt" ? "abgelehnt" : "offen";
+  return {
+    name: clean(body.name, 300),
+    website: clean(body.website, 500),
+    domain: clean(body.domain, 300),
+    ort: clean(body.ort, 200),
+    branche: clean(body.branche, 200),
+    groesse: clean(body.groesse, 100),
+    potenzial,
+    potenzialGrund: clean(body.potenzialGrund, 500),
+    begruendung: clean(body.begruendung, 2000),
+    quelle: clean(body.quelle, 500),
+    status,
+    kriterien: parseJsonObject(body.kriterienJson),
   };
 }
 
@@ -338,10 +406,14 @@ function friendlyResearchError(raw) {
   return msg ? `Recherche fehlgeschlagen: ${msg.slice(0, 300)}` : "Recherche fehlgeschlagen. Bitte erneut versuchen.";
 }
 
-function startResearchJob(runner) {
+// Hintergrund-Job für lang laufende KI-Aufgaben. `kind` unterscheidet die Art
+// ("research" → Ergebnis ist ein Lead; "discovery" → Ergebnis ist eine
+// Kandidatenliste). Das Ergebnis liegt generisch in job.result; für die
+// Recherche wird zusätzlich job.lead gesetzt (Rückwärtskompatibilität).
+function startResearchJob(runner, kind = "research") {
   const id = crypto.randomUUID();
   const controller = new AbortController();
-  const job = { id, status: "running", steps: [], lead: null, error: null, finishedAt: 0, controller };
+  const job = { id, kind, status: "running", steps: [], result: null, lead: null, error: null, finishedAt: 0, controller };
   researchJobs.set(id, job);
 
   const onProgress = (text) => {
@@ -352,7 +424,9 @@ function startResearchJob(runner) {
 
   (async () => {
     try {
-      job.lead = await runner(onProgress, controller.signal);
+      const out = await runner(onProgress, controller.signal);
+      job.result = out;
+      if (kind === "research") job.lead = out;
       job.status = "done";
     } catch (err) {
       if (controller.signal.aborted) {
@@ -491,6 +565,8 @@ app.get("/api/config", (req, res) => {
     models: AVAILABLE_MODELS,
     statuses: STATUSES,
     stageProbabilities,
+    staleDays,
+    tagColors,
     user: actor(req) !== "—" ? actor(req) : "",
     logoutUrl: LOGOUT_URL,
   });
@@ -498,7 +574,7 @@ app.get("/api/config", (req, res) => {
 
 // Einstellungen lesen
 app.get("/api/settings", (req, res) => {
-  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities });
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays });
 });
 
 // Einstellungen speichern (KI-Modell und/oder Abschlusswahrscheinlichkeiten).
@@ -515,7 +591,26 @@ app.put("/api/settings", wrap(async (req, res) => {
     stageProbabilities = sanitizeStageProbabilities(req.body.stageProbabilities);
     await db.setSetting(STAGE_PROB_SETTING_KEY, JSON.stringify(stageProbabilities));
   }
-  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities });
+  if (req.body.staleDays !== undefined) {
+    staleDays = sanitizeStaleDays(req.body.staleDays);
+    await db.setSetting(STALE_DAYS_SETTING_KEY, String(staleDays));
+  }
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays });
+}));
+
+// Tag-Farbe setzen/ändern (global, case-insensitiv pro Tag-Name). Wird vom
+// Inline-Tag-Editor der Detailansicht aufgerufen.
+app.put("/api/tags/color", wrap(async (req, res) => {
+  const tag = typeof req.body.tag === "string" ? req.body.tag.trim().toLowerCase().slice(0, 40) : "";
+  const color = req.body.color;
+  if (!tag || !isHexColor(color)) {
+    return res.status(400).json({ error: "Ungültiger Tag oder Farbwert (#RRGGBB erwartet)." });
+  }
+  tagColors = { ...tagColors, [tag]: String(color).toLowerCase() };
+  const keys = Object.keys(tagColors);
+  if (keys.length > 300) for (const k of keys.slice(0, keys.length - 300)) delete tagColors[k];
+  await db.setSetting(TAG_COLORS_SETTING_KEY, JSON.stringify(tagColors));
+  res.json({ tagColors });
 }));
 
 // Liste aller Leads
@@ -665,6 +760,7 @@ app.post("/api/leads/research", aiLimiter, wrap(async (req, res) => {
     const data = { ...leadFromResearch(research, input), status: "neu", value: 0, notes: "" };
     const lead = await db.createLead(data, research);
     await logActivity(lead.id, { type: "system", title: "Per Recherche angelegt", body: `Input: ${input}` }, "KI-Recherche");
+    await db.recordEvent("research", 1); // verlustfreie Zählung (überlebt Lead-Löschung)
     return scoreAfterResearch(lead, onProgress);
   });
   res.status(202).json({ jobId: job.id });
@@ -690,6 +786,7 @@ app.post("/api/leads/:id/research", aiLimiter, wrap(async (req, res) => {
     const data = leadFromResearch(research, input);
     const updated = await db.setLeadResearch(lead.id, research, data);
     await logActivity(lead.id, { type: "system", title: "Recherche aktualisiert", body: `Input: ${input}` }, "KI-Recherche");
+    await db.recordEvent("research", 1); // verlustfreie Zählung (überlebt Lead-Löschung)
     return scoreAfterResearch(updated, onProgress);
   });
   res.status(202).json({ jobId: job.id });
@@ -699,7 +796,7 @@ app.post("/api/leads/:id/research", aiLimiter, wrap(async (req, res) => {
 app.get("/api/research/:jobId", (req, res) => {
   const job = researchJobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: "Recherche-Job nicht gefunden." });
-  res.json({ status: job.status, steps: job.steps, lead: job.lead, error: job.error });
+  res.json({ status: job.status, steps: job.steps, lead: job.lead, result: job.result, kind: job.kind, error: job.error });
 });
 
 // Laufende Recherche abbrechen (bricht den KI-Stream via AbortController ab).
@@ -712,6 +809,137 @@ app.post("/api/research/:jobId/cancel", (req, res) => {
   }
   res.json({ status: job.status });
 });
+
+// Lead-Discovery: findet anhand von Kriterien reale Unternehmen und legt sie als
+// (deduplizierte) Prospects an. Läuft als Hintergrund-Job; das Ergebnis ist eine
+// Zusammenfassung { added, skippedDuplicate, total }, gepollt per /api/research/:jobId.
+app.post("/api/discovery", aiLimiter, wrap(async (req, res) => {
+  if (!requireAi(res)) return;
+  if (!allowNewResearch(res)) return;
+  const b = req.body || {};
+  const clean = (v, max = 200) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+  const criteria = {
+    branche: clean(b.branche),
+    region: clean(b.region),
+    groesse: clean(b.groesse),
+    stichworte: clean(b.stichworte),
+    freitext: clean(b.freitext, 500),
+    anzahl: Math.max(1, Math.min(25, Math.round(Number(b.anzahl) || 10))),
+  };
+  if (!criteria.branche && !criteria.region && !criteria.stichworte && !criteria.freitext) {
+    return res.status(400).json({ error: "Bitte mindestens ein Kriterium angeben (Branche, Region oder Stichworte)." });
+  }
+  const job = startResearchJob(async (onProgress, signal) => {
+    const result = await discoverCompanies(anthropic, criteria, currentModel, onProgress, signal,
+      (u) => recordClaudeUsage(u.model, u.kind, u.usage));
+    const cands = Array.isArray(result.kandidaten) ? result.kandidaten : [];
+    // Treffer dedupliziert als Prospects anlegen (Dedup gegen Prospects + Leads).
+    let added = 0, skippedDuplicate = 0;
+    for (const c of cands) {
+      const prospect = await db.createProspect({
+        name: c.name,
+        website: c.website && c.website !== "k.A." ? c.website : "",
+        ort: c.ort, branche: c.branche, groesse: c.groesse,
+        potenzial: c.potenzial, potenzialGrund: c.potenzialGrund,
+        begruendung: c.begruendung, quelle: c.quelle, kriterien: criteria,
+      });
+      if (prospect) added++; else skippedDuplicate++;
+    }
+    await db.recordEvent("discovery", added); // verlustfreie Zählung entdeckter Leads
+    onProgress(`✅ ${added} neue Prospects · ${skippedDuplicate} Dublette(n) übersprungen`);
+    return { added, skippedDuplicate, total: cands.length };
+  }, "discovery");
+  res.status(202).json({ jobId: job.id });
+}));
+
+// --- Prospects (Discovery-Liste) -------------------------------------------
+// Alle Prospects (Frontend filtert nach Status: offen/abgelehnt).
+app.get("/api/prospects", wrap(async (req, res) => {
+  res.json(await db.listProspects());
+}));
+
+// CSV-Export aller Prospects (offen + abgelehnt; die Status-Spalte
+// unterscheidet sie). Mit UTF-8-BOM, damit Excel Umlaute korrekt anzeigt.
+app.get("/api/prospects/export.csv", wrap(async (req, res) => {
+  const prospects = await db.listProspects();
+  const csv = prospectsToCsv(prospects);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="prospects-${ymd()}.csv"`);
+  res.send("﻿" + csv);
+}));
+
+// CSV-Import: legt aus einer hochgeladenen CSV neue Prospects an. Dubletten
+// (gegen vorhandene Prospects inkl. 'abgelehnt' UND Leads) werden übersprungen –
+// anders als beim Lead-Import gibt es keine Ergänzung bestehender Datensätze.
+app.post("/api/prospects/import", wrap(async (req, res) => {
+  const text = typeof req.body.csv === "string" ? req.body.csv : "";
+  if (!text.trim()) {
+    return res.status(400).json({ error: "Keine CSV-Daten erhalten." });
+  }
+  const { prospects: rows, recognized } = csvRowsToProspects(parseCsv(text));
+  if (!recognized.length) {
+    return res.status(400).json({
+      error: "Keine bekannten Spalten gefunden. Erwartet werden u. a. Name, Website, Ort, Branche, Größe, Potenzial, Status.",
+    });
+  }
+
+  let created = 0;
+  let skippedDuplicate = 0;
+  let skippedEmpty = 0;
+  const errors = [];
+
+  for (let idx = 0; idx < rows.length; idx++) {
+    try {
+      const data = sanitizeProspect(rows[idx]);
+      if (!data.name && !data.website && !data.domain) { skippedEmpty++; continue; }
+      const prospect = await db.createProspect(data);
+      if (prospect) created++; else skippedDuplicate++;
+    } catch (err) {
+      errors.push({ row: idx + 2, error: err.message }); // +2: Kopfzeile + 1-basiert
+    }
+  }
+
+  res.json({ created, skippedDuplicate, skippedEmpty, errors, recognized, total: rows.length });
+}));
+
+// Status setzen: verwerfen ('abgelehnt', bleibt für Dedup erhalten) oder
+// wiederherstellen ('offen').
+app.put("/api/prospects/:id", wrap(async (req, res) => {
+  const status = req.body && req.body.status === "abgelehnt" ? "abgelehnt" : "offen";
+  const prospect = await db.setProspectStatus(req.params.id, status);
+  if (!prospect) return res.status(404).json({ error: "Prospect nicht gefunden." });
+  res.json(prospect);
+}));
+
+// Endgültige Löschung (DSGVO) – entfernt den Prospect vollständig.
+app.delete("/api/prospects/:id", wrap(async (req, res) => {
+  const ok = await db.deleteProspect(req.params.id);
+  if (!ok) return res.status(404).json({ error: "Prospect nicht gefunden." });
+  res.status(204).end();
+}));
+
+// Prospect recherchieren → vollwertigen Lead anlegen (wie /api/leads/research)
+// und den Prospect anschließend aus der Liste entfernen (er ist jetzt Lead).
+app.post("/api/prospects/:id/research", aiLimiter, wrap(async (req, res) => {
+  if (!requireAi(res)) return;
+  if (!allowNewResearch(res)) return;
+  const prospect = await db.getProspect(req.params.id);
+  if (!prospect) return res.status(404).json({ error: "Prospect nicht gefunden." });
+  const input = (prospect.website && prospect.website.trim()) || prospect.name;
+  if (!input) return res.status(400).json({ error: "Kein Recherche-Input vorhanden." });
+  const job = startResearchJob(async (onProgress, signal) => {
+    const research = await researchCompany(anthropic, input, currentModel, onProgress, signal,
+      (u) => recordClaudeUsage(u.model, u.kind, u.usage));
+    const data = { ...leadFromResearch(research, input), status: "neu", value: 0, notes: "" };
+    const lead = await db.createLead(data, research);
+    await logActivity(lead.id, { type: "system", title: "Aus Prospect recherchiert", body: `Input: ${input}` }, "KI-Recherche");
+    await db.recordEvent("research", 1); // Prospect→Lead-Konvertierung = Recherche → Kosten, mitzählen
+    const scored = await scoreAfterResearch(lead, onProgress);
+    await db.deleteProspect(prospect.id); // wird zum Lead → aus Prospect-Liste entfernen
+    return scored;
+  });
+  res.status(202).json({ jobId: job.id });
+}));
 
 // Recherche-Dossier manuell bearbeiten (ohne KI neu zu starten).
 app.put("/api/leads/:id/research", wrap(async (req, res) => {
@@ -1051,6 +1279,20 @@ db.init()
       if (savedProb) stageProbabilities = sanitizeStageProbabilities(JSON.parse(savedProb));
     } catch (err) {
       logger.warn("stage_probabilities_load_failed", { error: err.message });
+    }
+    // Gespeicherte „Kalt"-Schwelle laden.
+    try {
+      const savedStale = await db.getSetting(STALE_DAYS_SETTING_KEY);
+      if (savedStale) staleDays = sanitizeStaleDays(savedStale);
+    } catch (err) {
+      logger.warn("stale_days_load_failed", { error: err.message });
+    }
+    // Gespeicherte Tag-Farben laden.
+    try {
+      const savedTagColors = await db.getSetting(TAG_COLORS_SETTING_KEY);
+      if (savedTagColors) tagColors = sanitizeTagColors(JSON.parse(savedTagColors));
+    } catch (err) {
+      logger.warn("tag_colors_load_failed", { error: err.message });
     }
     if (usingDefaultDbPassword()) {
       logger.warn("default_db_password", {

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=25" />
+  <link rel="stylesheet" href="styles.css?v=35" />
   <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
@@ -14,18 +14,19 @@
       <span id="brandWordmark" class="brand-wordmark" style="display:none;">FU/GE <span class="wm-sol">SOLUTIONS</span></span>
       <div>
         <h1 class="sr-only">FU/GE Solutions</h1>
-        <p class="tagline">Lead-Verwaltung mit KI-Unterstützung</p>
       </div>
     </a>
     <div class="topbar-actions">
+      <div class="global-search" id="globalSearch">
+        <input type="search" id="globalSearchInput" class="gs-input" placeholder="🔍 Schnellsuche…" autocomplete="off" aria-label="Schnellsuche über Leads, Prospects, Funktionen, Tags und Eingruppierung" />
+        <div id="globalSearchResults" class="gs-results hidden" role="listbox"></div>
+      </div>
       <a class="navlink" href="#/" data-nav-link="list">🗂 Leads</a>
+      <a class="navlink" href="#/heute" data-nav-link="agenda">📅 Heute <span id="agendaDue" class="nav-badge agenda-due hidden">0</span></a>
+      <a class="navlink" href="#/prospects" data-nav-link="prospects">📇 Prospects</a>
       <a class="navlink" href="#/reports" data-nav-link="reports">📊 Berichte</a>
-      <span id="aiBadge" class="badge badge-off" title="KI-Status">KI: …</span>
       <button id="settingsBtn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">⚙️</button>
-      <button id="manualLeadBtn" class="btn" title="Lead manuell anlegen">+ <span class="btn-text">Manuell</span></button>
       <button id="addLeadBtn" class="btn btn-primary">🔎 Lead recherchieren</button>
-      <span id="userInfo" class="user-chip" hidden></span>
-      <a id="logoutLink" class="navlink" href="#" target="_top" rel="noopener" title="Abmelden" hidden>⎋ Logout</a>
     </div>
   </header>
 
@@ -40,16 +41,31 @@
 
     <section class="toolbar">
       <div class="toolbar-top">
-        <input type="search" id="search" class="search" placeholder="🔍 Suche nach Name, Firma, E-Mail…" />
+        <select id="sortBy" class="sort-select" aria-label="Sortierung" title="Sortierung">
+          <option value="created_desc">Neueste zuerst</option>
+          <option value="created_asc">Älteste zuerst</option>
+          <option value="activity_desc">Zuletzt aktiv</option>
+          <option value="activity_asc">Längste Inaktivität</option>
+          <option value="next_step_asc">Wiedervorlage (früheste)</option>
+          <option value="score_desc">KI-Score (hoch→niedrig)</option>
+          <option value="value_desc">Wert (hoch→niedrig)</option>
+          <option value="company_asc">Firma A–Z</option>
+        </select>
         <div class="view-switch" id="viewToggle" role="tablist" aria-label="Ansicht wählen">
           <button class="vs-option active" data-view="list" role="tab" title="Kartenansicht">🗂 Karten</button>
           <button class="vs-option" data-view="kanban" role="tab" title="Kanban-Board nach Status">▦ Board</button>
           <span class="vs-thumb" aria-hidden="true"></span>
         </div>
+        <button id="manualLeadBtn" class="btn" title="Lead manuell anlegen">+ <span class="btn-text">Manuell</span></button>
       </div>
       <div class="toolbar-filters">
         <div class="filters" id="statusFilters"></div>
         <button class="chip due-chip" id="dueFilter" title="Nur fällige/überfällige Wiedervorlagen">⏰ Fällig <span id="dueCount" class="due-count hidden">0</span></button>
+        <button class="chip" id="staleFilter" title="Offene Leads ohne Aktivität der letzten 14 Tage">💤 Kalt</button>
+        <select id="tagFilter" class="tag-filter" aria-label="Nach Tag filtern" title="Nach Tag filtern">
+          <option value="">Alle Tags</option>
+        </select>
+        <button class="chip" id="selectToggle" title="Mehrere Leads auswählen und gemeinsam bearbeiten">☑️ Auswählen</button>
       </div>
     </section>
 
@@ -64,6 +80,12 @@
 
   <!-- ============ DETAIL-ANSICHT (eine Seite pro Lead) ============ -->
   <main class="container hidden" id="detailView" aria-live="polite"></main>
+
+  <!-- ============ HEUTE / AGENDA-ANSICHT ============ -->
+  <main class="container hidden" id="agendaView" aria-live="polite"></main>
+
+  <!-- ============ PROSPECTS-ANSICHT ============ -->
+  <main class="container hidden" id="prospectsView" aria-live="polite"></main>
 
   <!-- ============ BERICHTE-ANSICHT ============ -->
   <main class="container hidden" id="reportsView" aria-live="polite"></main>
@@ -91,6 +113,34 @@
     </div>
   </div>
 
+  <!-- Discovery-Modal: neue Prospects anhand von Kriterien finden -->
+  <div class="modal-overlay hidden" id="discoveryModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>🧭 Discovery</h2>
+        <button class="icon-btn" id="closeDiscoveryModal" aria-label="Schließen">✕</button>
+      </div>
+      <form id="discoveryForm" class="form">
+        <p class="hint">Kriterien angeben – die KI sucht passende, reale Unternehmen und legt sie (dedupliziert) als <strong>Prospects</strong> an. Bereits vorhandene Prospects oder Leads werden übersprungen. Die Suche läuft im Hintergrund (Fortschritt unten rechts).</p>
+        <div class="form-row">
+          <label>Branche<input type="text" id="dc_branche" placeholder="z. B. Steuerberatung, SHK, Autohaus" /></label>
+          <label>Region / Ort<input type="text" id="dc_region" placeholder="z. B. Berlin, Raum München, NRW" /></label>
+        </div>
+        <div class="form-row">
+          <label>Unternehmensgröße<input type="text" id="dc_groesse" placeholder="z. B. 10–50 Mitarbeitende" /></label>
+          <label>Anzahl Treffer<input type="number" id="dc_anzahl" min="1" max="25" value="10" /></label>
+        </div>
+        <label>Stichworte / Signale<input type="text" id="dc_stichworte" placeholder="z. B. terminintensiv, mehrere Standorte, veraltete Website" /></label>
+        <label>Weitere Wünsche (frei)<textarea id="dc_freitext" rows="2" placeholder="Beschreibe deinen Wunschkunden …"></textarea></label>
+        <p class="hint hidden" id="discoveryAiHint">KI nicht konfiguriert (ANTHROPIC_API_KEY fehlt).</p>
+        <div class="form-actions">
+          <button type="button" class="btn" id="cancelDiscoveryBtn">Abbrechen</button>
+          <button type="submit" class="btn btn-primary" id="dcSubmit">🔎 Discovery starten</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- Einstellungen: KI-Modell auswählen -->
   <div class="modal-overlay hidden" id="settingsModal">
     <div class="modal" role="dialog" aria-modal="true">
@@ -109,17 +159,47 @@
           <div id="stageProbFields" class="prob-grid"></div>
         </label>
 
+        <label>
+          <span class="field-head">„Kalt" ab (Tage ohne Aktivität)<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Ab so vielen Tagen ohne Aktivität (bzw. seit Anlage) gilt ein offener Lead als „kalt" und erscheint im 💤-Filter. Gewonnene und verlorene Leads zählen nie als kalt. Bereich: 1–365 Tage.</span></span></span>
+          <input type="number" id="settingsStaleDays" class="settings-number" min="1" max="365" step="1" />
+        </label>
+
         <div class="settings-section">
-          <h3 class="field-head">📦 Daten-Import &amp; -Export<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Alle Leads als Datei sichern oder eine Liste importieren. Die CSV verwendet das Trennzeichen „;“ und öffnet sich direkt in Excel.<br><br>Erkannte Spalten (deutsch oder englisch): Name, Firma, E-Mail, Telefon, Quelle, Status, Wert, Notizen, Nächster Schritt, Wiedervorlage sowie „KI-Bewertung (JSON)“ und „Dossier (JSON)“ aus dem Export. Bei Dubletten (gleiche E-Mail oder Firma) wird kein zweiter Datensatz angelegt; stattdessen werden nur fehlende Felder des bestehenden Leads ergänzt.</span></span></h3>
-          <div class="io-row">
-            <button type="button" class="btn" id="exportCsvBtn">⬇️ CSV exportieren</button>
-            <button type="button" class="btn" id="exportXlsxBtn">⬇️ Excel exportieren</button>
+          <h3 class="field-head">📦 Daten-Import &amp; -Export<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Leads und Prospects als Datei sichern oder importieren. Die CSV verwendet das Trennzeichen „;“ und öffnet sich direkt in Excel.<br><br>Erkannte Spalten beim Lead-Import (deutsch oder englisch): Name, Firma, E-Mail, Telefon, Quelle, Status, Wert, Notizen, Nächster Schritt, Wiedervorlage sowie „KI-Bewertung (JSON)“ und „Dossier (JSON)“ aus dem Export. Bei Lead-Dubletten (gleiche E-Mail oder Firma) wird kein zweiter Datensatz angelegt; stattdessen werden nur fehlende Felder des bestehenden Leads ergänzt.<br><br>Prospect-Import erkennt u. a.: Name, Website, Ort, Branche, Größe, Potenzial, Begründung, Quelle, Status, „Kriterien (JSON)“. Dubletten (gegen vorhandene Prospects und Leads) werden übersprungen. Der Prospect-Export enthält die komplette Discovery-Liste (offen + abgelehnt).</span></span></h3>
+          <div class="io-group">
+            <span class="io-group-label">Leads</span>
+            <div class="io-row">
+              <button type="button" class="btn" id="exportCsvBtn">⬇️ CSV exportieren</button>
+              <button type="button" class="btn" id="exportXlsxBtn">⬇️ Excel exportieren</button>
+            </div>
+            <div class="io-import">
+              <label class="dropzone">
+                <input type="file" id="importCsvInput" accept=".csv,text/csv" />
+                <span class="dz-icon" aria-hidden="true">📄</span>
+                <span class="dz-body">
+                  <span class="dz-title">CSV-Datei wählen</span>
+                  <span class="dz-hint">klicken oder hierher ziehen</span>
+                </span>
+              </label>
+              <button type="button" class="btn btn-primary" id="importCsvBtn" disabled>⬆️ Importieren</button>
+            </div>
           </div>
-          <label class="io-import">CSV importieren
-            <input type="file" id="importCsvInput" accept=".csv,text/csv" />
-          </label>
-          <div class="io-row">
-            <button type="button" class="btn btn-primary" id="importCsvBtn">⬆️ Importieren</button>
+          <div class="io-group">
+            <span class="io-group-label">Prospects</span>
+            <div class="io-row">
+              <button type="button" class="btn" id="exportProspectsCsvBtn">⬇️ CSV exportieren</button>
+            </div>
+            <div class="io-import">
+              <label class="dropzone">
+                <input type="file" id="importProspectsCsvInput" accept=".csv,text/csv" />
+                <span class="dz-icon" aria-hidden="true">📄</span>
+                <span class="dz-body">
+                  <span class="dz-title">CSV-Datei wählen</span>
+                  <span class="dz-hint">klicken oder hierher ziehen</span>
+                </span>
+              </label>
+              <button type="button" class="btn btn-primary" id="importProspectsCsvBtn" disabled>⬆️ Importieren</button>
+            </div>
           </div>
         </div>
 
@@ -127,6 +207,8 @@
           <button type="button" class="btn" id="cancelSettingsBtn">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Speichern</button>
         </div>
+
+        <p class="settings-account" id="settingsAccount" hidden></p>
       </form>
     </div>
   </div>
@@ -159,6 +241,7 @@
           <label>Nächster Schritt<input type="text" id="f_next_step" placeholder="z. B. Angebot nachfassen" /></label>
           <label>Wiedervorlage am<input type="date" id="f_next_step_at" /></label>
         </div>
+        <label>Tags (mit Komma getrennt)<input type="text" id="f_tags" placeholder="z. B. heiß, Q4, Empfehlung" /></label>
         <label>Notizen<textarea id="f_notes" rows="3" placeholder="Bedarf, Gesprächsnotizen, nächste Schritte…"></textarea></label>
         <div class="form-actions">
           <button type="button" class="btn" id="cancelBtn">Abbrechen</button>
@@ -210,9 +293,16 @@
     <a class="bn-item" href="#/" data-nav-link="list">
       <span class="bn-icon" aria-hidden="true">🗂</span><span class="bn-label">Leads</span>
     </a>
+    <a class="bn-item" href="#/heute" data-nav-link="agenda">
+      <span class="bn-icon" aria-hidden="true">📅</span><span class="bn-label">Heute</span>
+      <span class="bn-badge agenda-due hidden">0</span>
+    </a>
     <button id="fabResearchBtn" class="bn-fab" title="Lead recherchieren" aria-label="Lead recherchieren">
       <span aria-hidden="true">🔎</span>
     </button>
+    <a class="bn-item" href="#/prospects" data-nav-link="prospects">
+      <span class="bn-icon" aria-hidden="true">📇</span><span class="bn-label">Prospects</span>
+    </a>
     <a class="bn-item" href="#/reports" data-nav-link="reports">
       <span class="bn-icon" aria-hidden="true">📊</span><span class="bn-label">Berichte</span>
     </a>
@@ -221,8 +311,11 @@
   <!-- Dock für laufende Recherche-Jobs (unten rechts) -->
   <div id="jobDock" class="job-dock hidden" aria-live="polite"></div>
 
+  <!-- Aktionsleiste für Mehrfachauswahl (Bulk) -->
+  <div id="bulkBar" class="bulk-bar hidden" aria-live="polite"></div>
+
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=27"></script>
+  <script src="app.js?v=39"></script>
 </body>
 </html>

@@ -34,6 +34,27 @@ const LEAD_COLUMNS = [
 // Spalten, die beim Excel-Export numerisch ausgegeben werden.
 const NUMERIC_HEADERS = new Set(["Wert", "KI-Score"]);
 
+// Spalten der Prospect-Export-Datei (Discovery-Liste). Eigenes Schema, da
+// Prospects ein anderes Datenmodell als Leads haben (Branche/Größe/Potenzial
+// statt E-Mail/Wert/Status-Pipeline). "Kriterien (JSON)" hält die
+// Discovery-Suchkriterien verlustfrei fest.
+const PROSPECT_COLUMNS = [
+  ["Name", (p) => p.name || ""],
+  ["Website", (p) => p.website || ""],
+  ["Domain", (p) => p.domain || ""],
+  ["Ort", (p) => p.ort || ""],
+  ["Branche", (p) => p.branche || ""],
+  ["Größe", (p) => p.groesse || ""],
+  ["Potenzial", (p) => p.potenzial || ""],
+  ["Potenzial-Grund", (p) => p.potenzialGrund || ""],
+  ["Begründung", (p) => p.begruendung || ""],
+  ["Quelle", (p) => p.quelle || ""],
+  ["Status", (p) => p.status || ""],
+  ["Erstellt", (p) => p.createdAt || ""],
+  ["Aktualisiert", (p) => p.updatedAt || ""],
+  ["Kriterien (JSON)", (p) => (p.kriterien ? JSON.stringify(p.kriterien) : "")],
+];
+
 // Erlaubte Überschriften beim Import (klein geschrieben) → internes Feld.
 // Akzeptiert deutsche und englische Varianten, damit auch fremde Tabellen
 // importiert werden können.
@@ -53,6 +74,27 @@ const IMPORT_MAP = {
   // Vollständige KI-Bewertung / Dossier als JSON (für verlustfreien Round-Trip).
   "ki-bewertung (json)": "aiJson", "ki-bewertung": "aiJson", "ai": "aiJson",
   "dossier (json)": "researchJson", "dossier": "researchJson", "research": "researchJson",
+};
+
+// Import-Überschriften für Prospects (klein geschrieben) → internes Feld.
+// "Erstellt"/"Aktualisiert" werden bewusst nicht übernommen – die Datenbank
+// setzt diese Zeitstempel selbst. "Kriterien (JSON)" kommt als JSON-String an
+// und wird serverseitig zurück in ein Objekt geparst.
+const PROSPECT_IMPORT_MAP = {
+  "name": "name",
+  "website": "website", "webseite": "website", "url": "website",
+  "domain": "domain",
+  "ort": "ort", "stadt": "ort", "city": "ort",
+  "branche": "branche", "industry": "branche",
+  "größe": "groesse", "groesse": "groesse", "grösse": "groesse",
+  "unternehmensgröße": "groesse", "size": "groesse",
+  "potenzial": "potenzial", "potential": "potenzial",
+  "potenzial-grund": "potenzialGrund", "potenzial grund": "potenzialGrund",
+  "potenzialgrund": "potenzialGrund",
+  "begründung": "begruendung", "begruendung": "begruendung", "reason": "begruendung",
+  "quelle": "quelle", "source": "quelle",
+  "status": "status",
+  "kriterien (json)": "kriterienJson", "kriterien": "kriterienJson", "criteria": "kriterienJson",
 };
 
 // --- CSV -------------------------------------------------------------------
@@ -78,15 +120,27 @@ function csvCell(value, delimiter) {
   return s;
 }
 
-// Erzeugt eine CSV aus Leads. Default-Trennzeichen ";" (deutsches Excel öffnet
-// es ohne Textimport-Assistenten korrekt). Ohne BOM – das ergänzt der Aufrufer.
-function leadsToCsv(leads, delimiter = ";") {
+// Erzeugt eine CSV aus Zeilen-Objekten anhand einer Spaltendefinition
+// [Überschrift, Wert-Funktion]. Default-Trennzeichen ";" (deutsches Excel
+// öffnet es ohne Textimport-Assistenten korrekt). Ohne BOM – das ergänzt der
+// Aufrufer.
+function rowsToCsv(items, columns, delimiter = ";") {
   const lines = [];
-  lines.push(LEAD_COLUMNS.map((c) => csvCell(c[0], delimiter)).join(delimiter));
-  for (const l of leads) {
-    lines.push(LEAD_COLUMNS.map((c) => csvCell(c[1](l), delimiter)).join(delimiter));
+  lines.push(columns.map((c) => csvCell(c[0], delimiter)).join(delimiter));
+  for (const it of items) {
+    lines.push(columns.map((c) => csvCell(c[1](it), delimiter)).join(delimiter));
   }
   return lines.join("\r\n");
+}
+
+// CSV aller Leads.
+function leadsToCsv(leads, delimiter = ";") {
+  return rowsToCsv(leads, LEAD_COLUMNS, delimiter);
+}
+
+// CSV aller Prospects (Discovery-Liste).
+function prospectsToCsv(prospects, delimiter = ";") {
+  return rowsToCsv(prospects, PROSPECT_COLUMNS, delimiter);
 }
 
 // Parst CSV-Text in ein Array von Zeilen (jede Zeile = Array von Zellen).
@@ -129,16 +183,16 @@ function parseCsv(text) {
   return rows;
 }
 
-// Wandelt geparste CSV-Zeilen in Lead-Rohobjekte um (nur erkannte Spalten).
-// Leere Zeilen werden übersprungen. Liefert { leads, recognized } – recognized
-// sind die zugeordneten Überschriften (für eine sprechende Rückmeldung).
-function csvRowsToLeads(rows) {
-  if (!rows.length) return { leads: [], recognized: [] };
+// Wandelt geparste CSV-Zeilen anhand einer Spalten-Map (Überschrift→Feld) in
+// Rohobjekte um (nur erkannte Spalten). Leere Zeilen werden übersprungen.
+// Liefert { items, recognized } – recognized sind die zugeordneten Überschriften.
+function csvRowsToObjects(rows, map) {
+  if (!rows.length) return { items: [], recognized: [] };
   const header = rows[0].map((h) => String(h || "").trim().toLowerCase());
-  const fields = header.map((h) => IMPORT_MAP[h] || null);
+  const fields = header.map((h) => map[h] || null);
   const recognized = fields.filter(Boolean);
 
-  const leads = [];
+  const items = [];
   for (let r = 1; r < rows.length; r++) {
     const cells = rows[r];
     if (!cells || cells.every((c) => String(c == null ? "" : c).trim() === "")) continue;
@@ -146,9 +200,22 @@ function csvRowsToLeads(rows) {
     fields.forEach((field, c) => {
       if (field) obj[field] = cells[c] != null ? String(cells[c]).trim() : "";
     });
-    leads.push(obj);
+    items.push(obj);
   }
-  return { leads, recognized };
+  return { items, recognized };
+}
+
+// Lead-Rohobjekte aus CSV-Zeilen (recognized = erkannte Überschriften für eine
+// sprechende Rückmeldung).
+function csvRowsToLeads(rows) {
+  const { items, recognized } = csvRowsToObjects(rows, IMPORT_MAP);
+  return { leads: items, recognized };
+}
+
+// Prospect-Rohobjekte aus CSV-Zeilen.
+function csvRowsToProspects(rows) {
+  const { items, recognized } = csvRowsToObjects(rows, PROSPECT_IMPORT_MAP);
+  return { prospects: items, recognized };
 }
 
 // Normalisiert einen Wert-/Zahlenstring aus fremden Tabellen ("5.000 €",
@@ -225,9 +292,13 @@ function leadsToXlsxXml(leads) {
 
 module.exports = {
   LEAD_COLUMNS,
+  PROSPECT_COLUMNS,
+  PROSPECT_IMPORT_MAP,
   leadsToCsv,
+  prospectsToCsv,
   parseCsv,
   csvRowsToLeads,
+  csvRowsToProspects,
   parseNumber,
   leadsToXlsxXml,
 };

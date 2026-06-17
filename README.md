@@ -14,12 +14,22 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 - Striktes „Keine-Halluzination"-Prinzip: nur belegte Fakten, sonst `k.A.`
 - Jeder Lead hat eine **eigene Detailseite**, die das vollständige Dossier sauber strukturiert und formatiert anzeigt (keine rohe Markdown-Ausgabe); jederzeit neu recherchierbar (🔄)
 
+**Lead-Discovery** (🧭 neue Leads *finden* statt nur bekannte recherchieren)
+- Eigene Seite: **Kriterien** (Branche, Region, Größe, Stichworte, Anzahl, Freitext) → die KI sucht per Web-Recherche **reale, passende Unternehmen**
+- Ergebnis ist eine **Kandidatenliste** zum Auswählen; bereits vorhandene Leads (gleiche Firma/Domain) werden markiert und ausgenommen
+- Ausgewählte Kandidaten werden mit einem Klick **als ganz normale Recherche-Jobs** angelegt (im Hintergrund, max. 3 gleichzeitig)
+
 **Lead-Verwaltung**
 - **Schlanke Lead-Karten** in der Übersicht zeigen nur das Wichtigste (Firma, Ansprechpartner, Status, Branche, Wert, KI-Score); ein Klick öffnet die Detailseite
 - **Detailseite pro Lead** mit Inline-Bearbeitung von **allem**: Stammdaten *und* sämtliche Recherche-Inhalte (Felder inkl. Quellen, Texte, Potenziale)
 - Pipeline-Status: `neu → kontaktiert → qualifiziert → angebot → gewonnen / verloren`
 - Manuelles Bearbeiten (Status, Wert, Notizen, Stammdaten), Live-Suche und Status-Filter
 - **Wiedervorlage / nächster Schritt** je Lead (Datum) – mit farbigem Banner auf der Detailseite, Fälligkeits-Badge auf den Karten und Toolbar-Filter „⏰ Fällig"
+- **„📅 Heute"-Agenda**: überfällige / heute fällige / anstehende Wiedervorlagen gebündelt, mit Schnellaktionen (erledigt / verschieben / planen)
+- **Tags/Labels** je Lead (Karten, Board, Detail) inkl. Tag-Filter im Toolbar
+- **Sortierung** (Datum, letzte Aktivität, Inaktivität, Wiedervorlage, KI-Score, Wert, Firma) und **„💤 Kalt"-Filter** für offene Leads ohne Aktivität (> 14 Tage)
+- **Mehrfachauswahl & Bulk-Aktionen**: Status setzen, Tag hinzufügen, löschen
+- **Globale Schnellsuche** in der Topbar – springt aus jeder Ansicht direkt zum Lead
 - **Dublettenprüfung** beim Anlegen (gleiche E-Mail/Firma) – warnt mit Hinweis und lässt „bestehenden öffnen" oder „trotzdem anlegen" zu
 - **DSGVO**: Datenauskunft-Export pro Lead als JSON (Art. 15/20); Löschung entfernt Lead inkl. aller Aktivitäten (Art. 17)
 - Dashboard mit Kennzahlen: Anzahl Leads, **gewichteter Pipeline-Wert** (Erwartungswert = Σ Wert × Abschlusswahrscheinlichkeit je Status, in den Einstellungen anpassbar), gewonnener Umsatz, Abschlussquote
@@ -187,6 +197,8 @@ Version zurück, statt blind `:latest` zu ziehen.
 | `GET` | `/api/leads` | Alle Leads |
 | `POST` | `/api/leads/research` | Lead per Recherche anlegen (Body: `{ "input": "website-oder-name" }`) |
 | `POST` | `/api/leads/:id/research` | Bestehenden Lead neu recherchieren |
+| `POST` | `/api/discovery` | Lead-Discovery starten (Body: `{ "branche", "region", "groesse", "stichworte", "freitext", "anzahl" }`) – liefert `{ jobId }`; Kandidaten via Polling |
+| `GET` | `/api/research/:jobId` | Status/Fortschritt eines Recherche- oder Discovery-Jobs (Polling) |
 | `POST` | `/api/leads` | Lead manuell anlegen |
 | `PUT` | `/api/leads/:id` | Lead aktualisieren |
 | `DELETE` | `/api/leads/:id` | Lead löschen |

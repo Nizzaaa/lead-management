@@ -39,6 +39,12 @@ function rowToLead(row) {
     nextStepAt: toYMD(row.next_step_at),
     ai: row.ai, // JSONB → bereits als Objekt/null geparst
     research: row.research, // JSONB → strukturierte Lead-Recherche (oder null)
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    // Zeitpunkt der jüngsten Aktivität (nur bei Abfragen mit LATERAL-Join
+    // gesetzt) – Basis für „letzte Aktivität" / Stillstand-Erkennung.
+    lastActivityAt: row.last_activity_at
+      ? (row.last_activity_at instanceof Date ? row.last_activity_at.toISOString() : row.last_activity_at)
+      : null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
   };
@@ -72,8 +78,10 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS research JSONB;");
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_step TEXT NOT NULL DEFAULT '';");
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_step_at DATE;");
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_next_step ON leads(next_step_at);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_tags ON leads USING GIN(tags);");
       // Schlüssel/Wert-Tabelle für App-Einstellungen (z. B. gewähltes KI-Modell).
       await pool.query(`
         CREATE TABLE IF NOT EXISTS app_settings (
@@ -114,6 +122,62 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
       `);
       await pool.query("ALTER TABLE ai_usage ADD COLUMN IF NOT EXISTS web_searches INTEGER NOT NULL DEFAULT 0;");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage(created_at);");
+      // Prospects: persistente Liste möglicher Leads aus der Discovery, gegliedert
+      // nach Branche/Größe/Potenzial. status 'offen' (Arbeitsliste) oder
+      // 'abgelehnt' (verworfen, bleibt für die Dedup erhalten). domain ist die
+      // normalisierte Web-Domain für den Dublettenabgleich.
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS prospects (
+          id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+          name          TEXT        NOT NULL DEFAULT '',
+          website       TEXT        NOT NULL DEFAULT '',
+          domain        TEXT        NOT NULL DEFAULT '',
+          ort           TEXT        NOT NULL DEFAULT '',
+          branche       TEXT        NOT NULL DEFAULT '',
+          groesse       TEXT        NOT NULL DEFAULT '',
+          potenzial     TEXT        NOT NULL DEFAULT 'C',
+          potenzial_grund TEXT      NOT NULL DEFAULT '',
+          begruendung   TEXT        NOT NULL DEFAULT '',
+          quelle        TEXT        NOT NULL DEFAULT '',
+          status        TEXT        NOT NULL DEFAULT 'offen',
+          kriterien     JSONB,
+          created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_prospects_branche ON prospects(branche);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_prospects_potenzial ON prospects(potenzial);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_prospects_status ON prospects(status);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_prospects_domain ON prospects(domain);");
+      // Verlustfreie Zähl-Events (Recherche/Discovery): append-only, ohne Bezug
+      // zu Leads/Prospects – bleiben also erhalten, auch wenn diese gelöscht oder
+      // (Prospect → Lead) konvertiert werden. Quelle für die Report-Kennzahlen.
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS report_events (
+          id         UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+          kind       TEXT        NOT NULL,
+          cnt        INTEGER     NOT NULL DEFAULT 1,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_report_events_created ON report_events(created_at);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_report_events_kind ON report_events(kind);");
+      // Einmaliger Backfill aus den vorhandenen (noch nicht gelöschten) Daten,
+      // damit die letzten Tage nicht auf 0 fallen. Idempotent über den Leer-Check:
+      // sobald irgendein Event existiert, wird nicht erneut backfilled.
+      const { rowCount: hasEvents } = await pool.query("SELECT 1 FROM report_events LIMIT 1");
+      if (!hasEvents) {
+        await pool.query(
+          `INSERT INTO report_events (kind, cnt, created_at)
+           SELECT 'research', 1, created_at FROM activities
+            WHERE type = 'system'
+              AND title IN ('Per Recherche angelegt', 'Recherche aktualisiert', 'Aus Prospect recherchiert')`
+        );
+        await pool.query(
+          `INSERT INTO report_events (kind, cnt, created_at)
+           SELECT 'discovery', 1, created_at FROM prospects`
+        );
+      }
       // Aufgaben-Funktion wurde entfernt: Alttabelle und zugehörige
       // System-Verlaufseinträge idempotent bereinigen.
       await pool.query("DROP TABLE IF EXISTS tasks;");
@@ -131,23 +195,32 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
   }
 }
 
+// Jüngste Aktivität je Lead per LATERAL-Subquery mitliefern (für „letzte
+// Aktivität" / Stillstand). Ein gemeinsamer Ausdruck für Liste und Einzelabruf.
+const LEADS_WITH_ACTIVITY = `
+  SELECT l.*, la.last_activity_at
+    FROM leads l
+    LEFT JOIN LATERAL (
+      SELECT max(created_at) AS last_activity_at FROM activities WHERE lead_id = l.id
+    ) la ON true`;
+
 async function listLeads() {
-  const { rows } = await pool.query("SELECT * FROM leads ORDER BY created_at DESC");
+  const { rows } = await pool.query(`${LEADS_WITH_ACTIVITY} ORDER BY l.created_at DESC`);
   return rows.map(rowToLead);
 }
 
 async function getLead(id) {
-  const { rows } = await pool.query("SELECT * FROM leads WHERE id = $1", [id]);
+  const { rows } = await pool.query(`${LEADS_WITH_ACTIVITY} WHERE l.id = $1`, [id]);
   return rows[0] ? rowToLead(rows[0]) : null;
 }
 
 async function createLead(data, research = null) {
   const { rows } = await pool.query(
-    `INSERT INTO leads (id, name, company, email, phone, source, status, value, notes, next_step, next_step_at, research)
-     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+    `INSERT INTO leads (id, name, company, email, phone, source, status, value, notes, next_step, next_step_at, research, tags)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      RETURNING *`,
     [data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes,
-     data.nextStep || "", data.nextStepAt || null, research]
+     data.nextStep || "", data.nextStepAt || null, research, Array.isArray(data.tags) ? data.tags : []]
   );
   return rowToLead(rows[0]);
 }
@@ -156,11 +229,12 @@ async function updateLead(id, data) {
   const { rows } = await pool.query(
     `UPDATE leads
      SET name = $2, company = $3, email = $4, phone = $5, source = $6,
-         status = $7, value = $8, notes = $9, next_step = $10, next_step_at = $11, updated_at = now()
+         status = $7, value = $8, notes = $9, next_step = $10, next_step_at = $11,
+         tags = COALESCE($12::text[], tags), updated_at = now()
      WHERE id = $1
      RETURNING *`,
     [id, data.name, data.company, data.email, data.phone, data.source, data.status, data.value, data.notes,
-     data.nextStep || "", data.nextStepAt || null]
+     data.nextStep || "", data.nextStepAt || null, Array.isArray(data.tags) ? data.tags : null]
   );
   return rows[0] ? rowToLead(rows[0]) : null;
 }
@@ -227,6 +301,14 @@ async function setSetting(key, value) {
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
     [key, value]
   );
+}
+
+// Verlustfreies Zähl-Event (append-only), z. B. kind 'research' oder 'discovery'.
+// Unabhängig von Leads/Prospects – bleibt erhalten, auch wenn diese gelöscht werden.
+async function recordEvent(kind, count = 1) {
+  const n = Math.max(0, Math.round(Number(count) || 0));
+  if (!kind || n <= 0) return;
+  await pool.query("INSERT INTO report_events (kind, cnt) VALUES ($1, $2)", [String(kind), n]);
 }
 
 // probabilities: { status: Prozent } – gewichtet den offenen Pipeline-Wert nach
@@ -321,6 +403,122 @@ async function deleteActivity(id) {
   return rowCount > 0;
 }
 
+// --- Prospects (Discovery-Liste) -------------------------------------------
+// Normalisiert eine URL/Domain für den Dublettenabgleich
+// ("https://www.Foo.de/x" → "foo.de"). Ohne Punkt (kein Domainname) → leer.
+function normalizeDomain(s) {
+  if (!s) return "";
+  const v = String(s).toLowerCase().trim()
+    .replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "");
+  return v.includes(".") ? v : "";
+}
+
+function rowToProspect(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    website: row.website,
+    domain: row.domain,
+    ort: row.ort,
+    branche: row.branche,
+    groesse: row.groesse,
+    potenzial: row.potenzial,
+    potenzialGrund: row.potenzial_grund,
+    begruendung: row.begruendung,
+    quelle: row.quelle,
+    status: row.status,
+    kriterien: row.kriterien || null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+  };
+}
+
+async function listProspects() {
+  const { rows } = await pool.query("SELECT * FROM prospects ORDER BY created_at DESC");
+  return rows.map(rowToProspect);
+}
+
+async function getProspect(id) {
+  const { rows } = await pool.query("SELECT * FROM prospects WHERE id = $1", [id]);
+  return rows[0] ? rowToProspect(rows[0]) : null;
+}
+
+// Existiert die Firma bereits – als Prospect (egal welcher Status, also auch
+// 'abgelehnt') ODER als Lead? Abgleich case-insensitiv über Name/Firma und
+// (falls vorhanden) die normalisierte Domain.
+async function prospectExists({ name = "", domain = "" } = {}) {
+  const n = (name || "").trim();
+  const d = (domain || "").trim();
+  if (!n && !d) return false;
+  const pr = await pool.query(
+    `SELECT 1 FROM prospects
+      WHERE (NULLIF($1,'') IS NOT NULL AND lower(name) = lower($1))
+         OR (NULLIF($2,'') IS NOT NULL AND domain = $2)
+      LIMIT 1`,
+    [n, d]
+  );
+  if (pr.rowCount) return true;
+  const ld = await pool.query(
+    `SELECT 1 FROM leads
+      WHERE (NULLIF($1,'') IS NOT NULL AND lower(company) = lower($1))
+         OR (NULLIF($2,'') IS NOT NULL AND (
+              lower(source) LIKE '%' || $2 || '%'
+              OR lower(COALESCE(research->>'input','')) LIKE '%' || $2 || '%'))
+      LIMIT 1`,
+    [n, d]
+  );
+  return ld.rowCount > 0;
+}
+
+// Legt einen Prospect an – aber nur, wenn er nicht bereits existiert (Dedup
+// gegen Prospects inkl. 'abgelehnt' UND Leads). Liefert den Prospect oder
+// null (= Dublette, übersprungen).
+async function createProspect(data) {
+  const domain = normalizeDomain(data.website || data.domain);
+  if (await prospectExists({ name: data.name, domain })) return null;
+  // Status nur für den Import relevant; Discovery übergibt keinen → 'offen'.
+  const status = data.status === "abgelehnt" ? "abgelehnt" : "offen";
+  const { rows } = await pool.query(
+    `INSERT INTO prospects (name, website, domain, ort, branche, groesse, potenzial, potenzial_grund, begruendung, quelle, status, kriterien)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     RETURNING *`,
+    [data.name || "", data.website || "", domain, data.ort || "", data.branche || "",
+     data.groesse || "", data.potenzial || "C", data.potenzialGrund || "",
+     data.begruendung || "", data.quelle || "", status, data.kriterien || null]
+  );
+  return rowToProspect(rows[0]);
+}
+
+async function setProspectStatus(id, status) {
+  const s = status === "abgelehnt" ? "abgelehnt" : "offen";
+  const { rows } = await pool.query(
+    "UPDATE prospects SET status = $2, updated_at = now() WHERE id = $1 RETURNING *",
+    [id, s]
+  );
+  return rows[0] ? rowToProspect(rows[0]) : null;
+}
+
+// Endgültige Löschung (DSGVO) – entfernt die Zeile vollständig.
+async function deleteProspect(id) {
+  const { rowCount } = await pool.query("DELETE FROM prospects WHERE id = $1", [id]);
+  return rowCount > 0;
+}
+
+// Kennzahlen fürs Reporting: offene/abgelehnte Anzahl + Potenzialverteilung (nur offen).
+async function prospectStats() {
+  const { rows } = await pool.query(
+    "SELECT status, potenzial, COUNT(*)::int AS n FROM prospects GROUP BY status, potenzial"
+  );
+  const byPotenzial = { A: 0, B: 0, C: 0, D: 0 };
+  let open = 0, rejected = 0;
+  for (const r of rows) {
+    if (r.status === "abgelehnt") { rejected += r.n; continue; }
+    open += r.n;
+    if (byPotenzial[r.potenzial] !== undefined) byPotenzial[r.potenzial] += r.n;
+  }
+  return { open, rejected, byPotenzial };
+}
+
 // --- Reporting -------------------------------------------------------------
 // Liefert die Daten für die Berichte-Seite in einem Rutsch.
 async function getReport(statuses, probabilities = {}) {
@@ -364,37 +562,53 @@ async function getReport(statuses, probabilities = {}) {
   // Aufteilung und Anzahl recherchierter Leads für den Hover-Tooltip.
   const costRes = await pool.query(
     `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, model,
+            (kind LIKE 'discovery%') AS is_discovery,
             COALESCE(SUM(cost_usd),0)::float AS cost
      FROM ai_usage
      WHERE created_at >= date_trunc('day', now()) - interval '13 days'
-     GROUP BY 1, 2`
+     GROUP BY 1, 2, 3`
   );
-  // Recherchierte Leads je Tag (angelegt + aktualisiert über die Recherche).
-  const researchRes = await pool.query(
-    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, COUNT(*)::int AS n
-     FROM activities
-     WHERE type = 'system'
-       AND title IN ('Per Recherche angelegt', 'Recherche aktualisiert')
-       AND created_at >= date_trunc('day', now()) - interval '13 days'
-     GROUP BY 1`
+  // Recherchierte & entdeckte Leads je Tag – verlustfrei aus report_events
+  // (bleiben erhalten, auch wenn Leads/Prospects gelöscht oder konvertiert werden).
+  const eventsRes = await pool.query(
+    `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, kind,
+            COALESCE(SUM(cnt),0)::int AS n
+     FROM report_events
+     WHERE created_at >= date_trunc('day', now()) - interval '13 days'
+     GROUP BY 1, 2`
   );
   const byDay = {};
   for (const r of costRes.rows) {
-    const e = (byDay[r.day] = byDay[r.day] || { cost: 0, models: {} });
+    const e = (byDay[r.day] = byDay[r.day] || { cost: 0, discovery: 0, models: {} });
     const c = Number(r.cost) || 0;
     e.cost += c;
+    if (r.is_discovery) e.discovery += c;
     if (r.model) e.models[r.model] = (e.models[r.model] || 0) + c;
   }
   const researchedByDay = {};
-  for (const r of researchRes.rows) researchedByDay[r.day] = Number(r.n) || 0;
+  const discoveredByDay = {};
+  for (const r of eventsRes.rows) {
+    if (r.kind === "research") researchedByDay[r.day] = Number(r.n) || 0;
+    else if (r.kind === "discovery") discoveredByDay[r.day] = Number(r.n) || 0;
+  }
   const costByDay = listDays(14).map((day) => ({
     day,
     value: byDay[day] ? byDay[day].cost : 0,
+    discovery: byDay[day] ? byDay[day].discovery : 0,
     models: byDay[day] ? byDay[day].models : {},
     researched: researchedByDay[day] || 0,
+    discovered: discoveredByDay[day] || 0,
   }));
 
-  return { stats, funnel, wonLeadsByMonth, avgWon, avgCycleDays, costByDay };
+  // Prospects (Discovery-Pipeline) + Discovery-Kosten der letzten 14 Tage.
+  const prospects = await prospectStats();
+  const discRes = await pool.query(
+    `SELECT COALESCE(SUM(cost_usd),0)::float AS cost FROM ai_usage
+      WHERE kind LIKE 'discovery%' AND created_at >= date_trunc('day', now()) - interval '13 days'`
+  );
+  const discoveryCost14d = Number(discRes.rows[0].cost) || 0;
+
+  return { stats, funnel, wonLeadsByMonth, avgWon, avgCycleDays, costByDay, prospects, discoveryCost14d };
 }
 
 // Füllt fehlende Monate der letzten 12 Monate mit 0 auf.
@@ -450,11 +664,18 @@ module.exports = {
   deleteLead,
   getSetting,
   setSetting,
+  recordEvent,
   getStats,
   getWidgetStats,
   recordUsage,
   listActivities,
   createActivity,
   deleteActivity,
+  listProspects,
+  getProspect,
+  createProspect,
+  setProspectStatus,
+  deleteProspect,
+  prospectStats,
   getReport,
 };

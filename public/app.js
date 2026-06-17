@@ -5,11 +5,23 @@ let leads = [];
 let statuses = [];
 let aiEnabled = false;
 let activeFilter = "alle";
-let searchTerm = "";
 let dueOnly = false; // Filter: nur fällige/überfällige Wiedervorlagen
+let staleOnly = false; // Filter: nur "kalte" Leads (lange keine Aktivität)
+let tagFilter = ""; // aktiver Tag-Filter ("" = alle)
+let sortBy = localStorage.getItem("leadpilot_sort") || "created_desc";
+let selectMode = false; // Mehrfachauswahl (Bulk) aktiv?
+const selectedIds = new Set(); // ausgewählte Lead-IDs (Bulk)
+let discoveryCriteria = null; // zuletzt genutzte Discovery-Kriterien
+let prospects = [];           // persistente Prospect-Liste (Discovery-Treffer)
+let prospectGroupBy = localStorage.getItem("leadpilot_prospect_group") || "potenzial"; // branche|groesse|potenzial
+let prospectStatusFilter = "offen"; // offen|abgelehnt
+let prospectSearch = "";
+const prospectSelected = new Set(); // ausgewählte Prospect-IDs (Bulk)
 let models = [];
 let currentModel = "";
 let stageProbabilities = {};
+let staleDays = 14; // „Kalt"-Schwelle (Tage ohne Aktivität), kommt aus /api/config
+let tagColors = {}; // { tagNameLowercase: "#rrggbb" } – globale Tag-Farben aus /api/config
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
 // Eingeklappte Board-Spalten (Status-Namen). Persistiert wie `view`, lebt
@@ -140,12 +152,16 @@ async function init() {
     models = cfg.models || [];
     currentModel = cfg.model || "";
     stageProbabilities = cfg.stageProbabilities || {};
-    renderAiBadge(cfg);
+    staleDays = cfg.staleDays || 14;
+    tagColors = cfg.tagColors || {};
     renderUserBar(cfg);
     renderStatusFilters();
     renderViewToggle();
     populateStatusSelect();
+    const sb = $("#sortBy");
+    if (sb) sb.value = sortBy;
     await refresh();
+    loadProspects(); // Prospects für die globale Suche vorladen (rendert versteckt)
   } catch (err) {
     toast(err.message, "error");
   }
@@ -199,37 +215,18 @@ function setupInfoTips() {
   });
 }
 
-// Zeigt den angemeldeten Benutzer und einen Logout-Link in der Topbar an.
-// Beides kommt vom Auth-Proxy (über /api/config). Der Logout-Pfad wird vom
-// Proxy bereitgestellt (z. B. Cloudflare Access) – ohne angemeldeten Benutzer
-// (z. B. lokal ohne Proxy) gäbe es nichts abzumelden, daher bleibt der Button
-// dann ausgeblendet.
+// Zeigt den angemeldeten Benutzer + Logout-Link klein unten im Einstellungen-
+// Modal an. Beides kommt vom Auth-Proxy (über /api/config). Ohne angemeldeten
+// Benutzer (z. B. lokal ohne Proxy) bleibt die Zeile ausgeblendet.
 function renderUserBar(cfg) {
-  const authed = !!cfg.user;
-  const info = $("#userInfo");
-  if (info) {
-    if (authed) { info.textContent = "👤 " + cfg.user; info.hidden = false; }
-    else info.hidden = true;
-  }
-  const link = $("#logoutLink");
-  if (link) {
-    if (authed && cfg.logoutUrl) { link.href = cfg.logoutUrl; link.hidden = false; }
-    else link.hidden = true;
-  }
-}
-
-function renderAiBadge(cfg) {
-  const badge = $("#aiBadge");
-  if (cfg.aiEnabled) {
-    const short = (cfg.model || "").replace("claude-", "");
-    badge.textContent = "🤖 " + (short || "KI aktiv");
-    badge.className = "badge badge-on";
-    badge.title = "Modell: " + cfg.model;
-  } else {
-    badge.textContent = "KI inaktiv";
-    badge.className = "badge badge-off";
-    badge.title = "ANTHROPIC_API_KEY setzen, um KI-Funktionen zu aktivieren";
-  }
+  const acct = $("#settingsAccount");
+  if (!acct) return;
+  if (!cfg.user) { acct.hidden = true; acct.innerHTML = ""; return; }
+  const logout = cfg.logoutUrl
+    ? ` · <a class="settings-logout" href="${esc(cfg.logoutUrl)}" target="_top" rel="noopener">Abmelden</a>`
+    : "";
+  acct.innerHTML = `Eingeloggt als <strong>${esc(cfg.user)}</strong>${logout}`;
+  acct.hidden = false;
 }
 
 function renderStatusFilters() {
@@ -249,8 +246,8 @@ function populateStatusSelect() {
     .join("");
 }
 
-// --- Routing (Liste ⇄ Detail ⇄ Berichte) -----------------------------------
-const VIEWS = ["listView", "detailView", "reportsView"];
+// --- Routing (Liste ⇄ Detail ⇄ Heute ⇄ Prospects ⇄ Berichte) ---------------
+const VIEWS = ["listView", "detailView", "agendaView", "prospectsView", "reportsView"];
 function showOnly(viewId) {
   for (const v of VIEWS) $("#" + v).classList.toggle("hidden", v !== viewId);
 }
@@ -263,6 +260,10 @@ function setActiveNav(name) {
 function router() {
   const lead = location.hash.match(/^#\/lead\/(.+)$/);
   if (lead) return showDetail(decodeURIComponent(lead[1]));
+  if (location.hash === "#/heute") return showAgenda();
+  // Discovery ist jetzt ein Modal auf der Prospects-Seite (keine eigene Seite mehr).
+  if (location.hash === "#/discovery") { location.hash = "#/prospects"; return; }
+  if (location.hash === "#/prospects") return showProspects();
   if (location.hash === "#/reports") return showReports();
   showList();
 }
@@ -303,10 +304,17 @@ function showReports() {
 // --- Daten laden + rendern -------------------------------------------------
 async function refresh() {
   leads = await api("/api/leads");
+  renderTagFilter();
+  updateAgendaBadge();
   renderStats(await api("/api/stats"));
+  // Die jeweils aktive Ansicht neu zeichnen (Detail, Heute oder Liste/Board).
   if (detailId) {
     renderDetail();
     loadDetailExtras(detailId);
+  } else if (location.hash === "#/heute") {
+    renderAgenda();
+  } else if (location.hash === "#/prospects") {
+    loadProspects();
   } else {
     renderLeads();
   }
@@ -323,17 +331,54 @@ function renderStats(stats) {
   $("#statConversion").textContent = stats.conversion + " %";
 }
 
-function filteredLeads() {
+// Offener Lead ohne Aktivität (bzw. seit Anlage) seit mehr als staleDays Tagen
+// (konfigurierbar in den Einstellungen, Default 14). Gewonnene/verlorene Leads
+// zählen nie als kalt.
+function isStale(l) {
+  if (l.status === "gewonnen" || l.status === "verloren") return false;
+  const iso = l.lastActivityAt || l.createdAt;
+  if (!iso) return false;
+  return Date.now() - new Date(iso).getTime() > staleDays * 86400000;
+}
+
+// Gemeinsame Filter (Fällig, Kalt, Tag) – ohne Status, da dieser je nach
+// Ansicht anders behandelt wird (Chips in der Liste, Spalten im Board). Die
+// frühere Textsuche entfällt (globale Schnellsuche in der Topbar übernimmt das).
+function matchesCommon(l) {
   const today = todayYMD();
-  return leads.filter((l) => {
+  if (dueOnly && !(l.nextStepAt && l.nextStepAt <= today)) return false;
+  if (staleOnly && !isStale(l)) return false;
+  if (tagFilter && !(Array.isArray(l.tags) && l.tags.includes(tagFilter))) return false;
+  return true;
+}
+
+// Sortiert eine Lead-Liste nach der aktuell gewählten Sortierung (sortBy).
+function sortLeads(arr) {
+  const out = arr.slice();
+  const t = (iso) => (iso ? new Date(iso).getTime() : 0);
+  const act = (l) => t(l.lastActivityAt) || t(l.createdAt);
+  const score = (l) => (l.ai && Number.isFinite(l.ai.score) ? l.ai.score : -1);
+  const ns = (l) => (l.nextStepAt ? new Date(l.nextStepAt).getTime() : Infinity);
+  const cmp = {
+    created_asc: (a, b) => t(a.createdAt) - t(b.createdAt),
+    created_desc: (a, b) => t(b.createdAt) - t(a.createdAt),
+    activity_desc: (a, b) => act(b) - act(a),
+    activity_asc: (a, b) => act(a) - act(b),
+    next_step_asc: (a, b) => ns(a) - ns(b),
+    score_desc: (a, b) => score(b) - score(a),
+    value_desc: (a, b) => (Number(b.value) || 0) - (Number(a.value) || 0),
+    company_asc: (a, b) =>
+      (a.company || a.name || "").localeCompare(b.company || b.name || "", "de", { sensitivity: "base" }),
+  };
+  out.sort(cmp[sortBy] || cmp.created_desc);
+  return out;
+}
+
+function filteredLeads() {
+  return sortLeads(leads.filter((l) => {
     if (activeFilter !== "alle" && l.status !== activeFilter) return false;
-    if (dueOnly && !(l.nextStepAt && l.nextStepAt <= today)) return false;
-    if (searchTerm) {
-      const hay = `${l.name} ${l.company} ${l.email} ${l.source}`.toLowerCase();
-      if (!hay.includes(searchTerm)) return false;
-    }
-    return true;
-  });
+    return matchesCommon(l);
+  }));
 }
 
 // Anzahl fälliger/überfälliger Wiedervorlagen (für den Toolbar-Chip).
@@ -349,18 +394,10 @@ function scoreColor(score) {
   return "var(--red)";
 }
 
-// Such- und Fällig-Filter anwenden (für das Kanban-Board, das nach Status
-// spaltet – der Status-Filter entfällt hier, da jede Spalte ein Status ist).
+// Gemeinsame Filter + Sortierung fürs Kanban-Board (der Status-Filter entfällt –
+// jede Spalte IST ein Status).
 function searchFiltered() {
-  const today = todayYMD();
-  return leads.filter((l) => {
-    if (dueOnly && !(l.nextStepAt && l.nextStepAt <= today)) return false;
-    if (searchTerm) {
-      const hay = `${l.name} ${l.company} ${l.email} ${l.source}`.toLowerCase();
-      if (!hay.includes(searchTerm)) return false;
-    }
-    return true;
-  });
+  return sortLeads(leads.filter(matchesCommon));
 }
 
 function renderViewToggle() {
@@ -394,7 +431,9 @@ function renderLeads() {
 }
 
 function renderList() {
-  $("#leadList").innerHTML = filteredLeads().map(leadCard).join("");
+  const list = $("#leadList");
+  list.classList.toggle("selecting", selectMode);
+  list.innerHTML = filteredLeads().map(leadCard).join("");
 }
 
 function renderKanban() {
@@ -490,10 +529,137 @@ function nextStepBadge(l) {
   return `<span class="next-step-badge ${info.state}" title="${esc(l.nextStep || "Wiedervorlage")}">⏰ ${esc(info.label)}</span>`;
 }
 
+// --- Tags (farbig, global) -------------------------------------------------
+// Stabile Default-Farbe aus dem Tag-Namen (falls keine explizit gesetzt ist),
+// damit jeder Tag eine Farbe hat. Explizit gewählte Farben (tagColors) gewinnen.
+function hslToHex(h, s, l) {
+  s /= 100; l /= 100;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n) => {
+    const k = (n + h / 30) % 12;
+    const c = l - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)));
+    return Math.round(255 * c).toString(16).padStart(2, "0");
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+function hashColor(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
+  return hslToHex(h % 360, 55, 42);
+}
+function tagColor(tag) {
+  const key = String(tag || "").toLowerCase();
+  return tagColors[key] || hashColor(key);
+}
+// Lesbare Textfarbe (dunkel/hell) je nach Helligkeit der Chip-Farbe.
+function readableText(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  if (!m) return "#ffffff";
+  const n = parseInt(m[1], 16);
+  const lum = (0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255;
+  return lum > 0.62 ? "#23261F" : "#ffffff";
+}
+
+// Tag-Chips (Karten, Board, Detail) – farbig nach Tag-Farbe.
+function tagsHtml(tags, cls = "lead-card-tags") {
+  if (!Array.isArray(tags) || !tags.length) return "";
+  return `<div class="${cls}">${tags.map((t) => {
+    const c = tagColor(t);
+    return `<span class="tag-chip" style="background:${c};color:${readableText(c)}">${esc(t)}</span>`;
+  }).join("")}</div>`;
+}
+
+// Alle bisher vergebenen Tag-Namen (für die Autocomplete-Vorschläge).
+function allTags() {
+  const set = new Set();
+  for (const l of leads) for (const t of (l.tags || [])) set.add(t);
+  return [...set].sort((a, b) => a.localeCompare(b, "de", { sensitivity: "base" }));
+}
+
+// Inline-Tag-Editor (Detail-Sidebar): farbige, entfernbare Chips + Eingabe mit
+// Farbwähler und Dropdown-Vorschlägen vorhandener Tags.
+function tagEditorHtml(l) {
+  const tags = Array.isArray(l.tags) ? l.tags : [];
+  const chips = tags.map((t) => {
+    const c = tagColor(t);
+    return `<span class="tag-chip tag-chip-rm" style="background:${c};color:${readableText(c)}">${esc(t)}<button type="button" class="tag-x" data-tag-remove="${esc(t)}" aria-label="Tag entfernen">×</button></span>`;
+  }).join("");
+  const opts = allTags().map((t) => `<option value="${esc(t)}"></option>`).join("");
+  return `<div class="tag-editor" id="tagEditor">
+    <div class="tag-chips">${chips || `<span class="d-muted" style="font-size:12px">Noch keine Tags</span>`}</div>
+    <form class="tag-add" id="tagAddForm" autocomplete="off">
+      <input type="color" id="tagAddColor" class="tag-color" value="#0a7a3b" title="Tag-Farbe" aria-label="Tag-Farbe" />
+      <input type="text" id="tagAddInput" class="tag-add-input" list="tagDatalist" placeholder="Tag hinzufügen…" maxlength="40" aria-label="Tag-Name" />
+      <button type="submit" class="btn btn-sm" title="Tag hinzufügen">+ Tag</button>
+      <datalist id="tagDatalist">${opts}</datalist>
+    </form>
+  </div>`;
+}
+
+// Übernimmt einen vom Server zurückgegebenen Lead in die lokale Liste und
+// zeichnet nur den Tag-Editor neu (ohne die ganze Detailseite zurückzusetzen).
+function applyLeadUpdate(updated) {
+  if (!updated || !updated.id) return;
+  const i = leads.findIndex((x) => x.id === updated.id);
+  if (i >= 0) leads[i] = updated; else leads.push(updated);
+  const el = $("#tagEditor");
+  const lead = getLead(detailId);
+  if (el && lead) el.outerHTML = tagEditorHtml(lead);
+}
+
+async function addTagFromDetail() {
+  const lead = getLead(detailId);
+  if (!lead) return;
+  const name = ($("#tagAddInput").value || "").trim().slice(0, 40);
+  if (!name) return;
+  const color = $("#tagAddColor").value || "#0a7a3b";
+  const tags = Array.isArray(lead.tags) ? [...lead.tags] : [];
+  if (!tags.some((t) => t.toLowerCase() === name.toLowerCase())) tags.push(name);
+  try {
+    const r = await api("/api/tags/color", { method: "PUT", body: JSON.stringify({ tag: name, color }) });
+    if (r && r.tagColors) tagColors = r.tagColors;
+    const updated = await api(`/api/leads/${detailId}`, { method: "PUT", body: JSON.stringify({ tags }) });
+    applyLeadUpdate(updated);
+    renderTagFilter();
+    const inp = $("#tagAddInput"); if (inp) inp.focus();
+  } catch (err) { toast(err.message, "error"); }
+}
+
+async function removeTagFromDetail(name) {
+  const lead = getLead(detailId);
+  if (!lead) return;
+  const tags = (lead.tags || []).filter((t) => t.toLowerCase() !== String(name).toLowerCase());
+  try {
+    const updated = await api(`/api/leads/${detailId}`, { method: "PUT", body: JSON.stringify({ tags }) });
+    applyLeadUpdate(updated);
+    renderTagFilter();
+  } catch (err) { toast(err.message, "error"); }
+}
+
+// Hinweis auf die letzte Aktivität ("vor 3 Tg."), bei Stillstand als "kalt"
+// hervorgehoben (💤). Basis: lastActivityAt bzw. Anlagedatum.
+function activityHint(l) {
+  const iso = l.lastActivityAt || l.createdAt;
+  if (!iso) return "";
+  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+  const stale = isStale(l);
+  const label = days <= 0 ? "heute aktiv" : `vor ${days} Tg.`;
+  return `<span class="act-age${stale ? " stale" : ""}" title="Letzte Aktivität: ${esc(fmtDateTime(iso))}">${stale ? "💤" : "🕓"} ${esc(label)}</span>`;
+}
+
+// Auswahl-Checkbox (nur im Mehrfachauswahl-Modus).
+function selectBoxHtml(l) {
+  if (!selectMode) return "";
+  return `<label class="lead-select" title="Auswählen">
+    <input type="checkbox" data-select="${l.id}" ${selectedIds.has(l.id) ? "checked" : ""} aria-label="Lead auswählen" />
+  </label>`;
+}
+
 // Kartenansicht: nur Firma, Ansprechpartner, Status, Branche, Wert, KI-Score.
 function leadCard(l) {
   const branche = l.research ? fieldVal(l.research.fields && l.research.fields.branche) : "";
-  return `<article class="lead-card" data-nav="${l.id}" tabindex="0" role="button" aria-label="Lead öffnen">
+  return `<article class="lead-card${selectedIds.has(l.id) ? " selected" : ""}" data-nav="${l.id}" tabindex="0" role="button" aria-label="Lead öffnen">
+    ${selectBoxHtml(l)}
     <div class="lead-card-head">
       <div class="lead-card-title">${esc(l.company) || esc(l.name) || "—"}</div>
       <span class="status-pill s-${l.status}">${l.status}</span>
@@ -501,8 +667,10 @@ function leadCard(l) {
     <div class="lead-card-sub">
       ${l.company && l.name ? `<span>👤 ${esc(l.name)}</span>` : ""}
       ${branche ? `<span>🏷️ ${esc(branche)}</span>` : ""}
+      ${activityHint(l)}
       ${!l.research ? `<span class="muted-note">keine Recherche</span>` : ""}
     </div>
+    ${tagsHtml(l.tags)}
     ${nextStepBadge(l) ? `<div class="lead-card-next">${nextStepBadge(l)}</div>` : ""}
     <div class="lead-card-foot">
       <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
@@ -518,6 +686,7 @@ function kanbanCard(l) {
       ${scoreBadge(l, "kanban-score")}
     </div>
     ${l.name && l.company ? `<div class="kanban-card-sub">${esc(l.name)}</div>` : ""}
+    ${tagsHtml(l.tags, "kanban-card-tags")}
     <div class="kanban-card-foot">
       <span class="lead-value">💶 ${fmtEuro(l.value)}</span>
       ${nextStepBadge(l)}
@@ -657,6 +826,10 @@ function detailViewHtml(l) {
         <section class="card lead-about">
           <h3>Über</h3>
           ${leadAboutHtml(l)}
+          <div class="tags-block">
+            <div class="tags-block-label">Tags</div>
+            ${tagEditorHtml(l)}
+          </div>
         </section>
         <section class="card">
           <h3>KI-Bewertung</h3>
@@ -691,6 +864,7 @@ function leadAboutHtml(l) {
     l.phone ? ["Telefon", esc(l.phone)] : null,
     ["Quelle", l.source ? esc(l.source) : "—"],
     ["Wert", esc(fmtEuro(l.value))],
+    l.lastActivityAt ? ["Letzte Aktivität", esc(fmtDateTime(l.lastActivityAt))] : null,
     ["Angelegt", esc(dt(l.createdAt))],
     ["Aktualisiert", esc(dt(l.updatedAt))],
   ].filter(Boolean);
@@ -975,6 +1149,7 @@ function detailEditHtml(l) {
           ${input("ed_next_step", "Nächster Schritt", l.nextStep || "")}
           ${input("ed_next_step_at", "Wiedervorlage am", l.nextStepAt || "", "date")}
         </div>
+        ${input("ed_tags", "Tags (mit Komma getrennt)", Array.isArray(l.tags) ? l.tags.join(", ") : "")}
         ${textarea("ed_notes", "Notizen", l.notes)}
       </div>
       ${researchEdit}
@@ -995,6 +1170,7 @@ function collectStammdaten() {
     status: g("ed_status"),
     nextStep: g("ed_next_step"),
     nextStepAt: g("ed_next_step_at"),
+    tags: parseTags(g("ed_tags")),
     notes: g("ed_notes"),
   };
 }
@@ -1069,6 +1245,8 @@ function onDetailClick(e) {
   if (fil) { setActivityFilter(fil.dataset.filter); return; }
   const delAct = e.target.closest("[data-del-act]");
   if (delAct) { removeActivity(delAct.dataset.delAct); return; }
+  const tagRm = e.target.closest("[data-tag-remove]");
+  if (tagRm) { removeTagFromDetail(tagRm.dataset.tagRemove); return; }
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
   const action = btn.dataset.action;
@@ -1153,6 +1331,9 @@ function bindEvents() {
 
   $("#closeResearchModal").addEventListener("click", closeResearchModal);
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
+  $("#closeDiscoveryModal").addEventListener("click", closeDiscoveryModal);
+  $("#cancelDiscoveryBtn").addEventListener("click", closeDiscoveryModal);
+  $("#discoveryForm").addEventListener("submit", (e) => { e.preventDefault(); submitDiscovery(); });
   $("#abortResearchBtn").addEventListener("click", () => { if (modalJobId) cancelJob(modalJobId); });
   $("#researchForm").addEventListener("submit", submitResearch);
 
@@ -1171,12 +1352,11 @@ function bindEvents() {
   $("#stageProbFields").addEventListener("input", onProbInput);
   $("#exportCsvBtn").addEventListener("click", () => downloadFile("/api/leads/export.csv"));
   $("#exportXlsxBtn").addEventListener("click", () => downloadFile("/api/leads/export.xlsx"));
+  $("#exportProspectsCsvBtn").addEventListener("click", () => downloadFile("/api/prospects/export.csv"));
   $("#importCsvBtn").addEventListener("click", importCsv);
-
-  $("#search").addEventListener("input", (e) => {
-    searchTerm = e.target.value.toLowerCase().trim();
-    renderLeads();
-  });
+  $("#importProspectsCsvBtn").addEventListener("click", importProspectsCsv);
+  setupDropzone("importCsvInput", "importCsvBtn");
+  setupDropzone("importProspectsCsvInput", "importProspectsCsvBtn");
 
   $("#statusFilters").addEventListener("click", (e) => {
     const btn = e.target.closest(".chip");
@@ -1184,6 +1364,79 @@ function bindEvents() {
     activeFilter = btn.dataset.filter;
     renderStatusFilters();
     renderLeads();
+  });
+
+  // Sortierung
+  $("#sortBy").addEventListener("change", (e) => {
+    sortBy = e.target.value;
+    localStorage.setItem("leadpilot_sort", sortBy);
+    renderLeads();
+  });
+  // Tag-Filter
+  $("#tagFilter").addEventListener("change", (e) => { tagFilter = e.target.value; renderLeads(); });
+  // „Kalt"-Filter (Stillstand)
+  $("#staleFilter").addEventListener("click", () => {
+    staleOnly = !staleOnly;
+    $("#staleFilter").classList.toggle("active", staleOnly);
+    renderLeads();
+  });
+  // Mehrfachauswahl ein/aus
+  $("#selectToggle").addEventListener("click", () => setSelectMode(!selectMode));
+  // Auswahl-Checkboxen in der Liste
+  $("#leadList").addEventListener("change", (e) => {
+    const cb = e.target.closest("[data-select]");
+    if (cb) toggleSelect(cb.dataset.select, cb.checked);
+  });
+
+  // Globale Schnellsuche (Topbar)
+  const gsInput = $("#globalSearchInput");
+  if (gsInput) {
+    gsInput.addEventListener("input", (e) => renderGlobalResults(e.target.value));
+    gsInput.addEventListener("keydown", onGlobalSearchKey);
+    gsInput.addEventListener("focus", (e) => { if (e.target.value.trim()) renderGlobalResults(e.target.value); });
+  }
+  $("#globalSearchResults").addEventListener("click", (e) => {
+    const item = e.target.closest("[data-gs-idx]");
+    if (item) runGsResult(Number(item.dataset.gsIdx));
+  });
+  // Klick außerhalb schließt die Trefferliste.
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#globalSearch")) hideGlobalResults();
+  });
+
+  // Heute/Agenda: öffnen, erledigen, verschieben/planen.
+  $("#agendaView").addEventListener("click", (e) => {
+    const done = e.target.closest("[data-agenda-done]");
+    if (done) { completeNextStep(done.dataset.agendaDone); return; }
+    const edit = e.target.closest("[data-agenda-edit]");
+    if (edit) { openNextStepModal(edit.dataset.agendaEdit); return; }
+    const open = e.target.closest("[data-nav]");
+    if (open) location.hash = "#/lead/" + encodeURIComponent(open.dataset.nav);
+  });
+
+  // Prospects-Seite: Live-Suche (nur Gruppen neu zeichnen), Auswahl, Aktionen.
+  $("#prospectsView").addEventListener("input", (e) => {
+    if (e.target.id === "prospectSearch") { prospectSearch = e.target.value.toLowerCase().trim(); renderProspectGroups(); }
+  });
+  $("#prospectsView").addEventListener("change", (e) => {
+    const cb = e.target.closest("[data-prospect-sel]");
+    if (cb) toggleProspectSelect(cb.dataset.prospectSel, cb.checked);
+  });
+  $("#prospectsView").addEventListener("click", (e) => {
+    const dco = e.target.closest("[data-discovery-open]");
+    if (dco) { openDiscoveryModal(); return; }
+    const g = e.target.closest("[data-prospect-group]");
+    if (g) { prospectGroupBy = g.dataset.prospectGroup; localStorage.setItem("leadpilot_prospect_group", prospectGroupBy); renderProspects(); return; }
+    const s = e.target.closest("[data-prospect-status]");
+    if (s) { prospectStatusFilter = s.dataset.prospectStatus; prospectSelected.clear(); renderProspects(); return; }
+    const rr = e.target.closest("[data-prospect-research]");
+    if (rr) { prospectSelected.clear(); prospectSelected.add(rr.dataset.prospectResearch); researchSelectedProspects(); return; }
+    const rj = e.target.closest("[data-prospect-reject]");
+    if (rj) { rejectProspect(rj.dataset.prospectReject); return; }
+    const re = e.target.closest("[data-prospect-restore]");
+    if (re) { restoreProspect(re.dataset.prospectRestore); return; }
+    const dl = e.target.closest("[data-prospect-delete]");
+    if (dl) { deleteProspectHard(dl.dataset.prospectDelete); return; }
   });
 
   $("#viewToggle").addEventListener("click", (e) => {
@@ -1197,6 +1450,7 @@ function bindEvents() {
 
   // Klick auf eine Karte (Liste oder Board) öffnet die Detailseite.
   const onCardNav = (e) => {
+    if (e.target.closest(".lead-select")) return; // Auswahl-Checkbox: nicht navigieren
     const card = e.target.closest("[data-nav]");
     if (!card) return;
     if (dragMoved) return; // war ein Drag im Board, keine Navigation
@@ -1229,6 +1483,15 @@ function bindEvents() {
   // aufgebaut wird.
   $("#detailView").addEventListener("submit", (e) => {
     if (e.target.id === "activityForm") { e.preventDefault(); addDetailActivity(); }
+    else if (e.target.id === "tagAddForm") { e.preventDefault(); addTagFromDetail(); }
+  });
+  // Tag-Eingabe: Farbwähler auf die Farbe des (bestehenden) Tags setzen.
+  $("#detailView").addEventListener("input", (e) => {
+    if (e.target.id === "tagAddInput") {
+      const c = $("#tagAddColor");
+      const name = e.target.value.trim();
+      if (c && name) c.value = tagColor(name);
+    }
   });
 
   // Schließen per Klick auf Overlay
@@ -1257,6 +1520,7 @@ function openLeadModal(id) {
     $("#f_status").value = l.status;
     $("#f_next_step").value = l.nextStep || "";
     $("#f_next_step_at").value = l.nextStepAt || "";
+    $("#f_tags").value = Array.isArray(l.tags) ? l.tags.join(", ") : "";
     $("#f_notes").value = l.notes;
   } else {
     $("#modalTitle").textContent = "Neuer Lead";
@@ -1284,6 +1548,7 @@ async function saveLead(e) {
     status: $("#f_status").value,
     nextStep: $("#f_next_step").value,
     nextStepAt: $("#f_next_step_at").value,
+    tags: parseTags($("#f_tags").value),
     notes: $("#f_notes").value,
   };
   try {
@@ -1361,9 +1626,7 @@ async function completeNextStep(id) {
       }),
     });
     toast("Wiedervorlage erledigt", "success");
-    await refresh();
-    renderDetail();
-    loadDetailExtras(id);
+    await refresh(); // view-aware: zeichnet Detail/Heute/Liste passend neu
   } catch (err) {
     toast(err.message, "error");
   }
@@ -1648,6 +1911,7 @@ function openSettingsModal() {
     sel.disabled = true;
   }
   renderStageProbFields();
+  $("#settingsStaleDays").value = staleDays;
   $("#settingsModal").classList.remove("hidden");
 }
 
@@ -1664,12 +1928,13 @@ async function saveSettings(e) {
     probs[el.dataset.prob] = Number(el.value);
   });
   body.stageProbabilities = probs;
+  body.staleDays = Number($("#settingsStaleDays").value) || staleDays;
   try {
     const cfg = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
     currentModel = cfg.model;
     stageProbabilities = cfg.stageProbabilities || stageProbabilities;
-    renderAiBadge({ aiEnabled, model: currentModel });
-    await refresh(); // Pipeline-Wert mit den neuen Gewichten neu berechnen
+    if (cfg.staleDays) staleDays = cfg.staleDays;
+    await refresh(); // Pipeline-Wert + „Kalt"-Filter mit neuen Werten neu berechnen
     toast("Einstellungen gespeichert", "success");
     closeSettingsModal();
   } catch (err) {
@@ -1686,6 +1951,44 @@ function downloadFile(url) {
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+// Verwandelt ein <label class="dropzone"> mit verstecktem File-Input in eine
+// klickbare Drag&Drop-Zone: zeigt Dateiname/-größe an und (de)aktiviert den
+// zugehörigen Import-Button. Reagiert auch auf programmatisches Leeren des
+// Inputs (dispatch "change") nach erfolgreichem Import.
+function setupDropzone(inputId, btnId) {
+  const input = $("#" + inputId);
+  const btn = $("#" + btnId);
+  if (!input || !btn) return;
+  const zone = input.closest(".dropzone");
+  if (!zone) return;
+  const icon = zone.querySelector(".dz-icon");
+  const title = zone.querySelector(".dz-title");
+  const hint = zone.querySelector(".dz-hint");
+  const def = { icon: icon ? icon.textContent : "", title: title.textContent, hint: hint.textContent };
+
+  const update = () => {
+    const file = input.files && input.files[0];
+    zone.classList.toggle("has-file", !!file);
+    btn.disabled = !file;
+    if (icon) icon.textContent = file ? "✅" : def.icon;
+    title.textContent = file ? file.name : def.title;
+    hint.textContent = file ? `${Math.max(1, Math.round(file.size / 1024))} KB · klicken zum Ändern` : def.hint;
+  };
+
+  input.addEventListener("change", update);
+  zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("dragover"); });
+  zone.addEventListener("dragleave", (e) => { if (!zone.contains(e.relatedTarget)) zone.classList.remove("dragover"); });
+  zone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    zone.classList.remove("dragover");
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (!files || !files.length) return;
+    try { input.files = files; } catch (_) { /* manche Browser erlauben kein Setzen – Klick-Auswahl bleibt */ }
+    update();
+  });
+  update(); // Initialzustand: kein File → Button deaktiviert
 }
 
 // CSV-Import: liest die gewählte Datei, schickt sie an den Server und meldet das
@@ -1714,12 +2017,48 @@ async function importCsv() {
     if (res.errors && res.errors.length) parts.push(`${res.errors.length} fehlerhaft`);
     toast("Import: " + parts.join(" · "), res.created || res.enriched ? "success" : "");
     input.value = "";
+    input.dispatchEvent(new Event("change")); // Dropzone zurücksetzen (Datei geleert)
     await refresh();
   } catch (err) {
     toast(err.message, "error");
   } finally {
-    btn.disabled = false;
     btn.textContent = prev;
+    btn.disabled = !(input.files && input.files[0]); // ohne Datei deaktiviert
+  }
+}
+
+// CSV-Import für Prospects: liest die gewählte Datei, schickt sie an den Server
+// und meldet das Ergebnis. Anschließend wird die Prospect-Liste aktualisiert.
+async function importProspectsCsv() {
+  const input = $("#importProspectsCsvInput");
+  const file = input.files && input.files[0];
+  if (!file) {
+    toast("Bitte zuerst eine CSV-Datei auswählen.", "error");
+    return;
+  }
+  const btn = $("#importProspectsCsvBtn");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Importiere…";
+  try {
+    const csv = await file.text();
+    const res = await api("/api/prospects/import", {
+      method: "POST",
+      body: JSON.stringify({ csv }),
+    });
+    const parts = [`${res.created} angelegt`];
+    if (res.skippedDuplicate) parts.push(`${res.skippedDuplicate} Dublette(n) übersprungen`);
+    if (res.skippedEmpty) parts.push(`${res.skippedEmpty} leer`);
+    if (res.errors && res.errors.length) parts.push(`${res.errors.length} fehlerhaft`);
+    toast("Prospect-Import: " + parts.join(" · "), res.created ? "success" : "");
+    input.value = "";
+    input.dispatchEvent(new Event("change")); // Dropzone zurücksetzen (Datei geleert)
+    await loadProspects();
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    btn.textContent = prev;
+    btn.disabled = !(input.files && input.files[0]); // ohne Datei deaktiviert
   }
 }
 
@@ -1750,6 +2089,8 @@ function openResearchModal() {
 function openJobModal(jobId) {
   const job = jobs.get(jobId);
   if (!job) return;
+  // Discovery-Jobs haben kein Lead-Modal – stattdessen zur Prospects-Seite.
+  if (job.kind === "discovery") { location.hash = "#/prospects"; return; }
   modalJobId = jobId;
   $("#researchInput").value = job.label;
   $("#researchInput").disabled = true;
@@ -1812,7 +2153,7 @@ function closeResearchModal() {
 // übersteht (die Recherche läuft serverseitig weiter).
 const JOBS_KEY = "leadpilot_jobs";
 function persistJobs() {
-  const arr = [...jobs.values()].map((j) => ({ id: j.id, label: j.label, startTs: j.startTs }));
+  const arr = [...jobs.values()].map((j) => ({ id: j.id, label: j.label, startTs: j.startTs, kind: j.kind }));
   try { localStorage.setItem(JOBS_KEY, JSON.stringify(arr)); } catch {}
 }
 function dropJob(jobId) {
@@ -1837,8 +2178,9 @@ async function cancelJob(jobId) {
 }
 
 // Job registrieren und Polling starten. startTs optional (für Wiederaufnahme).
-function addJob(jobId, label, startTs) {
-  jobs.set(jobId, { id: jobId, label, status: "running", steps: [], startTs: startTs || Date.now(), leadId: null });
+// kind: "research" (Standard) oder "discovery".
+function addJob(jobId, label, startTs, kind = "research") {
+  jobs.set(jobId, { id: jobId, label, status: "running", steps: [], startTs: startTs || Date.now(), leadId: null, kind });
   persistJobs();
   renderDock();
   pollJob(jobId);
@@ -1850,7 +2192,7 @@ function resumeJobs() {
   try { arr = JSON.parse(localStorage.getItem(JOBS_KEY) || "[]"); } catch {}
   if (!Array.isArray(arr)) return;
   for (const j of arr) {
-    if (j && j.id && !jobs.has(j.id)) addJob(j.id, j.label || "Recherche", j.startTs);
+    if (j && j.id && !jobs.has(j.id)) addJob(j.id, j.label || "Recherche", j.startTs, j.kind || "research");
   }
 }
 
@@ -1881,6 +2223,15 @@ async function pollJob(jobId) {
     renderDock();
 
     if (data.status === "done") {
+      if (job.kind === "discovery") {
+        dropJob(jobId);
+        const r = data.result || { added: 0, skippedDuplicate: 0, total: 0 };
+        toast(`✅ Discovery: ${r.added} neue Prospects · ${r.skippedDuplicate} Dublette(n) übersprungen`, "success");
+        // Treffer sind serverseitig bereits als Prospects gespeichert →
+        // Liste aktualisieren (zeichnet sich neu, falls gerade sichtbar).
+        loadProspects();
+        return;
+      }
       const wasOpen = modalJobId === jobId;
       dropJob(jobId);
       toast(`✅ Recherche fertig: ${job.label}`, "success");
@@ -1931,8 +2282,8 @@ function renderDock() {
         `<span class="job-chip-body">` +
         `<span class="job-chip-title"></span>` +
         `<span class="job-chip-step"></span></span>` +
-        `<span class="job-chip-x" data-cancel="${j.id}" role="button" title="Recherche abbrechen">✕</span>`;
-      chip.querySelector(".job-chip-title").textContent = "🔎 " + j.label;
+        `<span class="job-chip-x" data-cancel="${j.id}" role="button" title="Abbrechen">✕</span>`;
+      chip.querySelector(".job-chip-title").textContent = (j.kind === "discovery" ? "🧭 " : "🔎 ") + j.label;
       dock.appendChild(chip);
     }
     const stepEl = chip.querySelector(".job-chip-step");
@@ -2173,16 +2524,28 @@ function costChart(days) {
   }
 
   const bw = plotW / days.length;
+  // Gestapelter Balken je Tag: unten KI-Recherche/Übrige (grün), oben Discovery
+  // (amber) – so heben sich die Discovery-Kosten farblich ab.
   const bars = days.map((d, i) => {
     const x = padL + i * bw;
-    const h = top > 0 ? ((d.value || 0) / top) * plotH : 0;
-    const y = padT + plotH - h;
+    const total = d.value || 0;
+    const disc = Math.min(Math.max(0, d.discovery || 0), total);
+    const other = total - disc;
+    const bx = x + bw * 0.18, bwid = bw * 0.64;
+    const hOther = top > 0 ? (other / top) * plotH : 0;
+    const hDisc = top > 0 ? (disc / top) * plotH : 0;
+    const yOther = padT + plotH - hOther;
+    const yDisc = yOther - hDisc;
     const payload = esc(JSON.stringify({
-      day: d.day, value: d.value || 0, models: d.models || {}, researched: d.researched || 0,
+      day: d.day, value: total, discovery: disc, models: d.models || {},
+      researched: d.researched || 0, discovered: d.discovered || 0,
     }));
+    const otherRect = hOther > 0 ? `<rect class="cc-bar" x="${bx}" y="${yOther}" width="${bwid}" height="${hOther}" rx="3" />` : "";
+    const discRect = hDisc > 0 ? `<rect class="cc-bar-disc" x="${bx}" y="${yDisc}" width="${bwid}" height="${hDisc}" rx="3" />` : "";
     return `<g class="cc-col" data-tip="${payload}">
         <rect class="cc-hit" x="${x}" y="${padT}" width="${bw}" height="${plotH}" />
-        <rect class="cc-bar" x="${x + bw * 0.18}" y="${y}" width="${bw * 0.64}" height="${Math.max(0, h)}" rx="3" />
+        ${otherRect}
+        ${discRect}
         <text x="${x + bw / 2}" y="${H - 8}" class="cc-lbl">${esc(dayLabel(d.day))}</text>
       </g>`;
   }).join("");
@@ -2194,6 +2557,10 @@ function costChart(days) {
         ${bars}
       </svg>
       <div class="chart-tip hidden"></div>
+    </div>
+    <div class="cost-legend">
+      <span class="cost-legend-item"><span class="ci-swatch ci-research"></span> KI-Recherche</span>
+      <span class="cost-legend-item"><span class="ci-swatch ci-disc"></span> Discovery</span>
     </div>`;
 }
 
@@ -2212,10 +2579,15 @@ function wireCostChart(root) {
       const rows = models.length
         ? models.map(([m, c]) => `<div class="tip-row"><span>${esc(shortModel(m))}</span><span>${esc(usd(c))}</span></div>`).join("")
         : `<div class="tip-row d-muted"><span>Keine KI-Kosten</span><span></span></div>`;
+      const discRow = (Number(d.discovery) || 0) > 0
+        ? `<div class="tip-row tip-disc"><span>· davon Discovery</span><span>${esc(usd(d.discovery))}</span></div>`
+        : "";
       tip.innerHTML = `<div class="tip-head">${esc(dayLabelLong(d.day))}</div>
         <div class="tip-row tip-total"><span>Gesamt</span><span>${esc(usd(d.value))}</span></div>
+        ${discRow}
         ${rows}
-        <div class="tip-row tip-meta"><span>Recherchierte Leads</span><span>${Number(d.researched) || 0}</span></div>`;
+        <div class="tip-row tip-meta"><span>Recherchierte Leads</span><span>${Number(d.researched) || 0}</span></div>
+        <div class="tip-row tip-meta"><span>Entdeckte Leads</span><span>${Number(d.discovered) || 0}</span></div>`;
       tip.classList.remove("hidden");
 
       const wr = wrap.getBoundingClientRect();
@@ -2297,6 +2669,8 @@ async function renderReportsView() {
   }
   const s = r.stats;
   const eur = (v) => fmtEuro(Math.round(v));
+  const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
+  const prospectsOpen = (r.prospects && r.prospects.open) || 0;
 
   const kpis = [
     ["Leads gesamt", s.total],
@@ -2305,6 +2679,8 @@ async function renderReportsView() {
     ["Abschlussquote", s.conversion + " %"],
     ["Ø Auftragswert", eur(r.avgWon)],
     ["Ø Vertriebszyklus", r.avgCycleDays ? r.avgCycleDays + " Tage" : "—"],
+    ["Prospects offen", prospectsOpen],
+    ["Discovery-Kosten (14 T)", usd(r.discoveryCost14d)],
   ].map(([label, val]) => `<div class="stat-card"><span class="stat-value">${esc(String(val))}</span><span class="stat-label">${esc(label)}</span></div>`).join("");
 
   const wonLeads = r.wonLeadsByMonth.map((m) => ({ label: monthLabel(m.month), value: m.value }));
@@ -2312,7 +2688,6 @@ async function renderReportsView() {
   // KI-Kosten je Tag (USD, aus den Tokens + Tool-Gebühren errechnet).
   const costByDay = r.costByDay || [];
   const costTotal = costByDay.reduce((a, d) => a + (d.value || 0), 0);
-  const usd = (v) => "$" + (Number(v) || 0).toFixed(2);
 
   // Verlust-Übersicht: Anzahl, Wert und Verlustquote (gegen abgeschlossene Deals).
   const lost = r.funnel.find((f) => f.status === "verloren") || { count: 0, value: 0 };
@@ -2352,6 +2727,556 @@ async function renderReportsView() {
   `;
 
   wireCostChart(v);
+}
+
+// --- Tags-Helfer -----------------------------------------------------------
+// Komma-getrennte Eingabe → bereinigtes String-Array (Server dedupliziert/deckelt).
+function parseTags(str) {
+  return String(str || "").split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+// Befüllt den Tag-Filter im Toolbar mit allen vorkommenden Tags.
+function renderTagFilter() {
+  const sel = $("#tagFilter");
+  if (!sel) return;
+  const all = new Set();
+  for (const l of leads) for (const t of l.tags || []) all.add(t);
+  const sorted = [...all].sort((a, b) => a.localeCompare(b, "de", { sensitivity: "base" }));
+  if (!sorted.includes(tagFilter)) tagFilter = ""; // Tag verschwunden → Filter zurücksetzen
+  sel.innerHTML = `<option value="">Alle Tags</option>` +
+    sorted.map((t) => `<option value="${esc(t)}">${esc(t)}</option>`).join("");
+  sel.value = tagFilter;
+}
+
+// --- Heute / Agenda --------------------------------------------------------
+function showAgenda() {
+  detailId = null;
+  detailEditing = false;
+  showOnly("agendaView");
+  setActiveNav("agenda");
+  renderAgenda();
+  window.scrollTo(0, 0);
+}
+
+// Zahl fälliger Wiedervorlagen im „Heute"-Navigationspunkt anzeigen.
+function updateAgendaBadge() {
+  const n = dueLeadCount();
+  document.querySelectorAll(".agenda-due").forEach((b) => {
+    b.textContent = n;
+    b.classList.toggle("hidden", n === 0);
+  });
+}
+
+function agendaItemHtml(l) {
+  const info = dueInfo(l.nextStepAt);
+  const due = info ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>` : "";
+  const hasPlan = !!(l.nextStep || l.nextStepAt);
+  const actions = hasPlan
+    ? `<button type="button" class="btn btn-sm" data-agenda-done="${l.id}">✓ Erledigt</button>
+       <button type="button" class="btn btn-sm" data-agenda-edit="${l.id}">Verschieben</button>`
+    : `<button type="button" class="btn btn-sm" data-agenda-edit="${l.id}">+ Planen</button>`;
+  return `<div class="agenda-item">
+    <button type="button" class="agenda-open" data-nav="${l.id}">
+      <span class="agenda-title">${esc(l.company || l.name || "—")}</span>
+      <span class="status-pill s-${l.status}">${l.status}</span>
+      <span class="agenda-step">${esc(l.nextStep || "Kein nächster Schritt")} ${due} ${activityHint(l)}</span>
+    </button>
+    <div class="agenda-actions">${actions}</div>
+  </div>`;
+}
+
+function renderAgenda() {
+  const v = $("#agendaView");
+  const open = leads.filter((l) => l.status !== "gewonnen" && l.status !== "verloren");
+  const withStep = open
+    .filter((l) => l.nextStepAt)
+    .sort((a, b) => (a.nextStepAt < b.nextStepAt ? -1 : a.nextStepAt > b.nextStepAt ? 1 : 0));
+  const today = todayYMD();
+  const overdue = withStep.filter((l) => l.nextStepAt < today);
+  const todays = withStep.filter((l) => l.nextStepAt === today);
+  const upcoming = withStep.filter((l) => l.nextStepAt > today);
+  // Neue Leads (Status "neu") bleiben außen vor – erst bearbeitete offene Leads
+  // ohne geplanten nächsten Schritt brauchen Aufmerksamkeit.
+  const noStep = open.filter((l) => l.status !== "neu" && !l.nextStepAt);
+
+  const section = (title, arr, cls = "") => arr.length
+    ? `<section class="card agenda-section ${cls}">
+         <h3>${esc(title)} <span class="agenda-n">${arr.length}</span></h3>
+         ${arr.map(agendaItemHtml).join("")}
+       </section>`
+    : "";
+
+  const planned = overdue.length || todays.length || upcoming.length
+    ? section("Überfällig", overdue, "overdue") + section("Heute", todays, "today") + section("Demnächst", upcoming)
+    : `<section class="card"><p class="d-muted">Keine geplanten Wiedervorlagen. 🎉</p></section>`;
+
+  v.innerHTML = `
+    <div class="view-head"><h2>📅 Heute</h2><p class="d-muted">Anstehende Wiedervorlagen &amp; nächste Schritte</p></div>
+    ${planned}
+    ${noStep.length ? `<section class="card agenda-section nostep">
+        <h3>Offen ohne Wiedervorlage <span class="agenda-n">${noStep.length}</span></h3>
+        <p class="d-muted">Diese offenen Leads haben keinen geplanten nächsten Schritt.</p>
+        ${noStep.slice(0, 25).map(agendaItemHtml).join("")}
+      </section>` : ""}
+  `;
+}
+
+// --- Mehrfachauswahl (Bulk) ------------------------------------------------
+function setSelectMode(on) {
+  selectMode = on;
+  const btn = $("#selectToggle");
+  if (btn) btn.classList.toggle("active", on);
+  if (!on) selectedIds.clear();
+  renderBulkBar();
+  renderLeads();
+}
+
+function toggleSelect(id, on) {
+  if (on) selectedIds.add(id); else selectedIds.delete(id);
+  const card = document.querySelector(`.lead-card[data-nav="${CSS.escape(id)}"]`);
+  if (card) card.classList.toggle("selected", on);
+  renderBulkBar();
+}
+
+function clearSelection() {
+  selectedIds.clear();
+  renderBulkBar();
+  renderLeads();
+}
+
+function renderBulkBar() {
+  const bar = $("#bulkBar");
+  if (!bar) return;
+  const n = selectedIds.size;
+  bar.classList.toggle("hidden", n === 0);
+  if (!n) { bar.innerHTML = ""; return; }
+  const statusOpts = statuses.map((s) => `<option value="${s}">${s}</option>`).join("");
+  bar.innerHTML = `
+    <span class="bulk-count">${n} ausgewählt</span>
+    <select id="bulkStatus" class="bulk-select"><option value="">Status setzen…</option>${statusOpts}</select>
+    <button class="btn btn-sm" id="bulkTagBtn">🏷️ Tag</button>
+    <button class="btn btn-sm btn-danger" id="bulkDeleteBtn">🗑️ Löschen</button>
+    <button class="btn btn-sm" id="bulkClearBtn">Aufheben</button>`;
+  $("#bulkStatus").onchange = (e) => { if (e.target.value) applyBulkStatus(e.target.value); };
+  $("#bulkTagBtn").onclick = applyBulkTag;
+  $("#bulkDeleteBtn").onclick = applyBulkDelete;
+  $("#bulkClearBtn").onclick = clearSelection;
+}
+
+// Führt eine Aktion sequenziell für alle ausgewählten Leads aus (nutzt die
+// bestehenden Endpunkte, damit Aktivitäten/Logik erhalten bleiben).
+async function bulkRun(label, fn) {
+  const ids = [...selectedIds];
+  let ok = 0;
+  for (const id of ids) {
+    try { await fn(id); ok++; } catch (err) { /* einzelne Fehler tolerieren */ }
+  }
+  toast(`${label}: ${ok}/${ids.length}`, ok ? "success" : "error");
+  selectedIds.clear();
+  await refresh();
+  renderBulkBar();
+}
+
+function applyBulkStatus(status) {
+  bulkRun(`Status → ${status}`, (id) =>
+    api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ status }) }));
+}
+
+function applyBulkTag() {
+  const tag = prompt("Tag für die ausgewählten Leads:");
+  if (tag === null) return;
+  const t = tag.trim();
+  if (!t) return;
+  bulkRun(`Tag „${t}"`, (id) => {
+    const l = getLead(id);
+    const tags = Array.isArray(l && l.tags) ? [...l.tags] : [];
+    if (!tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(t);
+    return api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ tags }) });
+  });
+}
+
+function applyBulkDelete() {
+  if (!confirm(`${selectedIds.size} Lead(s) endgültig löschen?`)) return;
+  bulkRun("Gelöscht", (id) => api(`/api/leads/${id}`, { method: "DELETE" }));
+}
+
+// --- Globale Schnellsuche (Topbar) -----------------------------------------
+// Durchsucht Funktionen, Leads, Prospects, Tags und Status (Eingruppierung).
+// Jeder Treffer trägt eine run()-Aktion (Navigation/Filter/Modal).
+let gsResults = [];
+
+// Statische "Funktionen" (Navigation + Aktionen) für die Schnellsuche.
+function globalFunctions() {
+  return [
+    { icon: "🗂", label: "Leads", keywords: "leads liste übersicht karten board", run: () => { location.hash = "#/"; } },
+    { icon: "📅", label: "Heute", keywords: "heute agenda wiedervorlage fällig termine aufgaben", run: () => { location.hash = "#/heute"; } },
+    { icon: "📇", label: "Prospects", keywords: "prospects discovery kandidaten liste", run: () => { location.hash = "#/prospects"; } },
+    { icon: "📊", label: "Berichte", keywords: "berichte reports statistik auswertung kennzahlen", run: () => { location.hash = "#/reports"; } },
+    { icon: "🧭", label: "Discovery starten", keywords: "discovery finden neue prospects suchen ki kriterien", run: () => { location.hash = "#/prospects"; openDiscoveryModal(); } },
+    { icon: "🔎", label: "Lead recherchieren", keywords: "lead recherchieren ki research neuer anlegen website", run: () => openResearchModal() },
+    { icon: "✏️", label: "Manueller Lead", keywords: "manuell neuer lead anlegen erstellen hinzufügen", run: () => openLeadModal() },
+    { icon: "⚙️", label: "Einstellungen", keywords: "einstellungen settings ki modell import export csv abmelden konto", run: () => openSettingsModal() },
+  ];
+}
+
+// Springt in die Listenansicht und setzt dort genau einen Filter (Tag oder
+// Status); übrige Listenfilter werden zurückgesetzt – für vorhersehbare Treffer.
+function gotoListFiltered({ tag = "", status = "alle" } = {}) {
+  activeFilter = status;
+  tagFilter = tag;
+  dueOnly = false;
+  staleOnly = false;
+  location.hash = "#/";
+  renderStatusFilters();
+  const tf = $("#tagFilter"); if (tf) tf.value = tagFilter;
+  $("#dueFilter")?.classList.remove("active");
+  $("#staleFilter")?.classList.remove("active");
+  renderLeads();
+}
+
+// Springt zur Prospects-Seite und stellt Suche + Status-Filter auf den Treffer.
+function gotoProspect(p) {
+  prospectSearch = (p.name || "").toLowerCase();
+  prospectStatusFilter = p.status === "abgelehnt" ? "abgelehnt" : "offen";
+  prospectSelected.clear();
+  if (location.hash === "#/prospects") renderProspects();
+  else location.hash = "#/prospects";
+}
+
+function renderGlobalResults(raw) {
+  const q = (raw || "").toLowerCase().trim();
+  const box = $("#globalSearchResults");
+  if (!box) return;
+  if (!q) { hideGlobalResults(); return; }
+
+  gsResults = [];
+  const sections = [];
+  const take = (label, items) => { if (items.length) sections.push([label, items]); };
+
+  // Funktionen (Navigation + Aktionen)
+  take("Funktionen", globalFunctions()
+    .filter((f) => (f.label + " " + f.keywords).toLowerCase().includes(q))
+    .slice(0, 5)
+    .map((f) => ({ icon: f.icon, title: f.label, sub: "Funktion", run: f.run })));
+
+  // Leads
+  take("Leads", leads
+    .filter((l) => `${l.name} ${l.company} ${l.email} ${l.source} ${l.status} ${(l.tags || []).join(" ")}`.toLowerCase().includes(q))
+    .slice(0, 6)
+    .map((l) => ({
+      icon: "🗂", title: l.company || l.name || "—",
+      sub: [l.name && l.company ? l.name : "", l.status].filter(Boolean).join(" · "),
+      run: () => { location.hash = "#/lead/" + encodeURIComponent(l.id); },
+    })));
+
+  // Prospects
+  take("Prospects", prospects
+    .filter((p) => `${p.name} ${p.branche} ${p.ort} ${p.groesse} ${p.potenzial}`.toLowerCase().includes(q))
+    .slice(0, 6)
+    .map((p) => ({
+      icon: "📇", title: p.name || "—",
+      sub: ["Prospect", p.branche, p.ort].filter(Boolean).join(" · "),
+      run: () => gotoProspect(p),
+    })));
+
+  // Tags (über alle Leads, dedupliziert mit Anzahl)
+  const tagCount = new Map();
+  for (const l of leads) for (const t of (l.tags || [])) {
+    if (t.toLowerCase().includes(q)) tagCount.set(t, (tagCount.get(t) || 0) + 1);
+  }
+  take("Tags", [...tagCount.entries()].slice(0, 5).map(([t, n]) => ({
+    icon: "🏷", title: t, sub: `Tag · ${n} Lead${n === 1 ? "" : "s"}`,
+    run: () => gotoListFiltered({ tag: t }),
+  })));
+
+  // Eingruppierung (Lead-Status)
+  take("Eingruppierung", statuses
+    .filter((s) => s.toLowerCase().includes(q))
+    .slice(0, 4)
+    .map((s) => ({ icon: "📁", title: s, sub: "Lead-Status", run: () => gotoListFiltered({ status: s }) })));
+
+  if (!sections.length) {
+    box.innerHTML = `<div class="gs-empty">Keine Treffer</div>`;
+    box.classList.remove("hidden");
+    return;
+  }
+
+  let html = "";
+  for (const [label, items] of sections) {
+    html += `<div class="gs-section">${esc(label)}</div>`;
+    for (const it of items) {
+      const idx = gsResults.length;
+      gsResults.push(it);
+      html += `
+        <button type="button" class="gs-item${idx === 0 ? " active" : ""}" data-gs-idx="${idx}" role="option">
+          <span class="gs-ico" aria-hidden="true">${it.icon}</span>
+          <span class="gs-text">
+            <span class="gs-item-title">${esc(it.title)}</span>
+            ${it.sub ? `<span class="gs-item-sub">${esc(it.sub)}</span>` : ""}
+          </span>
+        </button>`;
+    }
+  }
+  box.innerHTML = html;
+  box.classList.remove("hidden");
+}
+
+function hideGlobalResults() {
+  const box = $("#globalSearchResults");
+  if (box) box.classList.add("hidden");
+}
+
+// Führt die Aktion eines Treffers aus und schließt die Suche.
+function runGsResult(i) {
+  const r = gsResults[i];
+  if (!r) return;
+  hideGlobalResults();
+  const inp = $("#globalSearchInput");
+  if (inp) inp.value = "";
+  r.run();
+}
+
+function onGlobalSearchKey(e) {
+  const box = $("#globalSearchResults");
+  if (!box) return;
+  if (e.key === "Escape") { hideGlobalResults(); e.target.blur(); return; }
+  const items = [...box.querySelectorAll(".gs-item")];
+  if (!items.length) return;
+  let idx = items.findIndex((x) => x.classList.contains("active"));
+  if (e.key === "ArrowDown") { e.preventDefault(); idx = Math.min(items.length - 1, idx + 1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); idx = Math.max(0, idx - 1); }
+  else if (e.key === "Enter") { e.preventDefault(); const sel = items[idx] || items[0]; if (sel) runGsResult(Number(sel.dataset.gsIdx)); return; }
+  else return;
+  items.forEach((x, i) => x.classList.toggle("active", i === idx));
+}
+
+// --- Lead-Discovery --------------------------------------------------------
+// Öffnet das Discovery-Modal (Button auf der Prospects-Seite). Füllt die Felder
+// mit den zuletzt genutzten Kriterien vor und spiegelt den KI-Status wider.
+function openDiscoveryModal() {
+  const c = discoveryCriteria || {};
+  $("#dc_branche").value = c.branche || "";
+  $("#dc_region").value = c.region || "";
+  $("#dc_groesse").value = c.groesse || "";
+  $("#dc_stichworte").value = c.stichworte || "";
+  $("#dc_freitext").value = c.freitext || "";
+  $("#dc_anzahl").value = c.anzahl || 10;
+  $("#dcSubmit").disabled = !aiEnabled;
+  $("#discoveryAiHint").classList.toggle("hidden", aiEnabled);
+  $("#discoveryModal").classList.remove("hidden");
+  setTimeout(() => $("#dc_branche").focus(), 0);
+}
+
+function closeDiscoveryModal() {
+  $("#discoveryModal").classList.add("hidden");
+}
+
+async function submitDiscovery() {
+  const criteria = {
+    branche: $("#dc_branche").value.trim(),
+    region: $("#dc_region").value.trim(),
+    groesse: $("#dc_groesse").value.trim(),
+    stichworte: $("#dc_stichworte").value.trim(),
+    freitext: $("#dc_freitext").value.trim(),
+    anzahl: Number($("#dc_anzahl").value) || 10,
+  };
+  if (!criteria.branche && !criteria.region && !criteria.stichworte && !criteria.freitext) {
+    toast("Bitte mindestens ein Kriterium angeben", "error");
+    return;
+  }
+  discoveryCriteria = criteria;
+  try {
+    const { jobId } = await api("/api/discovery", { method: "POST", body: JSON.stringify(criteria) });
+    const label = criteria.branche || criteria.region || criteria.stichworte || "Discovery";
+    addJob(jobId, "Discovery: " + label, undefined, "discovery");
+    closeDiscoveryModal();
+    toast("Discovery läuft… (Fortschritt unten rechts)", "");
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// --- Prospects (persistente Discovery-Liste) -------------------------------
+const POTENZIAL_COLORS = { A: "var(--green)", B: "var(--amber)", C: "#E8703A", D: "var(--red)" };
+function potenzialColor(p) { return POTENZIAL_COLORS[p] || "var(--muted)"; }
+
+function showProspects() {
+  detailId = null;
+  detailEditing = false;
+  showOnly("prospectsView");
+  setActiveNav("prospects");
+  loadProspects();
+  window.scrollTo(0, 0);
+}
+
+async function loadProspects() {
+  try { prospects = await api("/api/prospects"); } catch (err) { /* Liste bleibt */ }
+  renderProspects();
+}
+
+function filteredProspects() {
+  const q = prospectSearch;
+  return prospects.filter((p) => {
+    if ((p.status || "offen") !== prospectStatusFilter) return false;
+    if (q) {
+      const hay = `${p.name} ${p.branche} ${p.ort} ${p.groesse}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+function prospectCardHtml(p) {
+  const web = p.website && p.website !== "k.A." ? extUrl(p.website) : "";
+  const ok = (x) => x && x !== "k.A.";
+  const rejected = p.status === "abgelehnt";
+  const actions = rejected
+    ? `<button type="button" class="btn btn-sm" data-prospect-restore="${p.id}">↩︎ Wiederherstellen</button>
+       <button type="button" class="btn btn-sm btn-danger" data-prospect-delete="${p.id}">🗑️ Endgültig löschen</button>`
+    : `<button type="button" class="btn btn-sm btn-primary" data-prospect-research="${p.id}" ${aiEnabled ? "" : "disabled"}>🔎 Recherchieren</button>
+       <button type="button" class="btn btn-sm" data-prospect-reject="${p.id}">🚫 Verwerfen</button>`;
+  return `<div class="prospect-item">
+    ${rejected ? "" : `<label class="prospect-check"><input type="checkbox" data-prospect-sel="${p.id}" ${prospectSelected.has(p.id) ? "checked" : ""} aria-label="Prospect auswählen" /></label>`}
+    <span class="potenzial-badge" style="color:${potenzialColor(p.potenzial)};border-color:${potenzialColor(p.potenzial)}" title="${esc(p.potenzialGrund || "Erstbewertung Potenzial")}">${esc(p.potenzial || "—")}</span>
+    <div class="prospect-main">
+      <div class="prospect-title">${esc(p.name || "—")}</div>
+      <div class="prospect-sub">
+        ${ok(p.branche) ? `<span>🏷️ ${esc(p.branche)}</span>` : ""}
+        ${ok(p.ort) ? `<span>📍 ${esc(p.ort)}</span>` : ""}
+        ${ok(p.groesse) ? `<span>👥 ${esc(p.groesse)}</span>` : ""}
+        ${web ? `<a href="${esc(web)}" target="_blank" rel="noopener">🌐 Website</a>` : ""}
+      </div>
+      ${p.begruendung ? `<div class="prospect-reason">${esc(p.begruendung)}</div>` : ""}
+    </div>
+    <div class="prospect-actions">${actions}</div>
+  </div>`;
+}
+
+// Gruppen-HTML (gefiltert + nach gewählter Achse gruppiert) – separat, damit die
+// Live-Suche nur diesen Teil neu zeichnet (Eingabefokus bleibt erhalten).
+function prospectGroupsHtml() {
+  const items = filteredProspects();
+  if (!items.length) {
+    return `<section class="card"><p class="d-muted">${prospectStatusFilter === "abgelehnt" ? "Keine abgelehnten Prospects." : "Noch keine Prospects. Starte eine Discovery (🧭)."}</p></section>`;
+  }
+  const keyFn = {
+    branche: (p) => p.branche || "Ohne Branche",
+    groesse: (p) => p.groesse || "k.A.",
+    potenzial: (p) => "Potenzial " + (p.potenzial || "—"),
+  }[prospectGroupBy] || ((p) => "Potenzial " + (p.potenzial || "—"));
+  const groups = {};
+  for (const p of items) { const k = keyFn(p); (groups[k] = groups[k] || []).push(p); }
+  return Object.keys(groups).sort((a, b) => a.localeCompare(b, "de")).map((k) =>
+    `<section class="card prospect-group">
+       <h3>${esc(k)} <span class="agenda-n">${groups[k].length}</span></h3>
+       ${groups[k].map(prospectCardHtml).join("")}
+     </section>`).join("");
+}
+
+function renderProspectGroups() {
+  const el = $("#prospectGroups");
+  if (el) el.innerHTML = prospectGroupsHtml();
+  renderProspectBulkBar();
+}
+
+function renderProspects() {
+  const v = $("#prospectsView");
+  const groupBtn = (key, label) => `<button type="button" class="chip ${prospectGroupBy === key ? "active" : ""}" data-prospect-group="${key}">${label}</button>`;
+  const statusBtn = (key, label) => `<button type="button" class="chip ${prospectStatusFilter === key ? "active" : ""}" data-prospect-status="${key}">${label}</button>`;
+  const openN = prospects.filter((p) => (p.status || "offen") !== "abgelehnt").length;
+  const rejN = prospects.filter((p) => p.status === "abgelehnt").length;
+  v.innerHTML = `
+    <div class="view-head view-head-row">
+      <div><h2>📇 Prospects</h2><p class="d-muted">Mögliche Leads aus der Discovery – gegliedert &amp; recherchierbar</p></div>
+      <button type="button" class="btn btn-primary" data-discovery-open>🧭 Discovery starten</button>
+    </div>
+    <section class="toolbar prospect-toolbar">
+      <div class="toolbar-top">
+        <input type="search" id="prospectSearch" class="search" placeholder="🔍 Prospect suchen…" value="${esc(prospectSearch)}" />
+        <div class="prospect-groupby">
+          <span class="d-muted">Gruppieren:</span>
+          ${groupBtn("potenzial", "Potenzial")} ${groupBtn("branche", "Branche")} ${groupBtn("groesse", "Größe")}
+        </div>
+      </div>
+      <div class="toolbar-filters">
+        ${statusBtn("offen", `Offen (${openN})`)} ${statusBtn("abgelehnt", `Abgelehnt (${rejN})`)}
+      </div>
+    </section>
+    <div id="prospectGroups">${prospectGroupsHtml()}</div>
+  `;
+  renderProspectBulkBar();
+}
+
+// Bulk-Leiste (nur im Offen-Filter mit Auswahl) – nutzt das vorhandene #bulkBar.
+function renderProspectBulkBar() {
+  const bar = $("#bulkBar");
+  if (!bar) return;
+  const n = prospectSelected.size;
+  if (!n || prospectStatusFilter !== "offen") { bar.classList.add("hidden"); bar.innerHTML = ""; return; }
+  bar.classList.remove("hidden");
+  bar.innerHTML = `
+    <span class="bulk-count">${n} ausgewählt</span>
+    <button class="btn btn-sm btn-primary" id="prospectBulkResearch" ${aiEnabled ? "" : "disabled"}>🔎 Recherchieren</button>
+    <button class="btn btn-sm" id="prospectBulkReject">🚫 Verwerfen</button>
+    <button class="btn btn-sm" id="prospectBulkClear">Aufheben</button>`;
+  $("#prospectBulkResearch").onclick = () => researchSelectedProspects();
+  $("#prospectBulkReject").onclick = () => rejectSelectedProspects();
+  $("#prospectBulkClear").onclick = () => { prospectSelected.clear(); renderProspects(); };
+}
+
+function toggleProspectSelect(id, on) {
+  if (on) prospectSelected.add(id); else prospectSelected.delete(id);
+  renderProspectBulkBar();
+}
+
+async function rejectProspect(id) {
+  try { await api(`/api/prospects/${id}`, { method: "PUT", body: JSON.stringify({ status: "abgelehnt" }) }); prospectSelected.delete(id); await loadProspects(); }
+  catch (err) { toast(err.message, "error"); }
+}
+async function restoreProspect(id) {
+  try { await api(`/api/prospects/${id}`, { method: "PUT", body: JSON.stringify({ status: "offen" }) }); await loadProspects(); }
+  catch (err) { toast(err.message, "error"); }
+}
+async function deleteProspectHard(id) {
+  if (!confirm("Diesen Prospect endgültig löschen? (DSGVO – nicht umkehrbar)")) return;
+  try { await api(`/api/prospects/${id}`, { method: "DELETE" }); prospectSelected.delete(id); await loadProspects(); toast("Prospect gelöscht", "success"); }
+  catch (err) { toast(err.message, "error"); }
+}
+async function rejectSelectedProspects() {
+  const ids = [...prospectSelected];
+  for (const id of ids) { try { await api(`/api/prospects/${id}`, { method: "PUT", body: JSON.stringify({ status: "abgelehnt" }) }); } catch {} }
+  prospectSelected.clear();
+  toast(`${ids.length} verworfen`, "success");
+  await loadProspects();
+}
+
+// Ausgewählte Prospects recherchieren → je ein normaler Recherche-Job (gedrosselt
+// auf 3 gleichzeitig). Der Server entfernt den Prospect nach erfolgreicher Recherche.
+async function researchSelectedProspects() {
+  const ids = [...prospectSelected];
+  if (!ids.length) return;
+  prospectSelected.clear();
+  renderProspectBulkBar();
+  toast(`Starte Recherche für ${ids.length} Prospect(s)…`, "");
+  const queue = ids.slice();
+  let started = 0;
+  const worker = async () => {
+    while (queue.length) {
+      const id = queue.shift();
+      const p = prospects.find((x) => x.id === id);
+      try {
+        const { jobId } = await api(`/api/prospects/${id}/research`, { method: "POST" });
+        addJob(jobId, (p && (p.name || p.website)) || "Prospect", undefined, "research");
+        started++;
+      } catch (err) {
+        if (err.status === 429) { queue.unshift(id); await sleep(4000); }
+        else toast(`${p ? p.name : id}: ${err.message}`, "error");
+      }
+      await sleep(400);
+    }
+  };
+  await Promise.all([worker(), worker(), worker()]);
+  toast(`${started} Recherche-Job(s) gestartet`, started ? "success" : "error");
 }
 
 // --- Toast -----------------------------------------------------------------
