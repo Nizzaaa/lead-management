@@ -20,6 +20,7 @@ const prospectSelected = new Set(); // ausgewählte Prospect-IDs (Bulk)
 let models = [];
 let currentModel = "";
 let stageProbabilities = {};
+let staleDays = 14; // „Kalt"-Schwelle (Tage ohne Aktivität), kommt aus /api/config
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
 // Eingeklappte Board-Spalten (Status-Namen). Persistiert wie `view`, lebt
@@ -150,6 +151,7 @@ async function init() {
     models = cfg.models || [];
     currentModel = cfg.model || "";
     stageProbabilities = cfg.stageProbabilities || {};
+    staleDays = cfg.staleDays || 14;
     renderUserBar(cfg);
     renderStatusFilters();
     renderViewToggle();
@@ -327,15 +329,14 @@ function renderStats(stats) {
   $("#statConversion").textContent = stats.conversion + " %";
 }
 
-// Tage ohne Aktivität, ab denen ein offener Lead als „kalt"/stillstehend gilt.
-const STALE_DAYS = 14;
-
-// Offener Lead ohne Aktivität (bzw. seit Anlage) seit mehr als STALE_DAYS Tagen.
+// Offener Lead ohne Aktivität (bzw. seit Anlage) seit mehr als staleDays Tagen
+// (konfigurierbar in den Einstellungen, Default 14). Gewonnene/verlorene Leads
+// zählen nie als kalt.
 function isStale(l) {
   if (l.status === "gewonnen" || l.status === "verloren") return false;
   const iso = l.lastActivityAt || l.createdAt;
   if (!iso) return false;
-  return Date.now() - new Date(iso).getTime() > STALE_DAYS * 86400000;
+  return Date.now() - new Date(iso).getTime() > staleDays * 86400000;
 }
 
 // Gemeinsame Filter (Fällig, Kalt, Tag) – ohne Status, da dieser je nach
@@ -1793,6 +1794,7 @@ function openSettingsModal() {
     sel.disabled = true;
   }
   renderStageProbFields();
+  $("#settingsStaleDays").value = staleDays;
   $("#settingsModal").classList.remove("hidden");
 }
 
@@ -1809,11 +1811,13 @@ async function saveSettings(e) {
     probs[el.dataset.prob] = Number(el.value);
   });
   body.stageProbabilities = probs;
+  body.staleDays = Number($("#settingsStaleDays").value) || staleDays;
   try {
     const cfg = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
     currentModel = cfg.model;
     stageProbabilities = cfg.stageProbabilities || stageProbabilities;
-    await refresh(); // Pipeline-Wert mit den neuen Gewichten neu berechnen
+    if (cfg.staleDays) staleDays = cfg.staleDays;
+    await refresh(); // Pipeline-Wert + „Kalt"-Filter mit neuen Werten neu berechnen
     toast("Einstellungen gespeichert", "success");
     closeSettingsModal();
   } catch (err) {

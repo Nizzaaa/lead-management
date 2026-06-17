@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=32" />
+  <link rel="stylesheet" href="styles.css?v=33" />
   <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
@@ -159,6 +159,11 @@
           <div id="stageProbFields" class="prob-grid"></div>
         </label>
 
+        <label>
+          <span class="field-head">„Kalt" ab (Tage ohne Aktivität)<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Ab so vielen Tagen ohne Aktivität (bzw. seit Anlage) gilt ein offener Lead als „kalt" und erscheint im 💤-Filter. Gewonnene und verlorene Leads zählen nie als kalt. Bereich: 1–365 Tage.</span></span></span>
+          <input type="number" id="settingsStaleDays" class="settings-number" min="1" max="365" step="1" />
+        </label>
+
         <div class="settings-section">
           <h3 class="field-head">📦 Daten-Import &amp; -Export<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Leads und Prospects als Datei sichern oder importieren. Die CSV verwendet das Trennzeichen „;“ und öffnet sich direkt in Excel.<br><br>Erkannte Spalten beim Lead-Import (deutsch oder englisch): Name, Firma, E-Mail, Telefon, Quelle, Status, Wert, Notizen, Nächster Schritt, Wiedervorlage sowie „KI-Bewertung (JSON)“ und „Dossier (JSON)“ aus dem Export. Bei Lead-Dubletten (gleiche E-Mail oder Firma) wird kein zweiter Datensatz angelegt; stattdessen werden nur fehlende Felder des bestehenden Leads ergänzt.<br><br>Prospect-Import erkennt u. a.: Name, Website, Ort, Branche, Größe, Potenzial, Begründung, Quelle, Status, „Kriterien (JSON)“. Dubletten (gegen vorhandene Prospects und Leads) werden übersprungen. Der Prospect-Export enthält die komplette Discovery-Liste (offen + abgelehnt).</span></span></h3>
           <div class="io-group">
@@ -311,6 +316,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=35"></script>
+  <script src="app.js?v=36"></script>
 </body>
 </html>

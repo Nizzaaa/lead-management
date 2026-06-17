@@ -142,6 +142,12 @@ const DEFAULT_STAGE_PROBABILITIES = {
 const STAGE_PROB_SETTING_KEY = "stage_probabilities";
 let stageProbabilities = { ...DEFAULT_STAGE_PROBABILITIES };
 
+// „Kalt"-Schwelle: ab so vielen Tagen ohne Aktivität gilt ein offener Lead als
+// kalt (clientseitiger 💤-Filter). Hier nur persistiert und ausgeliefert.
+const STALE_DAYS_SETTING_KEY = "stale_days";
+const DEFAULT_STALE_DAYS = 14;
+let staleDays = DEFAULT_STALE_DAYS;
+
 function sanitizeStageProbabilities(input) {
   const out = { ...DEFAULT_STAGE_PROBABILITIES };
   if (input && typeof input === "object") {
@@ -152,6 +158,12 @@ function sanitizeStageProbabilities(input) {
     }
   }
   return out;
+}
+
+function sanitizeStaleDays(input) {
+  const n = Math.round(Number(input));
+  if (!Number.isFinite(n)) return DEFAULT_STALE_DAYS;
+  return Math.max(1, Math.min(365, n)); // sinnvolle Grenzen: 1–365 Tage
 }
 
 function sanitizeLead(body = {}) {
@@ -535,6 +547,7 @@ app.get("/api/config", (req, res) => {
     models: AVAILABLE_MODELS,
     statuses: STATUSES,
     stageProbabilities,
+    staleDays,
     user: actor(req) !== "—" ? actor(req) : "",
     logoutUrl: LOGOUT_URL,
   });
@@ -542,7 +555,7 @@ app.get("/api/config", (req, res) => {
 
 // Einstellungen lesen
 app.get("/api/settings", (req, res) => {
-  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities });
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays });
 });
 
 // Einstellungen speichern (KI-Modell und/oder Abschlusswahrscheinlichkeiten).
@@ -559,7 +572,11 @@ app.put("/api/settings", wrap(async (req, res) => {
     stageProbabilities = sanitizeStageProbabilities(req.body.stageProbabilities);
     await db.setSetting(STAGE_PROB_SETTING_KEY, JSON.stringify(stageProbabilities));
   }
-  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities });
+  if (req.body.staleDays !== undefined) {
+    staleDays = sanitizeStaleDays(req.body.staleDays);
+    await db.setSetting(STALE_DAYS_SETTING_KEY, String(staleDays));
+  }
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays });
 }));
 
 // Liste aller Leads
@@ -1224,6 +1241,13 @@ db.init()
       if (savedProb) stageProbabilities = sanitizeStageProbabilities(JSON.parse(savedProb));
     } catch (err) {
       logger.warn("stage_probabilities_load_failed", { error: err.message });
+    }
+    // Gespeicherte „Kalt"-Schwelle laden.
+    try {
+      const savedStale = await db.getSetting(STALE_DAYS_SETTING_KEY);
+      if (savedStale) staleDays = sanitizeStaleDays(savedStale);
+    } catch (err) {
+      logger.warn("stale_days_load_failed", { error: err.message });
     }
     if (usingDefaultDbPassword()) {
       logger.warn("default_db_password", {
