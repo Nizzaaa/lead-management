@@ -5,7 +5,6 @@ let leads = [];
 let statuses = [];
 let aiEnabled = false;
 let activeFilter = "alle";
-let searchTerm = "";
 let dueOnly = false; // Filter: nur fällige/überfällige Wiedervorlagen
 let staleOnly = false; // Filter: nur "kalte" Leads (lange keine Aktivität)
 let tagFilter = ""; // aktiver Tag-Filter ("" = alle)
@@ -151,7 +150,6 @@ async function init() {
     models = cfg.models || [];
     currentModel = cfg.model || "";
     stageProbabilities = cfg.stageProbabilities || {};
-    renderAiBadge(cfg);
     renderUserBar(cfg);
     renderStatusFilters();
     renderViewToggle();
@@ -159,6 +157,7 @@ async function init() {
     const sb = $("#sortBy");
     if (sb) sb.value = sortBy;
     await refresh();
+    loadProspects(); // Prospects für die globale Suche vorladen (rendert versteckt)
   } catch (err) {
     toast(err.message, "error");
   }
@@ -212,37 +211,18 @@ function setupInfoTips() {
   });
 }
 
-// Zeigt den angemeldeten Benutzer und einen Logout-Link in der Topbar an.
-// Beides kommt vom Auth-Proxy (über /api/config). Der Logout-Pfad wird vom
-// Proxy bereitgestellt (z. B. Cloudflare Access) – ohne angemeldeten Benutzer
-// (z. B. lokal ohne Proxy) gäbe es nichts abzumelden, daher bleibt der Button
-// dann ausgeblendet.
+// Zeigt den angemeldeten Benutzer + Logout-Link klein unten im Einstellungen-
+// Modal an. Beides kommt vom Auth-Proxy (über /api/config). Ohne angemeldeten
+// Benutzer (z. B. lokal ohne Proxy) bleibt die Zeile ausgeblendet.
 function renderUserBar(cfg) {
-  const authed = !!cfg.user;
-  const info = $("#userInfo");
-  if (info) {
-    if (authed) { info.textContent = "👤 " + cfg.user; info.hidden = false; }
-    else info.hidden = true;
-  }
-  const link = $("#logoutLink");
-  if (link) {
-    if (authed && cfg.logoutUrl) { link.href = cfg.logoutUrl; link.hidden = false; }
-    else link.hidden = true;
-  }
-}
-
-function renderAiBadge(cfg) {
-  const badge = $("#aiBadge");
-  if (cfg.aiEnabled) {
-    const short = (cfg.model || "").replace("claude-", "");
-    badge.textContent = "🤖 " + (short || "KI aktiv");
-    badge.className = "badge badge-on";
-    badge.title = "Modell: " + cfg.model;
-  } else {
-    badge.textContent = "KI inaktiv";
-    badge.className = "badge badge-off";
-    badge.title = "ANTHROPIC_API_KEY setzen, um KI-Funktionen zu aktivieren";
-  }
+  const acct = $("#settingsAccount");
+  if (!acct) return;
+  if (!cfg.user) { acct.hidden = true; acct.innerHTML = ""; return; }
+  const logout = cfg.logoutUrl
+    ? ` · <a class="settings-logout" href="${esc(cfg.logoutUrl)}" target="_top" rel="noopener">Abmelden</a>`
+    : "";
+  acct.innerHTML = `Eingeloggt als <strong>${esc(cfg.user)}</strong>${logout}`;
+  acct.hidden = false;
 }
 
 function renderStatusFilters() {
@@ -358,17 +338,14 @@ function isStale(l) {
   return Date.now() - new Date(iso).getTime() > STALE_DAYS * 86400000;
 }
 
-// Gemeinsame Filter (Suche, Fällig, Kalt, Tag) – ohne Status, da dieser je nach
-// Ansicht anders behandelt wird (Chips in der Liste, Spalten im Board).
+// Gemeinsame Filter (Fällig, Kalt, Tag) – ohne Status, da dieser je nach
+// Ansicht anders behandelt wird (Chips in der Liste, Spalten im Board). Die
+// frühere Textsuche entfällt (globale Schnellsuche in der Topbar übernimmt das).
 function matchesCommon(l) {
   const today = todayYMD();
   if (dueOnly && !(l.nextStepAt && l.nextStepAt <= today)) return false;
   if (staleOnly && !isStale(l)) return false;
   if (tagFilter && !(Array.isArray(l.tags) && l.tags.includes(tagFilter))) return false;
-  if (searchTerm) {
-    const hay = `${l.name} ${l.company} ${l.email} ${l.source} ${(l.tags || []).join(" ")}`.toLowerCase();
-    if (!hay.includes(searchTerm)) return false;
-  }
   return true;
 }
 
@@ -1272,11 +1249,6 @@ function bindEvents() {
   setupDropzone("importCsvInput", "importCsvBtn");
   setupDropzone("importProspectsCsvInput", "importProspectsCsvBtn");
 
-  $("#search").addEventListener("input", (e) => {
-    searchTerm = e.target.value.toLowerCase().trim();
-    renderLeads();
-  });
-
   $("#statusFilters").addEventListener("click", (e) => {
     const btn = e.target.closest(".chip");
     if (!btn) return;
@@ -1315,8 +1287,8 @@ function bindEvents() {
     gsInput.addEventListener("focus", (e) => { if (e.target.value.trim()) renderGlobalResults(e.target.value); });
   }
   $("#globalSearchResults").addEventListener("click", (e) => {
-    const item = e.target.closest("[data-gs]");
-    if (item) gotoLead(item.dataset.gs);
+    const item = e.target.closest("[data-gs-idx]");
+    if (item) runGsResult(Number(item.dataset.gsIdx));
   });
   // Klick außerhalb schließt die Trefferliste.
   document.addEventListener("click", (e) => {
@@ -1841,7 +1813,6 @@ async function saveSettings(e) {
     const cfg = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
     currentModel = cfg.model;
     stageProbabilities = cfg.stageProbabilities || stageProbabilities;
-    renderAiBadge({ aiEnabled, model: currentModel });
     await refresh(); // Pipeline-Wert mit den neuen Gewichten neu berechnen
     toast("Einstellungen gespeichert", "success");
     closeSettingsModal();
@@ -2786,21 +2757,123 @@ function applyBulkDelete() {
 }
 
 // --- Globale Schnellsuche (Topbar) -----------------------------------------
+// Durchsucht Funktionen, Leads, Prospects, Tags und Status (Eingruppierung).
+// Jeder Treffer trägt eine run()-Aktion (Navigation/Filter/Modal).
+let gsResults = [];
+
+// Statische "Funktionen" (Navigation + Aktionen) für die Schnellsuche.
+function globalFunctions() {
+  return [
+    { icon: "🗂", label: "Leads", keywords: "leads liste übersicht karten board", run: () => { location.hash = "#/"; } },
+    { icon: "📅", label: "Heute", keywords: "heute agenda wiedervorlage fällig termine aufgaben", run: () => { location.hash = "#/heute"; } },
+    { icon: "📇", label: "Prospects", keywords: "prospects discovery kandidaten liste", run: () => { location.hash = "#/prospects"; } },
+    { icon: "📊", label: "Berichte", keywords: "berichte reports statistik auswertung kennzahlen", run: () => { location.hash = "#/reports"; } },
+    { icon: "🧭", label: "Discovery starten", keywords: "discovery finden neue prospects suchen ki kriterien", run: () => { location.hash = "#/prospects"; openDiscoveryModal(); } },
+    { icon: "🔎", label: "Lead recherchieren", keywords: "lead recherchieren ki research neuer anlegen website", run: () => openResearchModal() },
+    { icon: "✏️", label: "Manueller Lead", keywords: "manuell neuer lead anlegen erstellen hinzufügen", run: () => openLeadModal() },
+    { icon: "⚙️", label: "Einstellungen", keywords: "einstellungen settings ki modell import export csv abmelden konto", run: () => openSettingsModal() },
+  ];
+}
+
+// Springt in die Listenansicht und setzt dort genau einen Filter (Tag oder
+// Status); übrige Listenfilter werden zurückgesetzt – für vorhersehbare Treffer.
+function gotoListFiltered({ tag = "", status = "alle" } = {}) {
+  activeFilter = status;
+  tagFilter = tag;
+  dueOnly = false;
+  staleOnly = false;
+  location.hash = "#/";
+  renderStatusFilters();
+  const tf = $("#tagFilter"); if (tf) tf.value = tagFilter;
+  $("#dueFilter")?.classList.remove("active");
+  $("#staleFilter")?.classList.remove("active");
+  renderLeads();
+}
+
+// Springt zur Prospects-Seite und stellt Suche + Status-Filter auf den Treffer.
+function gotoProspect(p) {
+  prospectSearch = (p.name || "").toLowerCase();
+  prospectStatusFilter = p.status === "abgelehnt" ? "abgelehnt" : "offen";
+  prospectSelected.clear();
+  if (location.hash === "#/prospects") renderProspects();
+  else location.hash = "#/prospects";
+}
+
 function renderGlobalResults(raw) {
   const q = (raw || "").toLowerCase().trim();
   const box = $("#globalSearchResults");
   if (!box) return;
   if (!q) { hideGlobalResults(); return; }
-  const matches = leads
-    .filter((l) => `${l.name} ${l.company} ${l.email} ${l.source} ${(l.tags || []).join(" ")}`.toLowerCase().includes(q))
-    .slice(0, 8);
-  box.innerHTML = matches.length
-    ? matches.map((l, i) => `
-        <button type="button" class="gs-item${i === 0 ? " active" : ""}" data-gs="${l.id}" role="option">
-          <span class="gs-item-title">${esc(l.company || l.name || "—")}</span>
-          <span class="gs-item-sub">${esc([l.name && l.company ? l.name : "", l.status].filter(Boolean).join(" · "))}</span>
-        </button>`).join("")
-    : `<div class="gs-empty">Keine Treffer</div>`;
+
+  gsResults = [];
+  const sections = [];
+  const take = (label, items) => { if (items.length) sections.push([label, items]); };
+
+  // Funktionen (Navigation + Aktionen)
+  take("Funktionen", globalFunctions()
+    .filter((f) => (f.label + " " + f.keywords).toLowerCase().includes(q))
+    .slice(0, 5)
+    .map((f) => ({ icon: f.icon, title: f.label, sub: "Funktion", run: f.run })));
+
+  // Leads
+  take("Leads", leads
+    .filter((l) => `${l.name} ${l.company} ${l.email} ${l.source} ${l.status} ${(l.tags || []).join(" ")}`.toLowerCase().includes(q))
+    .slice(0, 6)
+    .map((l) => ({
+      icon: "🗂", title: l.company || l.name || "—",
+      sub: [l.name && l.company ? l.name : "", l.status].filter(Boolean).join(" · "),
+      run: () => { location.hash = "#/lead/" + encodeURIComponent(l.id); },
+    })));
+
+  // Prospects
+  take("Prospects", prospects
+    .filter((p) => `${p.name} ${p.branche} ${p.ort} ${p.groesse} ${p.potenzial}`.toLowerCase().includes(q))
+    .slice(0, 6)
+    .map((p) => ({
+      icon: "📇", title: p.name || "—",
+      sub: ["Prospect", p.branche, p.ort].filter(Boolean).join(" · "),
+      run: () => gotoProspect(p),
+    })));
+
+  // Tags (über alle Leads, dedupliziert mit Anzahl)
+  const tagCount = new Map();
+  for (const l of leads) for (const t of (l.tags || [])) {
+    if (t.toLowerCase().includes(q)) tagCount.set(t, (tagCount.get(t) || 0) + 1);
+  }
+  take("Tags", [...tagCount.entries()].slice(0, 5).map(([t, n]) => ({
+    icon: "🏷", title: t, sub: `Tag · ${n} Lead${n === 1 ? "" : "s"}`,
+    run: () => gotoListFiltered({ tag: t }),
+  })));
+
+  // Eingruppierung (Lead-Status)
+  take("Eingruppierung", statuses
+    .filter((s) => s.toLowerCase().includes(q))
+    .slice(0, 4)
+    .map((s) => ({ icon: "📁", title: s, sub: "Lead-Status", run: () => gotoListFiltered({ status: s }) })));
+
+  if (!sections.length) {
+    box.innerHTML = `<div class="gs-empty">Keine Treffer</div>`;
+    box.classList.remove("hidden");
+    return;
+  }
+
+  let html = "";
+  for (const [label, items] of sections) {
+    html += `<div class="gs-section">${esc(label)}</div>`;
+    for (const it of items) {
+      const idx = gsResults.length;
+      gsResults.push(it);
+      html += `
+        <button type="button" class="gs-item${idx === 0 ? " active" : ""}" data-gs-idx="${idx}" role="option">
+          <span class="gs-ico" aria-hidden="true">${it.icon}</span>
+          <span class="gs-text">
+            <span class="gs-item-title">${esc(it.title)}</span>
+            ${it.sub ? `<span class="gs-item-sub">${esc(it.sub)}</span>` : ""}
+          </span>
+        </button>`;
+    }
+  }
+  box.innerHTML = html;
   box.classList.remove("hidden");
 }
 
@@ -2809,11 +2882,14 @@ function hideGlobalResults() {
   if (box) box.classList.add("hidden");
 }
 
-function gotoLead(id) {
+// Führt die Aktion eines Treffers aus und schließt die Suche.
+function runGsResult(i) {
+  const r = gsResults[i];
+  if (!r) return;
   hideGlobalResults();
   const inp = $("#globalSearchInput");
   if (inp) inp.value = "";
-  location.hash = "#/lead/" + encodeURIComponent(id);
+  r.run();
 }
 
 function onGlobalSearchKey(e) {
@@ -2825,7 +2901,7 @@ function onGlobalSearchKey(e) {
   let idx = items.findIndex((x) => x.classList.contains("active"));
   if (e.key === "ArrowDown") { e.preventDefault(); idx = Math.min(items.length - 1, idx + 1); }
   else if (e.key === "ArrowUp") { e.preventDefault(); idx = Math.max(0, idx - 1); }
-  else if (e.key === "Enter") { e.preventDefault(); const sel = items[idx] || items[0]; if (sel) gotoLead(sel.dataset.gs); return; }
+  else if (e.key === "Enter") { e.preventDefault(); const sel = items[idx] || items[0]; if (sel) runGsResult(Number(sel.dataset.gsIdx)); return; }
   else return;
   items.forEach((x, i) => x.classList.toggle("active", i === idx));
 }

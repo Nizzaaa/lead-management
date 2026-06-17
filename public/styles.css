@@ -77,17 +77,7 @@ a { color: inherit; }
 .brand-wordmark .wm-sol { color: var(--muted); font-weight: 600; letter-spacing: 2px; font-size: 16px; }
 .brand h1 { margin: 0; font-size: 22px; letter-spacing: -0.5px; color: var(--nav); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-.tagline { margin: 0; font-size: 13px; color: var(--muted); }
 .topbar-actions { display: flex; align-items: center; gap: 14px; }
-
-.badge {
-  font-size: 12px;
-  padding: 5px 10px;
-  border-radius: 999px;
-  font-weight: 600;
-}
-.badge-on { background: rgba(21, 163, 74, 0.14); color: var(--green); border: 1px solid rgba(21,163,74,0.4); }
-.badge-off { background: rgba(107, 112, 109, 0.12); color: var(--muted); border: 1px solid var(--border); }
 
 .container { max-width: 1180px; margin: 0 auto; padding: 28px; }
 
@@ -121,6 +111,7 @@ a { color: inherit; }
   margin-bottom: 20px;
 }
 .toolbar-top { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.toolbar-top #manualLeadBtn { margin-left: auto; }
 .toolbar-filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .toolbar-filters:empty { display: none; }
 .search {
@@ -747,12 +738,11 @@ a { color: inherit; }
 .navlink:hover { background: var(--surface-2); color: var(--text); }
 .navlink.active { background: var(--surface-2); color: var(--text); }
 
-/* Angemeldeter Benutzer in der Topbar */
-.user-chip {
-  color: var(--muted); font-size: 0.9rem; font-weight: 600;
-  padding: 6px 8px; display: inline-flex; align-items: center; gap: 6px;
-  white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
-}
+/* Angemeldeter Benutzer – klein unten im Einstellungen-Modal */
+.settings-account { margin: 10px 0 0; font-size: 12px; color: var(--muted); text-align: center; }
+.settings-account strong { color: var(--text); font-weight: 600; }
+.settings-logout { color: var(--accent); text-decoration: none; font-weight: 600; }
+.settings-logout:hover { text-decoration: underline; }
 
 /* ===== View-Kopf ===== */
 .view-head {
@@ -1001,13 +991,16 @@ a { color: inherit; }
   box-shadow: var(--glass-shadow-strong);
   max-height: 360px; overflow-y: auto; z-index: 40; padding: 6px;
 }
+.gs-section { padding: 8px 10px 2px; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .gs-item {
-  display: flex; flex-direction: column; gap: 1px; width: 100%; text-align: left;
+  display: flex; flex-direction: row; align-items: center; gap: 10px; width: 100%; text-align: left;
   background: none; border: none; border-radius: 8px; padding: 8px 10px; cursor: pointer;
 }
 .gs-item:hover, .gs-item.active { background: rgba(29,219,111,0.14); }
-.gs-item-title { font-weight: 600; font-size: 13px; color: var(--text); }
-.gs-item-sub { font-size: 12px; color: var(--muted); text-transform: capitalize; }
+.gs-ico { font-size: 16px; flex: none; line-height: 1; }
+.gs-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.gs-item-title { font-weight: 600; font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gs-item-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gs-empty { padding: 10px; color: var(--muted); font-size: 13px; }
 
 .nav-badge {
@@ -1172,13 +1165,11 @@ a { color: inherit; }
   .toast { bottom: calc(92px + env(safe-area-inset-bottom)); left: 50%; }
 
   /* ----- Topbar verschlanken ----- */
-  .tagline { display: none; }
   .brand-logo { height: 34px; }
   .topbar { padding: 10px 14px; }
   .topbar-actions { gap: 8px; }
   /* Leads/Berichte-Links & Primär-CTA wandern in die Tab-Leiste */
   .topbar-actions .navlink[data-nav-link], #addLeadBtn { display: none; }
-  .user-chip { max-width: 120px; }
 
   /* Fälligkeits-Badge am „Heute"-Tab + Bulk-Leiste über die Tab-Leiste heben */
   .bn-item { position: relative; }

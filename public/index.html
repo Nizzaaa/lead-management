@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=30" />
+  <link rel="stylesheet" href="styles.css?v=31" />
   <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
@@ -14,24 +14,19 @@
       <span id="brandWordmark" class="brand-wordmark" style="display:none;">FU/GE <span class="wm-sol">SOLUTIONS</span></span>
       <div>
         <h1 class="sr-only">FU/GE Solutions</h1>
-        <p class="tagline">Lead-Verwaltung mit KI-Unterstützung</p>
       </div>
     </a>
     <div class="topbar-actions">
       <div class="global-search" id="globalSearch">
-        <input type="search" id="globalSearchInput" class="gs-input" placeholder="🔍 Schnellsuche…" autocomplete="off" aria-label="Schnellsuche über alle Leads" />
+        <input type="search" id="globalSearchInput" class="gs-input" placeholder="🔍 Schnellsuche…" autocomplete="off" aria-label="Schnellsuche über Leads, Prospects, Funktionen, Tags und Eingruppierung" />
         <div id="globalSearchResults" class="gs-results hidden" role="listbox"></div>
       </div>
       <a class="navlink" href="#/" data-nav-link="list">🗂 Leads</a>
       <a class="navlink" href="#/heute" data-nav-link="agenda">📅 Heute <span id="agendaDue" class="nav-badge agenda-due hidden">0</span></a>
       <a class="navlink" href="#/prospects" data-nav-link="prospects">📇 Prospects</a>
       <a class="navlink" href="#/reports" data-nav-link="reports">📊 Berichte</a>
-      <span id="aiBadge" class="badge badge-off" title="KI-Status">KI: …</span>
       <button id="settingsBtn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">⚙️</button>
-      <button id="manualLeadBtn" class="btn" title="Lead manuell anlegen">+ <span class="btn-text">Manuell</span></button>
       <button id="addLeadBtn" class="btn btn-primary">🔎 Lead recherchieren</button>
-      <span id="userInfo" class="user-chip" hidden></span>
-      <a id="logoutLink" class="navlink" href="#" target="_top" rel="noopener" title="Abmelden" hidden>⎋ Logout</a>
     </div>
   </header>
 
@@ -46,7 +41,6 @@
 
     <section class="toolbar">
       <div class="toolbar-top">
-        <input type="search" id="search" class="search" placeholder="🔍 Suche nach Name, Firma, E-Mail…" />
         <select id="sortBy" class="sort-select" aria-label="Sortierung" title="Sortierung">
           <option value="created_desc">Neueste zuerst</option>
           <option value="created_asc">Älteste zuerst</option>
@@ -62,6 +56,7 @@
           <button class="vs-option" data-view="kanban" role="tab" title="Kanban-Board nach Status">▦ Board</button>
           <span class="vs-thumb" aria-hidden="true"></span>
         </div>
+        <button id="manualLeadBtn" class="btn" title="Lead manuell anlegen">+ <span class="btn-text">Manuell</span></button>
       </div>
       <div class="toolbar-filters">
         <div class="filters" id="statusFilters"></div>
@@ -207,6 +202,8 @@
           <button type="button" class="btn" id="cancelSettingsBtn">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Speichern</button>
         </div>
+
+        <p class="settings-account" id="settingsAccount" hidden></p>
       </form>
     </div>
   </div>
@@ -314,6 +311,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=34"></script>
+  <script src="app.js?v=35"></script>
 </body>
 </html>
