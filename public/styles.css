@@ -971,9 +971,9 @@ a { color: inherit; }
 }
 
 /* ===== Globale Schnellsuche (Topbar) ===== */
-.global-search { position: relative; }
+.global-search { position: relative; flex: 0 1 340px; min-width: 0; }
 .gs-input {
-  width: 200px; max-width: 38vw;
+  width: 100%;
   background: var(--glass-bg-subtle);
   -webkit-backdrop-filter: blur(12px) saturate(150%);
   backdrop-filter: blur(12px) saturate(150%);
@@ -1167,9 +1167,14 @@ a { color: inherit; }
   /* ----- Topbar verschlanken ----- */
   .brand-logo { height: 34px; }
   .topbar { padding: 10px 14px; }
-  .topbar-actions { gap: 8px; }
+  .topbar-actions { gap: 8px; flex: 1; min-width: 0; }
   /* Leads/Berichte-Links & Primär-CTA wandern in die Tab-Leiste */
   .topbar-actions .navlink[data-nav-link], #addLeadBtn { display: none; }
+  /* Schnellsuche füllt die nun freie Breite; Dropdown = Suchbreite (kein Overflow) */
+  .global-search { flex: 1; }
+  .gs-results { min-width: 0; }
+  /* Manuell-Button reiht sich neben die Sortierung statt in eigene Zeile */
+  .toolbar-top #manualLeadBtn { margin-left: 0; }
 
   /* Fälligkeits-Badge am „Heute"-Tab + Bulk-Leiste über die Tab-Leiste heben */
   .bn-item { position: relative; }
