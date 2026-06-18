@@ -2940,7 +2940,7 @@ function promptCardHtml(p) {
   return `<div class="prompt-item" data-prompt="${esc(p.key)}">
     <div class="prompt-head">
       <span class="prompt-title">${esc(p.label)}${custom}</span>
-      <button type="button" class="btn btn-sm prompt-reset" data-reset="${esc(p.key)}" ${p.isCustom ? "" : "disabled"}>↩︎ Zurücksetzen</button>
+      <button type="button" class="btn btn-sm prompt-reset" data-reset="${esc(p.key)}">↩︎ Standard wiederherstellen</button>
     </div>
     <p class="prompt-desc">${esc(p.description || "")}</p>
     <div class="prompt-ph">Platzhalter: ${placeholderChipsHtml(p)}</div>
@@ -2988,7 +2988,7 @@ function renderPromptsView() {
     const ta = v.querySelector(`textarea.prompt-text[data-key="${c.dataset.key}"]`);
     if (ta) insertAtCursor(ta, `{{${c.dataset.ph}}}`);
   }));
-  v.querySelectorAll(".prompt-reset").forEach((b) => b.addEventListener("click", () => resetPrompt(b.dataset.reset)));
+  v.querySelectorAll(".prompt-reset").forEach((b) => b.addEventListener("click", () => restorePromptDefault(b.dataset.reset)));
 }
 
 async function loadPrompts() {
@@ -3025,12 +3025,29 @@ async function savePrompts() {
   }
 }
 
-// Setzt einen Prompt im Editor auf seinen Default zurück (erst nach Speichern aktiv).
-function resetPrompt(key) {
+// Stellt den Original-Prompt eines Feldes wieder her: füllt das Textfeld mit dem
+// Default und entfernt – falls serverseitig eine Anpassung existiert – diese
+// sofort (persistiert). Andere ungespeicherte Felder bleiben unberührt.
+async function restorePromptDefault(key) {
   const p = promptList.find((x) => x.key === key);
   if (!p) return;
   const ta = document.querySelector(`#promptsView textarea.prompt-text[data-key="${key}"]`);
   if (ta) { ta.value = p.default || ""; ta.focus(); }
+  if (!p.isCustom) return; // war nicht angepasst – nur das Feld zurückgesetzt
+  try {
+    const data = await api("/api/prompts", {
+      method: "PUT",
+      body: JSON.stringify({ prompts: { [key]: p.default || "" } }),
+    });
+    promptList = Array.isArray(data.prompts) ? data.prompts : promptList;
+    // Nur dieses Feld in-place aktualisieren (kein Re-Render → andere Edits bleiben).
+    const item = document.querySelector(`#promptsView .prompt-item[data-prompt="${key}"]`);
+    const badge = item && item.querySelector(".prompt-badge");
+    if (badge) badge.remove();
+    toast("Standard wiederhergestellt", "success");
+  } catch (err) {
+    toast(err.message, "error");
+  }
 }
 
 // Fügt Text an der Cursorposition eines Textareas ein.
