@@ -54,6 +54,8 @@ jobs:
           node --check research.js
           node --check exporters.js
           node --check logger.js
+          node --check cfAccess.js
+          node --check caldav.js
           node --check public/app.js
 
       - name: Smoke-Test (App startet & /api/config antwortet)

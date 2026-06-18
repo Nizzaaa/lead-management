@@ -4,6 +4,7 @@
 let leads = [];
 let statuses = [];
 let aiEnabled = false;
+let caldavEnabled = false; // CalDAV-Kalender für Wiedervorlagen verbunden? (aus /api/config)
 let activeFilter = "alle";
 let dueOnly = false; // Filter: nur fällige/überfällige Wiedervorlagen
 let staleOnly = false; // Filter: nur "kalte" Leads (lange keine Aktivität)
@@ -155,6 +156,7 @@ async function init() {
     const cfg = await api("/api/config");
     statuses = cfg.statuses;
     aiEnabled = cfg.aiEnabled;
+    caldavEnabled = Boolean(cfg.caldavEnabled);
     models = cfg.models || [];
     currentModel = cfg.model || "";
     stageProbabilities = cfg.stageProbabilities || {};
@@ -1931,6 +1933,13 @@ function openSettingsModal() {
   }
   renderStageProbFields();
   $("#settingsStaleDays").value = staleDays;
+  const cd = $("#settingsCaldavStatus");
+  if (cd) {
+    cd.textContent = caldavEnabled
+      ? "✅ Verbunden – Wiedervorlagen werden als Termine in den Kalender geschrieben."
+      : "— Nicht konfiguriert. Serverseitig CALDAV_URL, CALDAV_USERNAME und CALDAV_PASSWORD setzen.";
+    cd.classList.toggle("ok", caldavEnabled);
+  }
   $("#settingsModal").classList.remove("hidden");
 }
 

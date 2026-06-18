@@ -26,6 +26,7 @@ mit integrierten KI-Funktionen auf Basis von Claude.
 - Manuelles Bearbeiten (Status, Wert, Notizen, Stammdaten), Live-Suche und Status-Filter
 - **Wiedervorlage / nächster Schritt** je Lead (Datum) – mit farbigem Banner auf der Detailseite, Fälligkeits-Badge auf den Karten und Toolbar-Filter „⏰ Fällig"
 - **„📅 Heute"-Agenda**: überfällige / heute fällige / anstehende Wiedervorlagen gebündelt, mit Schnellaktionen (erledigt / verschieben / planen)
+- **Kalender-Sync (CalDAV)**: Wiedervorlagen erscheinen optional als **Termine in einem Nextcloud-Kalender** (einseitig App → Kalender; erledigte/geschlossene Wiedervorlagen löschen den Termin wieder) – aktivieren über `CALDAV_URL`/`CALDAV_USERNAME`/`CALDAV_PASSWORD`, siehe [`docs/nextcloud-caldav.md`](docs/nextcloud-caldav.md)
 - **Tags/Labels** je Lead (Karten, Board, Detail) inkl. Tag-Filter im Toolbar
 - **Sortierung** (Datum, letzte Aktivität, Inaktivität, Wiedervorlage, KI-Score, Wert, Firma) und **„💤 Kalt"-Filter** für offene Leads ohne Aktivität (> 14 Tage)
 - **Mehrfachauswahl & Bulk-Aktionen**: Status setzen, Tag hinzufügen, löschen

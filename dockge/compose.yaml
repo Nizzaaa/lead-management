@@ -82,6 +82,21 @@ services:
       # zu Cloudflare Access; für oauth2-proxy z. B. LOGOUT_URL=/oauth2/sign_out.
       # Leer setzen, um den Logout-Button auszublenden.
       - LOGOUT_URL=${LOGOUT_URL:-/cdn-cgi/access/logout}
+      # Kalender-Sync (CalDAV, z. B. Nextcloud): Wiedervorlagen als Termine in
+      # einen Kalender schreiben. Im .env-Editor setzen (siehe
+      # docs/nextcloud-caldav.md). Leer = Kalender-Sync aus.
+      #   CALDAV_URL=https://cloud.lennartg.de/remote.php/dav/calendars/<user>/<kalender>/
+      #   CALDAV_USERNAME=<nextcloud-benutzer>
+      #   CALDAV_PASSWORD=<nextcloud-app-passwort>
+      - CALDAV_URL=${CALDAV_URL:-}
+      - CALDAV_USERNAME=${CALDAV_USERNAME:-}
+      - CALDAV_PASSWORD=${CALDAV_PASSWORD:-}
+      # Optional: Uhrzeit (leer = Ganztags), Dauer, Erinnerung (Minuten vorher).
+      - CALDAV_EVENT_TIME=${CALDAV_EVENT_TIME:-}
+      - CALDAV_EVENT_DURATION_MIN=${CALDAV_EVENT_DURATION_MIN:-}
+      - CALDAV_REMINDER_MIN=${CALDAV_REMINDER_MIN:-}
+      # Öffentliche App-URL für den Rücklink zum Lead im Termin.
+      - APP_BASE_URL=${APP_BASE_URL:-}
     # Härtung: non-root (im Image), keine Rechte-Eskalation, alle Caps weg,
     # read-only Root-FS (App schreibt nichts) mit beschreibbarem /tmp.
     security_opt:
