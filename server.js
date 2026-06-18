@@ -10,6 +10,7 @@ const { researchCompany, discoverCompanies } = require("./research");
 const { leadsToCsv, prospectsToCsv, parseCsv, csvRowsToLeads, csvRowsToProspects, parseNumber, leadsToXlsxXml } = require("./exporters");
 const { logger, httpLogger } = require("./logger");
 const cfAccess = require("./cfAccess");
+const caldav = require("./caldav");
 
 // Liest ein Secret bevorzugt aus einer Datei (<NAME>_FILE, Docker-Secret-
 // Konvention), sonst aus der Umgebungsvariable. So lässt sich z. B. der
@@ -469,6 +470,18 @@ function actor(req) {
   return (req && req.actor) || "—";
 }
 
+// Öffentliche Basis-URL der App (für den Rücklink zum Lead im Kalender-Termin).
+// Hinter Cloudflare/Traefik setzen die Forwarded-Header die externe Adresse;
+// modul-seitig hat eine explizit gesetzte APP_BASE_URL Vorrang (siehe caldav.js).
+function reqBaseUrl(req) {
+  if (!req || !req.headers) return "";
+  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
+    .split(",")[0]
+    .trim();
+  const host = req.headers["x-forwarded-host"] || req.headers.host || "";
+  return host ? `${proto}://${host}` : "";
+}
+
 // Schlankes In-Memory-Rate-Limiting (Fixed Window) ohne externe Abhängigkeit.
 // Schützt die kostenpflichtigen KI-Endpunkte vor Missbrauch (Kosten-/Quota-
 // Erschöpfung). Schlüssel ist der SSO-Aktor (pro Benutzer), sonst die IP.
@@ -566,6 +579,7 @@ app.use(express.static(path.join(__dirname, "public")));
 app.get("/api/config", (req, res) => {
   res.json({
     aiEnabled: aiEnabled(),
+    caldavEnabled: caldav.isEnabled(),
     model: currentModel,
     models: AVAILABLE_MODELS,
     statuses: STATUSES,
@@ -601,6 +615,22 @@ app.put("/api/settings", wrap(async (req, res) => {
     await db.setSetting(STALE_DAYS_SETTING_KEY, String(staleDays));
   }
   res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays });
+}));
+
+// Alle bestehenden Wiedervorlagen (offene Leads mit Datum) in den CalDAV-
+// Kalender übertragen – Backfill nach dem Einrichten bzw. manuelle
+// Resynchronisation aus den Einstellungen. Meldet einen Verbindungsfehler
+// (z. B. HTTP 401/404) direkt zurück, damit er in der UI sichtbar wird.
+app.post("/api/caldav/sync-all", wrap(async (req, res) => {
+  if (!caldav.isEnabled()) {
+    return res.status(400).json({ error: "Kalender (CalDAV) ist nicht konfiguriert." });
+  }
+  const leads = await db.listLeads();
+  const result = await caldav.syncAll(leads, reqBaseUrl(req));
+  if (result.error) {
+    return res.status(502).json({ error: `Kalender-Fehler: ${result.error}`, ...result });
+  }
+  res.json(result);
 }));
 
 // Tag-Farbe setzen/ändern (global, case-insensitiv pro Tag-Name). Wird vom
@@ -729,6 +759,7 @@ app.post("/api/leads/import", wrap(async (req, res) => {
       const lead = await db.createLead(data, research);
       if (ai) await db.setLeadAi(lead.id, ai);
       await logActivity(lead.id, { type: "system", title: "Per CSV-Import angelegt" }, actor(req));
+      caldav.syncLead(lead, null, reqBaseUrl(req)); // importierte Wiedervorlage in den Kalender (best effort)
       created++;
     } catch (err) {
       errors.push({ row: idx + 2, error: err.message }); // +2: Kopfzeile + 1-basiert
@@ -753,6 +784,7 @@ app.post("/api/leads", wrap(async (req, res) => {
   }
   const lead = await db.createLead(data);
   await logActivity(lead.id, { type: "system", title: "Lead manuell angelegt" }, actor(req));
+  caldav.syncLead(lead, null, reqBaseUrl(req)); // Wiedervorlage in den Kalender (best effort)
   res.status(201).json(lead);
 }));
 
@@ -995,6 +1027,9 @@ app.put("/api/leads/:id", wrap(async (req, res) => {
       title: `Status: ${existing.status} → ${lead.status}`,
     }, actor(req));
   }
+  // Kalender-Termin der Wiedervorlage angleichen: anlegen/aktualisieren bzw.
+  // entfernen, wenn die Wiedervorlage erledigt wurde oder der Lead schließt.
+  caldav.syncLead(lead, existing, reqBaseUrl(req));
   res.json(lead);
 }));
 
@@ -1011,6 +1046,7 @@ app.get("/api/leads/:id/export", wrap(async (req, res) => {
 app.delete("/api/leads/:id", wrap(async (req, res) => {
   const ok = await db.deleteLead(req.params.id);
   if (!ok) return res.status(404).json({ error: "Lead nicht gefunden." });
+  caldav.removeLead(req.params.id); // zugehörigen Kalender-Termin entfernen (best effort)
   res.status(204).end();
 }));
 
@@ -1523,6 +1559,7 @@ db.init()
         aiEnabled: aiEnabled(),
         model: aiEnabled() ? currentModel : null,
         frameAncestors: FRAME_ANCESTORS.length ? FRAME_ANCESTORS.join(" ") : null,
+        caldav: caldav.isEnabled() ? caldav.describe() : null,
       });
     });
   })

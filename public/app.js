@@ -4,6 +4,7 @@
 let leads = [];
 let statuses = [];
 let aiEnabled = false;
+let caldavEnabled = false; // CalDAV-Kalender für Wiedervorlagen verbunden? (aus /api/config)
 let activeFilter = "alle";
 let dueOnly = false; // Filter: nur fällige/überfällige Wiedervorlagen
 let staleOnly = false; // Filter: nur "kalte" Leads (lange keine Aktivität)
@@ -155,6 +156,7 @@ async function init() {
     const cfg = await api("/api/config");
     statuses = cfg.statuses;
     aiEnabled = cfg.aiEnabled;
+    caldavEnabled = Boolean(cfg.caldavEnabled);
     models = cfg.models || [];
     currentModel = cfg.model || "";
     stageProbabilities = cfg.stageProbabilities || {};
@@ -1365,6 +1367,7 @@ function bindEvents() {
   $("#cancelSettingsBtn").addEventListener("click", closeSettingsModal);
   // „Prompts bearbeiten" schließt das Modal und öffnet die Prompts-Seite.
   $("#openPromptsBtn").addEventListener("click", () => { closeSettingsModal(); location.hash = "#/prompts"; });
+  $("#caldavSyncAllBtn").addEventListener("click", syncAllCaldav);
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#stageProbFields").addEventListener("input", onProbInput);
   $("#exportCsvBtn").addEventListener("click", () => downloadFile("/api/leads/export.csv"));
@@ -1931,11 +1934,41 @@ function openSettingsModal() {
   }
   renderStageProbFields();
   $("#settingsStaleDays").value = staleDays;
+  const cd = $("#settingsCaldavStatus");
+  if (cd) {
+    cd.textContent = caldavEnabled
+      ? "✅ Verbunden – Wiedervorlagen werden als Termine in den Kalender geschrieben."
+      : "— Nicht konfiguriert. Serverseitig CALDAV_URL, CALDAV_USERNAME und CALDAV_PASSWORD setzen.";
+    cd.classList.toggle("ok", caldavEnabled);
+  }
+  const csb = $("#caldavSyncAllBtn");
+  if (csb) csb.hidden = !caldavEnabled;
   $("#settingsModal").classList.remove("hidden");
 }
 
 function closeSettingsModal() {
   $("#settingsModal").classList.add("hidden");
+}
+
+// Bestehende Wiedervorlagen nachträglich in den CalDAV-Kalender übertragen.
+// Zeigt das Ergebnis (Anzahl) bzw. einen Verbindungsfehler direkt als Toast –
+// so wird z. B. ein falsches App-Passwort (HTTP 401) sofort sichtbar.
+async function syncAllCaldav() {
+  const btn = $("#caldavSyncAllBtn");
+  const orig = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "📅 Übertrage…"; }
+  try {
+    const r = await api("/api/caldav/sync-all", { method: "POST" });
+    if (r.candidates === 0) {
+      toast("Keine offenen Wiedervorlagen mit Datum vorhanden.", "info");
+    } else {
+      toast(`${r.synced} von ${r.candidates} Wiedervorlage(n) in den Kalender übertragen.`, "success");
+    }
+  } catch (err) {
+    toast(err.message || "Übertragung fehlgeschlagen.", "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
 }
 
 async function saveSettings(e) {

@@ -11,7 +11,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # Anwendungscode kopieren
-COPY server.js db.js research.js prompts.js logger.js exporters.js cfAccess.js ./
+COPY server.js db.js research.js prompts.js logger.js exporters.js cfAccess.js caldav.js ./
 COPY public ./public
 
 # Als unprivilegierter Node-Benutzer laufen
