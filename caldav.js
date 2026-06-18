@@ -263,27 +263,38 @@ function authHeader() {
   return "Basic " + Buffer.from(`${CALDAV_USERNAME}:${CALDAV_PASSWORD}`).toString("base64");
 }
 
+// Einheitlicher CalDAV-Aufruf. Übersetzt Netzwerk-/Timeout-Fehler in lesbare
+// Meldungen (fetch wirft sonst nur ein generisches „fetch failed“) – wichtig,
+// damit die manuelle Resync den Grund klar anzeigen kann.
+async function caldavFetch(method, url, { body, contentType } = {}) {
+  const headers = { Authorization: authHeader() };
+  if (contentType) headers["Content-Type"] = contentType;
+  try {
+    return await fetch(url, { method, headers, body, signal: AbortSignal.timeout(TIMEOUT_MS) });
+  } catch (err) {
+    if (err && (err.name === "TimeoutError" || err.name === "AbortError")) {
+      throw new Error(`Zeitüberschreitung nach ${TIMEOUT_MS / 1000}s (Kalender nicht erreichbar)`);
+    }
+    const cause = err && err.cause;
+    const detail = (cause && (cause.code || cause.message)) || (err && err.message) || "";
+    throw new Error(`Netzwerkfehler: Kalender nicht erreichbar${detail ? ` (${detail})` : ""}`);
+  }
+}
+
 async function putEvent(lead, baseUrl) {
-  const res = await fetch(eventUrl(lead.id), {
-    method: "PUT",
-    headers: {
-      "Content-Type": "text/calendar; charset=utf-8",
-      Authorization: authHeader(),
-    },
+  const res = await caldavFetch("PUT", eventUrl(lead.id), {
     body: buildICS(lead, { baseUrl }),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
+    contentType: "text/calendar; charset=utf-8",
   });
-  if (!res.ok) throw new Error(`PUT HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`);
 }
 
 async function deleteEvent(leadId) {
-  const res = await fetch(eventUrl(leadId), {
-    method: "DELETE",
-    headers: { Authorization: authHeader() },
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
+  const res = await caldavFetch("DELETE", eventUrl(leadId));
   // 404 = schon weg (oder nie angelegt) → als Erfolg behandeln.
-  if (!res.ok && res.status !== 404) throw new Error(`DELETE HTTP ${res.status}`);
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`);
+  }
   return res.status;
 }
 
@@ -321,6 +332,28 @@ async function removeLead(leadId) {
   }
 }
 
+// Überträgt alle übergebenen Leads mit fälliger Wiedervorlage in den Kalender –
+// für das nachträgliche Befüllen bestehender Wiedervorlagen bzw. eine manuelle
+// Resynchronisation aus den Einstellungen. Bricht beim ersten Fehler ab und
+// meldet ihn zurück: ein Konfigurationsproblem (z. B. HTTP 401/404, Timeout)
+// betrifft alle Termine gleich, daher kein langes Durchprobieren. Wirft nie.
+async function syncAll(leads, baseUrl = "") {
+  if (!isEnabled()) return { enabled: false, candidates: 0, synced: 0, error: "" };
+  const candidates = (Array.isArray(leads) ? leads : []).filter(shouldHaveEvent);
+  let synced = 0;
+  for (const lead of candidates) {
+    try {
+      await putEvent(lead, baseUrl);
+      synced++;
+    } catch (err) {
+      logger.warn("caldav_sync_failed", { leadId: lead.id, error: err.message, during: "sync_all" });
+      return { enabled: true, candidates: candidates.length, synced, error: err.message };
+    }
+  }
+  logger.info("caldav_sync_all", { candidates: candidates.length, synced });
+  return { enabled: true, candidates: candidates.length, synced, error: "" };
+}
+
 // Redigierte Zusammenfassung für Start-Log / Diagnose (keine Geheimnisse).
 function describe() {
   let host = "";
@@ -342,6 +375,7 @@ module.exports = {
   isEnabled,
   syncLead,
   removeLead,
+  syncAll,
   describe,
   // Für Tests/Diagnose exportiert:
   buildICS,

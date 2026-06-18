@@ -115,6 +115,14 @@ Weg – es werden nur ausgehende HTTP-Aufrufe gemacht, nichts geschrieben.
    `Wiedervorlage: <Firma> …` am gewählten Tag.
 3. Wiedervorlage auf **„✓ Erledigt“** setzen → der Termin verschwindet wieder.
 
+> **Wichtig – nur beim Speichern:** Synchronisiert wird, wenn ein Lead
+> angelegt oder geändert wird. **Bestehende** Wiedervorlagen, die schon vor dem
+> Einrichten existierten, landen also nicht automatisch im Kalender. Dafür gibt
+> es in den **Einstellungen → 📅 Kalender (CalDAV)** den Button
+> **„Bestehende Wiedervorlagen jetzt übertragen“** – er schreibt alle offenen
+> Wiedervorlagen mit Datum in den Kalender. Schlägt die Verbindung fehl, zeigt
+> er den **genauen Grund** (z. B. „HTTP 401“) direkt an – ideal zum Einrichten.
+
 ## Troubleshooting
 
 - **Kein Termin, Log zeigt `caldav_sync_failed` mit `HTTP 401`:** Benutzername

@@ -617,6 +617,22 @@ app.put("/api/settings", wrap(async (req, res) => {
   res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays });
 }));
 
+// Alle bestehenden Wiedervorlagen (offene Leads mit Datum) in den CalDAV-
+// Kalender übertragen – Backfill nach dem Einrichten bzw. manuelle
+// Resynchronisation aus den Einstellungen. Meldet einen Verbindungsfehler
+// (z. B. HTTP 401/404) direkt zurück, damit er in der UI sichtbar wird.
+app.post("/api/caldav/sync-all", wrap(async (req, res) => {
+  if (!caldav.isEnabled()) {
+    return res.status(400).json({ error: "Kalender (CalDAV) ist nicht konfiguriert." });
+  }
+  const leads = await db.listLeads();
+  const result = await caldav.syncAll(leads, reqBaseUrl(req));
+  if (result.error) {
+    return res.status(502).json({ error: `Kalender-Fehler: ${result.error}`, ...result });
+  }
+  res.json(result);
+}));
+
 // Tag-Farbe setzen/ändern (global, case-insensitiv pro Tag-Name). Wird vom
 // Inline-Tag-Editor der Detailansicht aufgerufen.
 app.put("/api/tags/color", wrap(async (req, res) => {
