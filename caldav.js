@@ -194,9 +194,12 @@ function leadUrl(leadId, baseUrl) {
 }
 
 function summaryFor(lead) {
-  const base = (lead.company || lead.name || "Lead").trim();
+  const base = (lead.company || lead.name || "").trim();
   const step = (lead.nextStep || "").trim();
-  const s = step ? `Wiedervorlage: ${base} – ${step}` : `Wiedervorlage: ${base}`;
+  let s;
+  if (base && step) s = `Lead: ${base} – ${step}`;
+  else if (base) s = `Lead: ${base}`;
+  else s = "Lead";
   return s.length > 200 ? `${s.slice(0, 197)}…` : s;
 }
 
