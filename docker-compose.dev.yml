@@ -51,6 +51,16 @@ services:
       - PGUSER=leadpilot
       - PGPASSWORD=leadpilot
       - PGDATABASE=leadpilot
+      # Kalender-Sync (CalDAV, z. B. Nextcloud) – optional auch lokal testbar:
+      # Werte vor dem Start setzen oder in eine .env legen. Leer = Sync aus.
+      # Siehe docs/nextcloud-caldav.md.
+      - CALDAV_URL=${CALDAV_URL:-}
+      - CALDAV_USERNAME=${CALDAV_USERNAME:-}
+      - CALDAV_PASSWORD=${CALDAV_PASSWORD:-}
+      - CALDAV_EVENT_TIME=${CALDAV_EVENT_TIME:-}
+      - CALDAV_EVENT_DURATION_MIN=${CALDAV_EVENT_DURATION_MIN:-}
+      - CALDAV_REMINDER_MIN=${CALDAV_REMINDER_MIN:-}
+      - APP_BASE_URL=${APP_BASE_URL:-}
     volumes:
       # Quellcode live ins Container spiegeln …
       - .:/app
