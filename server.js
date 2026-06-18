@@ -1252,22 +1252,24 @@ function daysSince(iso) {
   return Math.max(0, Math.floor((Date.now() - t) / 86400000));
 }
 
-// Wählt die handlungsrelevanten offenen Leads (gespiegelt von der Heute-Logik)
-// und baut daraus einen kompakten KI-Kontext. Liefert { lines, ids, count }.
-function buildAgendaContext(leads, today) {
+// Fälligkeits-Zustand einer Wiedervorlage relativ zu `today`.
+function agendaDueState(l, today) {
+  if (!l.nextStepAt) return null;
+  if (l.nextStepAt < today) return "overdue";
+  if (l.nextStepAt === today) return "today";
+  return "future";
+}
+
+// Wählt die handlungsrelevanten offenen Leads (gespiegelt von der Heute-Logik),
+// sortiert nach Dringlichkeit und deckelt die Menge (Token-Last).
+function selectAgendaCandidates(leads, today) {
   const open = leads.filter((l) => l.status !== "gewonnen" && l.status !== "verloren");
-  const dueState = (l) => {
-    if (!l.nextStepAt) return null;
-    if (l.nextStepAt < today) return "overdue";
-    if (l.nextStepAt === today) return "today";
-    return "future";
-  };
   // Relevant: alles mit Wiedervorlage + bearbeitete offene Leads ohne Schritt
   // (frische „neu"-Leads bleiben – wie in der Ansicht – außen vor).
-  const candidates = open.filter((l) => dueState(l) || l.status !== "neu");
+  const candidates = open.filter((l) => agendaDueState(l, today) || l.status !== "neu");
   // Priorität für die Auswahl: überfällig → heute → ohne Schritt → demnächst.
   const rank = (l) => {
-    const s = dueState(l);
+    const s = agendaDueState(l, today);
     if (s === "overdue") return 0;
     if (s === "today") return 1;
     if (s === "future") return 3;
@@ -1281,14 +1283,31 @@ function buildAgendaContext(leads, today) {
     if (ad !== bd) return ad < bd ? -1 : 1;
     return ((b.ai && b.ai.score) || 0) - ((a.ai && a.ai.score) || 0);
   });
-  // Deckel gegen unnötige Token-Last bei großen Pipelines.
-  const top = candidates.slice(0, 30);
+  return candidates.slice(0, 30);
+}
 
-  const lines = top.map((l) => {
+// Whitespace/Zeilenumbrüche zu einer Zeile glätten (Notizen/Aktivitätstexte).
+function oneLine(s) { return String(s == null ? "" : s).replace(/\s+/g, " ").trim(); }
+
+// Relatives Tageslabel für Aktivitäten („heute" / „gestern" / „vor N Tg.").
+function relDaysLabel(iso) {
+  const n = daysSince(iso);
+  if (n == null) return "";
+  if (n === 0) return "heute";
+  if (n === 1) return "gestern";
+  return `vor ${n} Tg.`;
+}
+
+// Baut aus den (bereits ausgewählten) Kandidaten den kompakten KI-Kontext: je
+// Lead die Kernsignale plus Notizen und der bisherige Verlauf (letzte echte
+// Aktivitäten) – die Grundlage, um den logischen NÄCHSTEN Schritt abzuleiten.
+// `activitiesByLead`: Map leadId -> Aktivitäten (neueste zuerst).
+function buildAgendaContext(candidates, today, activitiesByLead = new Map()) {
+  const lines = candidates.map((l) => {
     const parts = [`[${l.id}] ${l.company || l.name || "—"}`, `Status: ${l.status}`];
     if (l.value) parts.push(`Wert: ${Math.round(Number(l.value))} €`);
     if (l.ai && l.ai.score != null) parts.push(`Score: ${l.ai.score}/100 (${l.ai.grade || "?"})`);
-    const s = dueState(l);
+    const s = agendaDueState(l, today);
     const due =
       s === "overdue" ? `überfällig (war am ${l.nextStepAt})` :
       s === "today" ? "heute fällig" :
@@ -1302,10 +1321,24 @@ function buildAgendaContext(leads, today) {
         || (typeof r.coldCallStrategie === "string" ? r.coldCallStrategie.slice(0, 140) : "");
       if (hook) parts.push(`Aufhänger: ${hook}`);
     }
-    return "- " + parts.join(" · ");
+    // Notizen und Verlauf als eingerückte Folgezeilen (Grundlage für den
+    // nächsten Schritt). Beides knapp gedeckelt, damit der Kontext kompakt bleibt.
+    const extra = [];
+    const notes = oneLine(l.notes);
+    if (notes) extra.push(`  Notizen: ${notes.slice(0, 280)}`);
+    const acts = activitiesByLead.get(l.id) || [];
+    if (acts.length) {
+      const hist = acts.map((a) => {
+        const text = oneLine([a.title, a.body].filter(Boolean).join(" – ")).slice(0, 160);
+        const oc = oneLine(a.outcome);
+        return `${relDaysLabel(a.createdAt)} [${a.type}] ${text}${oc ? ` (${oc.slice(0, 40)})` : ""}`.trim();
+      }).join("; ");
+      extra.push(`  Verlauf: ${hist}`);
+    }
+    return ["- " + parts.join(" · "), ...extra].join("\n");
   });
 
-  return { lines, ids: top.map((l) => l.id), count: top.length };
+  return { lines, ids: candidates.map((l) => l.id), count: candidates.length };
 }
 
 // Schema: bis zu drei priorisierte nächste Handlungen.
@@ -1336,18 +1369,31 @@ const AGENDA_REC_SCHEMA = {
 app.post("/api/agenda/recommendations", aiLimiter, wrap(async (req, res) => {
   if (!requireAi(res)) return;
   const leads = await db.listLeads();
-  const ctx = buildAgendaContext(leads, agendaToday(req));
+  const today = agendaToday(req);
+  const candidates = selectAgendaCandidates(leads, today);
   // Nichts zu tun → ohne KI-Aufruf (und damit ohne Kosten) leer antworten.
-  if (!ctx.count) return res.json({ recommendations: [], generatedAt: new Date().toISOString() });
+  if (!candidates.length) return res.json({ recommendations: [], generatedAt: new Date().toISOString() });
+  // Letzte echte Touchpoints je Kandidat (ohne automatische ai/system-Einträge)
+  // als Grundlage für den nächsten Schritt – in einer Abfrage. Ein Fehler hier
+  // darf die Empfehlung nicht verhindern (dann eben ohne Verlauf).
+  let activitiesByLead = new Map();
+  try {
+    activitiesByLead = await db.listRecentActivitiesForLeads(candidates.map((l) => l.id), 3, ["ai", "system"]);
+  } catch (err) {
+    (req.log || logger).warn("agenda_activities_load_failed", { error: err.message });
+  }
+  const ctx = buildAgendaContext(candidates, today, activitiesByLead);
   try {
     const raw = await callClaude(
       "Du bist Vertriebs-Coach für FU/GE Solutions (Integration & Entwicklung individueller KI-Systeme im " +
-        "Mittelstand/Handwerk). Dir liegt die heutige Arbeitsliste offener Leads vor (Wiedervorlagen, Score, " +
-        "Stillstand, Aufhänger). Wähle die wichtigsten nächsten Handlungen aus und priorisiere sie. Regeln: " +
+        "Mittelstand/Handwerk). Dir liegt die heutige Arbeitsliste offener Leads vor – je Lead mit Kernsignalen " +
+        "(Wiedervorlage, Score, Wert, Stillstand, Aufhänger) sowie den Notizen und dem bisherigen Verlauf " +
+        "(letzte Aktivitäten). Wähle die wichtigsten nächsten Handlungen aus und priorisiere sie. Regeln: " +
         "überfällige Wiedervorlagen und heiße Leads (hoher Score) zuerst; wertvolle, lange stillstehende Leads " +
-        "nicht vergessen; genau ein Lead pro Empfehlung und jeden Lead höchstens einmal. Nenne ausschließlich " +
-        "Leads aus der Liste und verwende exakt deren ID. Formuliere jede Handlung konkret und umsetzbar. " +
-        "Antworte ausschließlich im geforderten JSON-Format auf Deutsch.",
+        "nicht vergessen; leite die Handlung aus Notizen und Verlauf ab, sodass sie der logische NÄCHSTE Schritt " +
+        "ist (niemals etwas empfehlen, das laut Verlauf bereits erledigt wurde); genau ein Lead pro Empfehlung " +
+        "und jeden Lead höchstens einmal. Nenne ausschließlich Leads aus der Liste und verwende exakt deren ID. " +
+        "Formuliere jede Handlung konkret und umsetzbar. Antworte ausschließlich im geforderten JSON-Format auf Deutsch.",
       "Heutige Lead-Liste:\n\n" + ctx.lines.join("\n") +
         "\n\nEmpfiehl die nächsten 3 Handlungen (oder weniger, wenn es weniger sinnvolle gibt), wichtigste zuerst.",
       { json: true, kind: "agenda-recommendations", schema: AGENDA_REC_SCHEMA, maxTokens: 1200 }

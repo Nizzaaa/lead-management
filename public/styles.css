@@ -1111,10 +1111,10 @@ a { color: inherit; }
 .ns-due.today { color: var(--amber); }
 
 /* ===== KI-Tagesempfehlung (oben auf „Heute") ===== */
-.agenda-ai { border: 1px solid var(--glass-border); }
+.agenda-ai { border: 1px solid var(--glass-border); padding: 15px 18px; margin-bottom: 16px; }
 .agenda-ai-head {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; flex-wrap: wrap; margin-bottom: 12px;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 11px;
 }
 .agenda-ai-head h3 { margin: 0; font-size: 15px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .agenda-ai-sub { font-size: 12px; font-weight: 500; color: var(--muted); }
@@ -1123,7 +1123,7 @@ a { color: inherit; }
 .agenda-ai-body { display: flex; flex-direction: column; gap: 8px; }
 .agenda-rec {
   display: flex; align-items: flex-start; gap: 12px;
-  padding: 11px 12px; border-radius: 12px;
+  padding: 10px 12px; border-radius: 12px;
   background: var(--glass-fill); border: 1px solid var(--glass-border);
   border-left: 3px solid var(--muted);
 }

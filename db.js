@@ -388,6 +388,35 @@ async function listActivities(leadId) {
   return rows.map(rowToActivity);
 }
 
+// Jüngste Aktivitäten je Lead für eine Menge von Lead-IDs – in EINER Abfrage
+// (Fensterfunktion statt N+1). `excludeTypes` blendet z. B. automatische
+// 'ai'/'system'-Einträge aus. Liefert eine Map leadId -> Aktivitäten (neueste
+// zuerst). Genutzt vom KI-Empfehlungs-Kontext der „Heute"-Seite.
+async function listRecentActivitiesForLeads(leadIds, perLead = 3, excludeTypes = []) {
+  const ids = (Array.isArray(leadIds) ? leadIds : []).filter(Boolean);
+  const map = new Map();
+  if (!ids.length) return map;
+  const n = Math.max(1, Math.min(10, Math.round(perLead) || 3));
+  const ex = Array.isArray(excludeTypes) ? excludeTypes : [];
+  const { rows } = await pool.query(
+    `SELECT * FROM (
+       SELECT a.*, ROW_NUMBER() OVER (PARTITION BY lead_id ORDER BY created_at DESC) AS rn
+         FROM activities a
+        WHERE lead_id = ANY($1::uuid[])
+          AND NOT (type = ANY($3::text[]))
+     ) t
+     WHERE rn <= $2
+     ORDER BY lead_id, created_at DESC`,
+    [ids, n, ex]
+  );
+  for (const r of rows) {
+    const a = rowToActivity(r);
+    if (!map.has(a.leadId)) map.set(a.leadId, []);
+    map.get(a.leadId).push(a);
+  }
+  return map;
+}
+
 async function createActivity(a) {
   const { rows } = await pool.query(
     `INSERT INTO activities (lead_id, type, title, body, outcome, actor, meta)
@@ -672,6 +701,7 @@ module.exports = {
   getWidgetStats,
   recordUsage,
   listActivities,
+  listRecentActivitiesForLeads,
   createActivity,
   deleteActivity,
   listProspects,
