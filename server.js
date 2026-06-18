@@ -1063,10 +1063,12 @@ async function recordClaudeUsage(model, kind, usage) {
   }
 }
 
-async function callClaude(system, userText, { json = false, kind = "ai" } = {}) {
+// Optional ein eigenes `schema` übergeben, um die JSON-Ausgabe für andere
+// KI-Funktionen zu erzwingen; ohne Angabe gilt das eingebaute Score-Schema.
+async function callClaude(system, userText, { json = false, kind = "ai", schema = null, maxTokens = 1500 } = {}) {
   const params = {
     model: currentModel,
-    max_tokens: 1500,
+    max_tokens: maxTokens,
     system,
     messages: [{ role: "user", content: userText }],
   };
@@ -1074,7 +1076,7 @@ async function callClaude(system, userText, { json = false, kind = "ai" } = {}) 
     params.output_config = {
       format: {
         type: "json_schema",
-        schema: {
+        schema: schema || {
           type: "object",
           properties: {
             score: { type: "integer", description: "0 (kalt) bis 100 (sehr heiß)." },
@@ -1222,6 +1224,158 @@ app.post("/api/leads/:id/insights", aiLimiter, wrap(async (req, res) => {
   } catch (err) {
     (req.log || logger).error("insights_failed", { leadId: req.params.id, error: err.message });
     res.status(502).json({ error: "Empfehlung fehlgeschlagen. Bitte erneut versuchen." });
+  }
+}));
+
+// --- KI-Tagesempfehlung („Heute"-Seite) ------------------------------------
+// Empfiehlt die nächsten Handlungen über alle offenen Leads hinweg – dieselben
+// Signale wie die „Heute"-Ansicht: fällige/überfällige Wiedervorlagen, offene
+// Leads ohne nächsten Schritt, KI-Score und Stillstand. Read-only: legt keine
+// Aktivitäten an und ändert keine Leads.
+
+// Tagesdatum „YYYY-MM-DD". Bevorzugt das vom Client übergebene (lokale) Datum,
+// damit die Fälligkeits-Einstufung exakt der „Heute"-Ansicht entspricht; sonst
+// die lokale Serverzeit.
+function agendaToday(req) {
+  const c = req && req.body && req.body.today;
+  if (typeof c === "string" && /^\d{4}-\d{2}-\d{2}$/.test(c)) return c;
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// Ganze Tage seit einem ISO-Zeitpunkt (für „letzte Aktivität vor N Tagen").
+function daysSince(iso) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.max(0, Math.floor((Date.now() - t) / 86400000));
+}
+
+// Wählt die handlungsrelevanten offenen Leads (gespiegelt von der Heute-Logik)
+// und baut daraus einen kompakten KI-Kontext. Liefert { lines, ids, count }.
+function buildAgendaContext(leads, today) {
+  const open = leads.filter((l) => l.status !== "gewonnen" && l.status !== "verloren");
+  const dueState = (l) => {
+    if (!l.nextStepAt) return null;
+    if (l.nextStepAt < today) return "overdue";
+    if (l.nextStepAt === today) return "today";
+    return "future";
+  };
+  // Relevant: alles mit Wiedervorlage + bearbeitete offene Leads ohne Schritt
+  // (frische „neu"-Leads bleiben – wie in der Ansicht – außen vor).
+  const candidates = open.filter((l) => dueState(l) || l.status !== "neu");
+  // Priorität für die Auswahl: überfällig → heute → ohne Schritt → demnächst.
+  const rank = (l) => {
+    const s = dueState(l);
+    if (s === "overdue") return 0;
+    if (s === "today") return 1;
+    if (s === "future") return 3;
+    return 2;
+  };
+  candidates.sort((a, b) => {
+    const r = rank(a) - rank(b);
+    if (r !== 0) return r;
+    const ad = a.nextStepAt || "9999-12-31";
+    const bd = b.nextStepAt || "9999-12-31";
+    if (ad !== bd) return ad < bd ? -1 : 1;
+    return ((b.ai && b.ai.score) || 0) - ((a.ai && a.ai.score) || 0);
+  });
+  // Deckel gegen unnötige Token-Last bei großen Pipelines.
+  const top = candidates.slice(0, 30);
+
+  const lines = top.map((l) => {
+    const parts = [`[${l.id}] ${l.company || l.name || "—"}`, `Status: ${l.status}`];
+    if (l.value) parts.push(`Wert: ${Math.round(Number(l.value))} €`);
+    if (l.ai && l.ai.score != null) parts.push(`Score: ${l.ai.score}/100 (${l.ai.grade || "?"})`);
+    const s = dueState(l);
+    const due =
+      s === "overdue" ? `überfällig (war am ${l.nextStepAt})` :
+      s === "today" ? "heute fällig" :
+      s === "future" ? `geplant am ${l.nextStepAt}` : "keine Wiedervorlage geplant";
+    parts.push(`Nächster Schritt: ${l.nextStep || "—"} – ${due}`);
+    const since = daysSince(l.lastActivityAt);
+    if (since != null) parts.push(`letzte Aktivität vor ${since} Tg.`);
+    if (l.research) {
+      const r = l.research;
+      const hook = (Array.isArray(r.potenziale) && r.potenziale[0] && r.potenziale[0].titel)
+        || (typeof r.coldCallStrategie === "string" ? r.coldCallStrategie.slice(0, 140) : "");
+      if (hook) parts.push(`Aufhänger: ${hook}`);
+    }
+    return "- " + parts.join(" · ");
+  });
+
+  return { lines, ids: top.map((l) => l.id), count: top.length };
+}
+
+// Schema: bis zu drei priorisierte nächste Handlungen.
+const AGENDA_REC_SCHEMA = {
+  type: "object",
+  properties: {
+    recommendations: {
+      type: "array",
+      description: "Die wichtigsten nächsten Handlungen, höchste Priorität zuerst. Höchstens drei Einträge.",
+      items: {
+        type: "object",
+        properties: {
+          leadId: { type: "string", description: "ID des Leads aus der vorgelegten Liste (der Wert in eckigen Klammern). Nur vorhandene IDs verwenden." },
+          action: { type: "string", description: "Konkrete, sofort umsetzbare Handlung als kurzer Imperativ (z. B. 'Anrufen und Angebot nachfassen')." },
+          reason: { type: "string", description: "Eine kurze Begründung, warum diese Handlung jetzt dran ist (belegtes Signal aus der Liste)." },
+          priority: { type: "string", enum: ["hoch", "mittel", "niedrig"] },
+        },
+        required: ["leadId", "action", "reason", "priority"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["recommendations"],
+  additionalProperties: false,
+};
+
+// KI-Tagesempfehlung: die nächsten (bis zu 3) Handlungen über alle offenen Leads.
+app.post("/api/agenda/recommendations", aiLimiter, wrap(async (req, res) => {
+  if (!requireAi(res)) return;
+  const leads = await db.listLeads();
+  const ctx = buildAgendaContext(leads, agendaToday(req));
+  // Nichts zu tun → ohne KI-Aufruf (und damit ohne Kosten) leer antworten.
+  if (!ctx.count) return res.json({ recommendations: [], generatedAt: new Date().toISOString() });
+  try {
+    const raw = await callClaude(
+      "Du bist Vertriebs-Coach für FU/GE Solutions (Integration & Entwicklung individueller KI-Systeme im " +
+        "Mittelstand/Handwerk). Dir liegt die heutige Arbeitsliste offener Leads vor (Wiedervorlagen, Score, " +
+        "Stillstand, Aufhänger). Wähle die wichtigsten nächsten Handlungen aus und priorisiere sie. Regeln: " +
+        "überfällige Wiedervorlagen und heiße Leads (hoher Score) zuerst; wertvolle, lange stillstehende Leads " +
+        "nicht vergessen; genau ein Lead pro Empfehlung und jeden Lead höchstens einmal. Nenne ausschließlich " +
+        "Leads aus der Liste und verwende exakt deren ID. Formuliere jede Handlung konkret und umsetzbar. " +
+        "Antworte ausschließlich im geforderten JSON-Format auf Deutsch.",
+      "Heutige Lead-Liste:\n\n" + ctx.lines.join("\n") +
+        "\n\nEmpfiehl die nächsten 3 Handlungen (oder weniger, wenn es weniger sinnvolle gibt), wichtigste zuerst.",
+      { json: true, kind: "agenda-recommendations", schema: AGENDA_REC_SCHEMA, maxTokens: 1200 }
+    );
+    const parsed = JSON.parse(raw);
+    const valid = new Set(ctx.ids);
+    const byId = new Map(leads.map((l) => [l.id, l]));
+    const seen = new Set();
+    const recommendations = [];
+    for (const r of (Array.isArray(parsed.recommendations) ? parsed.recommendations : [])) {
+      if (!r || !valid.has(r.leadId) || seen.has(r.leadId)) continue;
+      seen.add(r.leadId);
+      const l = byId.get(r.leadId);
+      recommendations.push({
+        leadId: r.leadId,
+        company: (l && (l.company || l.name)) || "—",
+        status: l ? l.status : "",
+        nextStepAt: l ? l.nextStepAt : null,
+        action: String(r.action || "").trim().slice(0, 300),
+        reason: String(r.reason || "").trim().slice(0, 300),
+        priority: ["hoch", "mittel", "niedrig"].includes(r.priority) ? r.priority : "mittel",
+      });
+      if (recommendations.length >= 3) break;
+    }
+    res.json({ recommendations, generatedAt: new Date().toISOString() });
+  } catch (err) {
+    (req.log || logger).error("agenda_recommendations_failed", { error: err.message });
+    res.status(502).json({ error: "KI-Empfehlung fehlgeschlagen. Bitte erneut versuchen." });
   }
 }));
 

@@ -24,6 +24,12 @@ let staleDays = 14; // „Kalt"-Schwelle (Tage ohne Aktivität), kommt aus /api/
 let tagColors = {}; // { tagNameLowercase: "#rrggbb" } – globale Tag-Farben aus /api/config
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
+// KI-Tagesempfehlung der „Heute"-Seite: zwischengespeichertes Ergebnis
+// ({ recommendations, generatedAt }) und ob gerade eine Anfrage läuft. Wird
+// pro Sitzung einmal automatisch geladen, danach nur per „Aktualisieren".
+let agendaAi = null;
+let agendaAiLoading = false;
+
 // Eingeklappte Board-Spalten (Status-Namen). Persistiert wie `view`, lebt
 // außerhalb des DOM, da renderKanban() das Board per innerHTML neu aufbaut.
 const COLLAPSE_KEY = "leadpilot_kanban_collapsed";
@@ -1404,8 +1410,10 @@ function bindEvents() {
     if (!e.target.closest("#globalSearch")) hideGlobalResults();
   });
 
-  // Heute/Agenda: öffnen, erledigen, verschieben/planen.
+  // Heute/Agenda: KI-Empfehlung aktualisieren, öffnen, erledigen, verschieben.
   $("#agendaView").addEventListener("click", (e) => {
+    const air = e.target.closest("[data-agenda-ai-refresh]");
+    if (air) { loadAgendaRecommendations(); return; }
     const done = e.target.closest("[data-agenda-done]");
     if (done) { completeNextStep(done.dataset.agendaDone); return; }
     const edit = e.target.closest("[data-agenda-edit]");
@@ -2755,6 +2763,9 @@ function showAgenda() {
   showOnly("agendaView");
   setActiveNav("agenda");
   renderAgenda();
+  // Beim ersten Öffnen je Sitzung automatisch eine Empfehlung erstellen
+  // (danach manuell per „Aktualisieren"). Nur wenn die KI aktiv ist.
+  if (aiEnabled && !agendaAi && !agendaAiLoading) loadAgendaRecommendations();
   window.scrollTo(0, 0);
 }
 
@@ -2785,6 +2796,75 @@ function agendaItemHtml(l) {
   </div>`;
 }
 
+// --- KI-Tagesempfehlung (oben auf „Heute") ---------------------------------
+const PRIORITY_LABEL = { hoch: "Hoch", mittel: "Mittel", niedrig: "Niedrig" };
+
+// Eine einzelne Empfehlung als nummerierte, klickbare Zeile (öffnet den Lead).
+function agendaRecHtml(rec, i) {
+  const prio = PRIORITY_LABEL[rec.priority] ? rec.priority : "mittel";
+  return `<div class="agenda-rec prio-${prio}">
+    <span class="agenda-rec-num">${i + 1}</span>
+    <button type="button" class="agenda-rec-main" data-nav="${esc(rec.leadId)}">
+      <span class="agenda-rec-action">${esc(rec.action)}</span>
+      <span class="agenda-rec-meta">
+        <span class="agenda-rec-company">🏢 ${esc(rec.company)}</span>
+        <span class="prio-badge prio-${prio}">${PRIORITY_LABEL[prio]}</span>
+      </span>
+      <span class="agenda-rec-reason">${esc(rec.reason)}</span>
+    </button>
+  </div>`;
+}
+
+// Die komplette KI-Sektion je nach Zustand (lädt / Ergebnis / leer / Start).
+function agendaAiSectionHtml() {
+  let body;
+  if (agendaAiLoading) {
+    body = `<div class="ai-loading"><span class="spinner"></span> KI wählt die wichtigsten Handlungen…</div>`;
+  } else if (agendaAi && agendaAi.recommendations && agendaAi.recommendations.length) {
+    body = agendaAi.recommendations.map(agendaRecHtml).join("");
+  } else if (agendaAi) {
+    body = `<p class="d-muted">Aktuell keine dringenden Handlungen – deine Pipeline ist im grünen Bereich. 🎉</p>`;
+  } else {
+    body = `<p class="d-muted">Lass dir von der KI die wichtigsten nächsten Schritte aus deiner Pipeline vorschlagen.</p>`;
+  }
+  const stamp = agendaAi && agendaAi.generatedAt
+    ? `<span class="agenda-ai-stamp">aktualisiert ${esc(relTime(agendaAi.generatedAt))}</span>` : "";
+  const btnLabel = agendaAiLoading ? "⏳ …" : agendaAi ? "🔄 Aktualisieren" : "✨ Empfehlungen";
+  return `<section class="card agenda-ai">
+    <div class="agenda-ai-head">
+      <h3>🤖 KI-Empfehlung <span class="agenda-ai-sub">Deine nächsten 3 Handlungen</span></h3>
+      <div class="agenda-ai-tools">
+        ${stamp}
+        <button type="button" class="btn btn-ai btn-sm" data-agenda-ai-refresh ${agendaAiLoading ? "disabled" : ""}>${btnLabel}</button>
+      </div>
+    </div>
+    <div class="agenda-ai-body">${body}</div>
+  </section>`;
+}
+
+// Holt die KI-Empfehlung vom Server und zeichnet die „Heute"-Seite neu. Übergibt
+// das lokale Tagesdatum, damit die Fälligkeits-Einstufung exakt zur Ansicht passt.
+async function loadAgendaRecommendations() {
+  if (!aiEnabled || agendaAiLoading) return;
+  agendaAiLoading = true;
+  renderAgenda();
+  try {
+    const data = await api("/api/agenda/recommendations", {
+      method: "POST",
+      body: JSON.stringify({ today: todayYMD() }),
+    });
+    agendaAi = {
+      recommendations: Array.isArray(data.recommendations) ? data.recommendations : [],
+      generatedAt: data.generatedAt || new Date().toISOString(),
+    };
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    agendaAiLoading = false;
+    if (location.hash === "#/heute") renderAgenda();
+  }
+}
+
 function renderAgenda() {
   const v = $("#agendaView");
   const open = leads.filter((l) => l.status !== "gewonnen" && l.status !== "verloren");
@@ -2812,6 +2892,7 @@ function renderAgenda() {
 
   v.innerHTML = `
     <div class="view-head"><h2>📅 Heute</h2><p class="d-muted">Anstehende Wiedervorlagen &amp; nächste Schritte</p></div>
+    ${aiEnabled ? agendaAiSectionHtml() : ""}
     ${planned}
     ${noStep.length ? `<section class="card agenda-section nostep">
         <h3>Offen ohne Wiedervorlage <span class="agenda-n">${noStep.length}</span></h3>
