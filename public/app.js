@@ -24,6 +24,12 @@ let staleDays = 14; // „Kalt"-Schwelle (Tage ohne Aktivität), kommt aus /api/
 let tagColors = {}; // { tagNameLowercase: "#rrggbb" } – globale Tag-Farben aus /api/config
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
+// KI-Tagesempfehlung der „Heute"-Seite: zwischengespeichertes Ergebnis
+// ({ recommendations, generatedAt }) und ob gerade eine Anfrage läuft. Wird
+// pro Sitzung einmal automatisch geladen, danach nur per „Aktualisieren".
+let agendaAi = null;
+let agendaAiLoading = false;
+
 // Eingeklappte Board-Spalten (Status-Namen). Persistiert wie `view`, lebt
 // außerhalb des DOM, da renderKanban() das Board per innerHTML neu aufbaut.
 const COLLAPSE_KEY = "leadpilot_kanban_collapsed";
@@ -247,7 +253,7 @@ function populateStatusSelect() {
 }
 
 // --- Routing (Liste ⇄ Detail ⇄ Heute ⇄ Prospects ⇄ Berichte) ---------------
-const VIEWS = ["listView", "detailView", "agendaView", "prospectsView", "reportsView"];
+const VIEWS = ["listView", "detailView", "agendaView", "prospectsView", "reportsView", "promptsView"];
 function showOnly(viewId) {
   for (const v of VIEWS) $("#" + v).classList.toggle("hidden", v !== viewId);
 }
@@ -265,6 +271,7 @@ function router() {
   if (location.hash === "#/discovery") { location.hash = "#/prospects"; return; }
   if (location.hash === "#/prospects") return showProspects();
   if (location.hash === "#/reports") return showReports();
+  if (location.hash === "#/prompts") return showPrompts();
   showList();
 }
 
@@ -298,6 +305,14 @@ function showReports() {
   showOnly("reportsView");
   setActiveNav("reports");
   renderReportsView();
+  window.scrollTo(0, 0);
+}
+
+function showPrompts() {
+  detailId = null;
+  showOnly("promptsView");
+  setActiveNav("");
+  renderPromptsView();
   window.scrollTo(0, 0);
 }
 
@@ -1348,6 +1363,8 @@ function bindEvents() {
   $("#settingsBtn").addEventListener("click", openSettingsModal);
   $("#closeSettingsModal").addEventListener("click", closeSettingsModal);
   $("#cancelSettingsBtn").addEventListener("click", closeSettingsModal);
+  // „Prompts bearbeiten" schließt das Modal und öffnet die Prompts-Seite.
+  $("#openPromptsBtn").addEventListener("click", () => { closeSettingsModal(); location.hash = "#/prompts"; });
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#stageProbFields").addEventListener("input", onProbInput);
   $("#exportCsvBtn").addEventListener("click", () => downloadFile("/api/leads/export.csv"));
@@ -1404,8 +1421,10 @@ function bindEvents() {
     if (!e.target.closest("#globalSearch")) hideGlobalResults();
   });
 
-  // Heute/Agenda: öffnen, erledigen, verschieben/planen.
+  // Heute/Agenda: KI-Empfehlung aktualisieren, öffnen, erledigen, verschieben.
   $("#agendaView").addEventListener("click", (e) => {
+    const air = e.target.closest("[data-agenda-ai-refresh]");
+    if (air) { loadAgendaRecommendations(); return; }
     const done = e.target.closest("[data-agenda-done]");
     if (done) { completeNextStep(done.dataset.agendaDone); return; }
     const edit = e.target.closest("[data-agenda-edit]");
@@ -2524,27 +2543,32 @@ function costChart(days) {
   }
 
   const bw = plotW / days.length;
-  // Gestapelter Balken je Tag: unten KI-Recherche/Übrige (grün), oben Discovery
-  // (amber) – so heben sich die Discovery-Kosten farblich ab.
+  // Gestapelter Balken je Tag (von unten): KI-Recherche/Übrige (grün),
+  // KI-Empfehlung (blau), Discovery (amber) – so heben sich die jeweiligen
+  // Kostenarten farblich voneinander ab.
   const bars = days.map((d, i) => {
     const x = padL + i * bw;
     const total = d.value || 0;
     const disc = Math.min(Math.max(0, d.discovery || 0), total);
-    const other = total - disc;
+    const rec = Math.min(Math.max(0, d.recommend || 0), Math.max(0, total - disc));
+    const other = Math.max(0, total - disc - rec);
     const bx = x + bw * 0.18, bwid = bw * 0.64;
-    const hOther = top > 0 ? (other / top) * plotH : 0;
-    const hDisc = top > 0 ? (disc / top) * plotH : 0;
+    const hOf = (v) => (top > 0 ? (v / top) * plotH : 0);
+    const hOther = hOf(other), hRec = hOf(rec), hDisc = hOf(disc);
     const yOther = padT + plotH - hOther;
-    const yDisc = yOther - hDisc;
+    const yRec = yOther - hRec;
+    const yDisc = yRec - hDisc;
     const payload = esc(JSON.stringify({
-      day: d.day, value: total, discovery: disc, models: d.models || {},
+      day: d.day, value: total, discovery: disc, recommend: rec, models: d.models || {},
       researched: d.researched || 0, discovered: d.discovered || 0,
     }));
     const otherRect = hOther > 0 ? `<rect class="cc-bar" x="${bx}" y="${yOther}" width="${bwid}" height="${hOther}" rx="3" />` : "";
+    const recRect = hRec > 0 ? `<rect class="cc-bar-rec" x="${bx}" y="${yRec}" width="${bwid}" height="${hRec}" rx="3" />` : "";
     const discRect = hDisc > 0 ? `<rect class="cc-bar-disc" x="${bx}" y="${yDisc}" width="${bwid}" height="${hDisc}" rx="3" />` : "";
     return `<g class="cc-col" data-tip="${payload}">
         <rect class="cc-hit" x="${x}" y="${padT}" width="${bw}" height="${plotH}" />
         ${otherRect}
+        ${recRect}
         ${discRect}
         <text x="${x + bw / 2}" y="${H - 8}" class="cc-lbl">${esc(dayLabel(d.day))}</text>
       </g>`;
@@ -2560,6 +2584,7 @@ function costChart(days) {
     </div>
     <div class="cost-legend">
       <span class="cost-legend-item"><span class="ci-swatch ci-research"></span> KI-Recherche</span>
+      <span class="cost-legend-item"><span class="ci-swatch ci-rec"></span> KI-Empfehlung</span>
       <span class="cost-legend-item"><span class="ci-swatch ci-disc"></span> Discovery</span>
     </div>`;
 }
@@ -2582,9 +2607,13 @@ function wireCostChart(root) {
       const discRow = (Number(d.discovery) || 0) > 0
         ? `<div class="tip-row tip-disc"><span>· davon Discovery</span><span>${esc(usd(d.discovery))}</span></div>`
         : "";
+      const recRow = (Number(d.recommend) || 0) > 0
+        ? `<div class="tip-row tip-rec"><span>· davon KI-Empfehlung</span><span>${esc(usd(d.recommend))}</span></div>`
+        : "";
       tip.innerHTML = `<div class="tip-head">${esc(dayLabelLong(d.day))}</div>
         <div class="tip-row tip-total"><span>Gesamt</span><span>${esc(usd(d.value))}</span></div>
         ${discRow}
+        ${recRow}
         ${rows}
         <div class="tip-row tip-meta"><span>Recherchierte Leads</span><span>${Number(d.researched) || 0}</span></div>
         <div class="tip-row tip-meta"><span>Entdeckte Leads</span><span>${Number(d.discovered) || 0}</span></div>`;
@@ -2755,6 +2784,9 @@ function showAgenda() {
   showOnly("agendaView");
   setActiveNav("agenda");
   renderAgenda();
+  // Beim ersten Öffnen je Sitzung automatisch eine Empfehlung erstellen
+  // (danach manuell per „Aktualisieren"). Nur wenn die KI aktiv ist.
+  if (aiEnabled && !agendaAi && !agendaAiLoading) loadAgendaRecommendations();
   window.scrollTo(0, 0);
 }
 
@@ -2785,6 +2817,75 @@ function agendaItemHtml(l) {
   </div>`;
 }
 
+// --- KI-Tagesempfehlung (oben auf „Heute") ---------------------------------
+const PRIORITY_LABEL = { hoch: "Hoch", mittel: "Mittel", niedrig: "Niedrig" };
+
+// Eine einzelne Empfehlung als nummerierte, klickbare Zeile (öffnet den Lead).
+function agendaRecHtml(rec, i) {
+  const prio = PRIORITY_LABEL[rec.priority] ? rec.priority : "mittel";
+  return `<div class="agenda-rec prio-${prio}">
+    <span class="agenda-rec-num">${i + 1}</span>
+    <button type="button" class="agenda-rec-main" data-nav="${esc(rec.leadId)}">
+      <span class="agenda-rec-action">${esc(rec.action)}</span>
+      <span class="agenda-rec-meta">
+        <span class="agenda-rec-company">🏢 ${esc(rec.company)}</span>
+        <span class="prio-badge prio-${prio}">${PRIORITY_LABEL[prio]}</span>
+      </span>
+      <span class="agenda-rec-reason">${esc(rec.reason)}</span>
+    </button>
+  </div>`;
+}
+
+// Die komplette KI-Sektion je nach Zustand (lädt / Ergebnis / leer / Start).
+function agendaAiSectionHtml() {
+  let body;
+  if (agendaAiLoading) {
+    body = `<div class="ai-loading"><span class="spinner"></span> KI wählt die wichtigsten Handlungen…</div>`;
+  } else if (agendaAi && agendaAi.recommendations && agendaAi.recommendations.length) {
+    body = agendaAi.recommendations.map(agendaRecHtml).join("");
+  } else if (agendaAi) {
+    body = `<p class="d-muted">Aktuell keine dringenden Handlungen – deine Pipeline ist im grünen Bereich. 🎉</p>`;
+  } else {
+    body = `<p class="d-muted">Lass dir von der KI die wichtigsten nächsten Schritte aus deiner Pipeline vorschlagen.</p>`;
+  }
+  const stamp = agendaAi && agendaAi.generatedAt
+    ? `<span class="agenda-ai-stamp">aktualisiert ${esc(relTime(agendaAi.generatedAt))}</span>` : "";
+  const btnLabel = agendaAiLoading ? "⏳ …" : agendaAi ? "🔄 Aktualisieren" : "✨ Empfehlungen";
+  return `<section class="card agenda-ai">
+    <div class="agenda-ai-head">
+      <h3>🤖 KI-Empfehlung <span class="agenda-ai-sub">Deine nächsten 3 Handlungen</span></h3>
+      <div class="agenda-ai-tools">
+        ${stamp}
+        <button type="button" class="btn btn-ai btn-sm" data-agenda-ai-refresh ${agendaAiLoading ? "disabled" : ""}>${btnLabel}</button>
+      </div>
+    </div>
+    <div class="agenda-ai-body">${body}</div>
+  </section>`;
+}
+
+// Holt die KI-Empfehlung vom Server und zeichnet die „Heute"-Seite neu. Übergibt
+// das lokale Tagesdatum, damit die Fälligkeits-Einstufung exakt zur Ansicht passt.
+async function loadAgendaRecommendations() {
+  if (!aiEnabled || agendaAiLoading) return;
+  agendaAiLoading = true;
+  renderAgenda();
+  try {
+    const data = await api("/api/agenda/recommendations", {
+      method: "POST",
+      body: JSON.stringify({ today: todayYMD() }),
+    });
+    agendaAi = {
+      recommendations: Array.isArray(data.recommendations) ? data.recommendations : [],
+      generatedAt: data.generatedAt || new Date().toISOString(),
+    };
+  } catch (err) {
+    toast(err.message, "error");
+  } finally {
+    agendaAiLoading = false;
+    if (location.hash === "#/heute") renderAgenda();
+  }
+}
+
 function renderAgenda() {
   const v = $("#agendaView");
   const open = leads.filter((l) => l.status !== "gewonnen" && l.status !== "verloren");
@@ -2812,6 +2913,7 @@ function renderAgenda() {
 
   v.innerHTML = `
     <div class="view-head"><h2>📅 Heute</h2><p class="d-muted">Anstehende Wiedervorlagen &amp; nächste Schritte</p></div>
+    ${aiEnabled ? agendaAiSectionHtml() : ""}
     ${planned}
     ${noStep.length ? `<section class="card agenda-section nostep">
         <h3>Offen ohne Wiedervorlage <span class="agenda-n">${noStep.length}</span></h3>
@@ -2819,6 +2921,143 @@ function renderAgenda() {
         ${noStep.slice(0, 25).map(agendaItemHtml).join("")}
       </section>` : ""}
   `;
+}
+
+// --- KI-Prompts bearbeiten -------------------------------------------------
+let promptList = []; // zuletzt vom Server geladene Prompts (Liste aus /api/prompts)
+
+// Platzhalter als klickbare Chips (Einfügen an der Cursorposition).
+function placeholderChipsHtml(p) {
+  if (!p.placeholders || !p.placeholders.length) return `<span class="ph-none">keine Platzhalter</span>`;
+  return p.placeholders.map((ph) =>
+    `<button type="button" class="ph-chip" data-ph="${esc(ph.name)}" data-key="${esc(p.key)}" title="${esc(ph.description || "")}">{{${esc(ph.name)}}}</button>`
+  ).join("");
+}
+
+function promptCardHtml(p) {
+  const custom = p.isCustom ? `<span class="prompt-badge">angepasst</span>` : "";
+  const rows = Math.min(20, Math.max(4, Math.ceil((p.value || "").length / 90)));
+  return `<div class="prompt-item" data-prompt="${esc(p.key)}">
+    <div class="prompt-head">
+      <span class="prompt-title">${esc(p.label)}${custom}</span>
+      <button type="button" class="btn btn-sm prompt-reset" data-reset="${esc(p.key)}">↩︎ Standard wiederherstellen</button>
+    </div>
+    <p class="prompt-desc">${esc(p.description || "")}</p>
+    <div class="prompt-ph">Platzhalter: ${placeholderChipsHtml(p)}</div>
+    <textarea class="prompt-text" data-key="${esc(p.key)}" rows="${rows}" spellcheck="false">${esc(p.value || "")}</textarea>
+  </div>`;
+}
+
+function renderPromptsView() {
+  const v = $("#promptsView");
+  if (!promptList.length) {
+    v.innerHTML = `<div class="view-head"><h2>🧠 KI-Prompts</h2></div>
+      <section class="card"><div class="ai-loading"><span class="spinner"></span> Lade Prompts…</div></section>`;
+    loadPrompts();
+    return;
+  }
+  // Nach Gruppe gliedern (Reihenfolge des ersten Auftretens beibehalten).
+  const groups = [];
+  const byGroup = {};
+  for (const p of promptList) {
+    if (!byGroup[p.group]) { byGroup[p.group] = []; groups.push(p.group); }
+    byGroup[p.group].push(p);
+  }
+  const sections = groups.map((g) => `
+    <section class="card prompt-group">
+      <h3>${esc(g)}</h3>
+      ${byGroup[g].map(promptCardHtml).join("")}
+    </section>`).join("");
+
+  v.innerHTML = `
+    <div class="view-head view-head-row">
+      <div>
+        <h2>🧠 KI-Prompts</h2>
+        <p class="d-muted">Alle KI-Prompts anpassen. Daten per Platzhalter <code>{{…}}</code> einfügen. Änderungen gelten global.</p>
+      </div>
+      <a class="btn" href="#/">← Zurück</a>
+    </div>
+    ${sections}
+    <div class="prompt-actions">
+      <span class="d-muted">Änderungen werden erst nach dem Speichern aktiv.</span>
+      <button type="button" class="btn btn-primary" id="promptsSaveBtn">💾 Speichern</button>
+    </div>`;
+
+  $("#promptsSaveBtn").addEventListener("click", savePrompts);
+  v.querySelectorAll(".ph-chip").forEach((c) => c.addEventListener("click", () => {
+    const ta = v.querySelector(`textarea.prompt-text[data-key="${c.dataset.key}"]`);
+    if (ta) insertAtCursor(ta, `{{${c.dataset.ph}}}`);
+  }));
+  v.querySelectorAll(".prompt-reset").forEach((b) => b.addEventListener("click", () => restorePromptDefault(b.dataset.reset)));
+}
+
+async function loadPrompts() {
+  try {
+    const data = await api("/api/prompts");
+    promptList = Array.isArray(data.prompts) ? data.prompts : [];
+    renderPromptsView();
+  } catch (err) {
+    $("#promptsView").innerHTML = `<div class="view-head"><h2>🧠 KI-Prompts</h2></div>
+      <section class="card"><p class="warn">Konnte Prompts nicht laden: ${esc(err.message)}</p></section>`;
+  }
+}
+
+function collectPromptValues() {
+  const out = {};
+  document.querySelectorAll("#promptsView textarea.prompt-text").forEach((ta) => { out[ta.dataset.key] = ta.value; });
+  return out;
+}
+
+async function savePrompts() {
+  const btn = $("#promptsSaveBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "⏳ Speichern…"; }
+  try {
+    const data = await api("/api/prompts", {
+      method: "PUT",
+      body: JSON.stringify({ prompts: collectPromptValues() }),
+    });
+    promptList = Array.isArray(data.prompts) ? data.prompts : promptList;
+    toast("Prompts gespeichert", "success");
+    renderPromptsView();
+  } catch (err) {
+    toast(err.message, "error");
+    if (btn) { btn.disabled = false; btn.textContent = "💾 Speichern"; }
+  }
+}
+
+// Stellt den Original-Prompt eines Feldes wieder her: füllt das Textfeld mit dem
+// Default und entfernt – falls serverseitig eine Anpassung existiert – diese
+// sofort (persistiert). Andere ungespeicherte Felder bleiben unberührt.
+async function restorePromptDefault(key) {
+  const p = promptList.find((x) => x.key === key);
+  if (!p) return;
+  const ta = document.querySelector(`#promptsView textarea.prompt-text[data-key="${key}"]`);
+  if (ta) { ta.value = p.default || ""; ta.focus(); }
+  if (!p.isCustom) return; // war nicht angepasst – nur das Feld zurückgesetzt
+  try {
+    const data = await api("/api/prompts", {
+      method: "PUT",
+      body: JSON.stringify({ prompts: { [key]: p.default || "" } }),
+    });
+    promptList = Array.isArray(data.prompts) ? data.prompts : promptList;
+    // Nur dieses Feld in-place aktualisieren (kein Re-Render → andere Edits bleiben).
+    const item = document.querySelector(`#promptsView .prompt-item[data-prompt="${key}"]`);
+    const badge = item && item.querySelector(".prompt-badge");
+    if (badge) badge.remove();
+    toast("Standard wiederhergestellt", "success");
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// Fügt Text an der Cursorposition eines Textareas ein.
+function insertAtCursor(ta, text) {
+  const start = ta.selectionStart != null ? ta.selectionStart : ta.value.length;
+  const end = ta.selectionEnd != null ? ta.selectionEnd : ta.value.length;
+  ta.value = ta.value.slice(0, start) + text + ta.value.slice(end);
+  const pos = start + text.length;
+  ta.focus();
+  ta.setSelectionRange(pos, pos);
 }
 
 // --- Mehrfachauswahl (Bulk) ------------------------------------------------

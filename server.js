@@ -5,6 +5,7 @@ const path = require("path");
 const crypto = require("crypto");
 const fs = require("fs");
 const db = require("./db");
+const prompts = require("./prompts");
 const { researchCompany, discoverCompanies } = require("./research");
 const { leadsToCsv, prospectsToCsv, parseCsv, csvRowsToLeads, csvRowsToProspects, parseNumber, leadsToXlsxXml } = require("./exporters");
 const { logger, httpLogger } = require("./logger");
@@ -151,6 +152,10 @@ let staleDays = DEFAULT_STALE_DAYS;
 // Tag-Farben (global, case-insensitiv pro Tag-Name): { name: "#rrggbb" }.
 const TAG_COLORS_SETTING_KEY = "tag_colors";
 let tagColors = {};
+
+// Editierbare KI-Prompts: nur die Abweichungen vom Default werden als JSON
+// persistiert (Registry-Logik in prompts.js).
+const PROMPTS_SETTING_KEY = "prompt_overrides";
 
 function sanitizeStageProbabilities(input) {
   const out = { ...DEFAULT_STAGE_PROBABILITIES };
@@ -613,6 +618,34 @@ app.put("/api/tags/color", wrap(async (req, res) => {
   res.json({ tagColors });
 }));
 
+// --- Editierbare KI-Prompts ------------------------------------------------
+// Alle im Programm verwendeten Prompts inkl. Default, aktuellem Wert und
+// Platzhaltern – Grundlage der Prompts-Editor-Seite (Einstellungen → Prompts).
+app.get("/api/prompts", (req, res) => {
+  res.json({ prompts: prompts.list() });
+});
+
+// Prompt-Anpassungen speichern. Body: { prompts: { key: text, ... } } – kann
+// auch nur einzelne Prompts enthalten (Teil-Update). Werte gleich dem Default
+// gelten als „nicht angepasst"; nur echte Abweichungen werden persistiert.
+app.put("/api/prompts", wrap(async (req, res) => {
+  const incoming = req.body && req.body.prompts;
+  if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) {
+    return res.status(400).json({ error: "Erwartet { prompts: { key: text } }." });
+  }
+  // Eingehende über die bestehenden Anpassungen legen, damit ein Teil-Update die
+  // übrigen nicht verwirft. setOverrides verwirft alles, was dem Default gleicht.
+  let current = {};
+  try { current = JSON.parse(prompts.serialize()) || {}; } catch { current = {}; }
+  const merged = { ...current };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (prompts.isKnown(k) && typeof v === "string") merged[k] = v;
+  }
+  prompts.setOverrides(merged);
+  await db.setSetting(PROMPTS_SETTING_KEY, prompts.serialize());
+  res.json({ prompts: prompts.list() });
+}));
+
 // Liste aller Leads
 app.get("/api/leads", wrap(async (req, res) => {
   res.json(await db.listLeads());
@@ -1063,10 +1096,12 @@ async function recordClaudeUsage(model, kind, usage) {
   }
 }
 
-async function callClaude(system, userText, { json = false, kind = "ai" } = {}) {
+// Optional ein eigenes `schema` übergeben, um die JSON-Ausgabe für andere
+// KI-Funktionen zu erzwingen; ohne Angabe gilt das eingebaute Score-Schema.
+async function callClaude(system, userText, { json = false, kind = "ai", schema = null, maxTokens = 1500 } = {}) {
   const params = {
     model: currentModel,
-    max_tokens: 1500,
+    max_tokens: maxTokens,
     system,
     messages: [{ role: "user", content: userText }],
   };
@@ -1074,7 +1109,7 @@ async function callClaude(system, userText, { json = false, kind = "ai" } = {}) 
     params.output_config = {
       format: {
         type: "json_schema",
-        schema: {
+        schema: schema || {
           type: "object",
           properties: {
             score: { type: "integer", description: "0 (kalt) bis 100 (sehr heiß)." },
@@ -1119,15 +1154,8 @@ function requireAi(res) {
 // nach jeder Recherche genutzt.
 async function computeLeadScore(lead) {
   const raw = await callClaude(
-    "Du bist ein erfahrener B2B-Vertriebsanalyst für FU/GE Solutions (Integration & Entwicklung " +
-      "individueller KI-Systeme im Mittelstand/Handwerk). Bewerte knapp Qualität und Abschlusspotenzial eines Leads " +
-      "und schätze den realistischen Auftragswert in EUR – immer auf 12-Monats-Basis (Einmalprojekt = Projektwert; " +
-      "laufende/SaaS-Erlöse wie TelKI = Summe der ersten 12 Monate). Leite den Wert aus belegten Signalen ab " +
-      "(Unternehmensgröße/Standorte/Branche, passende Leistung: Potenzialanalyse, Workshop, KI-Integration oder " +
-      "TelKI-SaaS). Sei eher konservativ; wenn keine seriöse Schätzung möglich ist, value=0. " +
-      "Fasse dich kurz – KEINE Handlungsempfehlungen oder Cold-Call-Strategie (die stehen bereits im Dossier). " +
-      "Antworte ausschließlich im geforderten JSON-Format auf Deutsch.",
-    `Bewerte diesen Lead von 0 (kalt) bis 100 (sehr heiß), vergib eine Schulnote A–D und schätze den 12-Monats-Auftragswert.\n\n${leadContext(lead)}`,
+    prompts.get("score.system"),
+    prompts.render("score.user", { leadContext: leadContext(lead) }),
     { json: true, kind: "score" }
   );
   const result = JSON.parse(raw);
@@ -1188,12 +1216,8 @@ app.post("/api/leads/:id/email", aiLimiter, wrap(async (req, res) => {
       : "Erstkontakt herstellen und ein kurzes Kennenlerngespräch vorschlagen";
   try {
     const text = await callClaude(
-      "Du bist Vertriebstexter für FU/GE Solutions (Integration & Entwicklung individueller KI-Systeme im Mittelstand/Handwerk). " +
-        "Schreibe eine personalisierte, freundliche und prägnante Akquise-E-Mail auf Deutsch. Knüpfe an einen konkreten, " +
-        "belegten Ansatzpunkt aus dem Recherche-Dossier an (z. B. eine Schwachstelle oder ein Potenzial). " +
-        "Verwende eine klare Betreffzeile (Format: 'Betreff: ...'), eine persönliche Ansprache und einen klaren Call-to-Action. " +
-        "Keine Floskeln, kein Spam-Ton, maximal 150 Wörter.",
-      `Ziel der E-Mail: ${goal}\n\nLead:\n${leadContext(lead)}`,
+      prompts.get("email.system"),
+      prompts.render("email.user", { goal, leadContext: leadContext(lead) }),
       { kind: "email" }
     );
     await logActivity(lead.id, { type: "email", title: "KI-E-Mail-Entwurf erstellt", body: text }, actor(req));
@@ -1211,10 +1235,8 @@ app.post("/api/leads/:id/insights", aiLimiter, wrap(async (req, res) => {
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
   try {
     const text = await callClaude(
-      "Du bist Vertriebs-Coach für FU/GE Solutions und bereitest Cold Calls vor. Gib eine kurze, konkrete " +
-        "Handlungsempfehlung auf Deutsch: 2–4 priorisierte nächste Schritte als Aufzählung, abgeleitet aus den " +
-        "belegten Ansatzpunkten und Potenzialen des Recherche-Dossiers. Pragmatisch und umsetzbar.",
-      `Was sind die besten nächsten Schritte für diesen Lead?\n\n${leadContext(lead)}`,
+      prompts.get("insights.system"),
+      prompts.render("insights.user", { leadContext: leadContext(lead) }),
       { kind: "insight" }
     );
     await logActivity(lead.id, { type: "ai", title: "KI-Empfehlung erstellt", body: text }, actor(req));
@@ -1222,6 +1244,195 @@ app.post("/api/leads/:id/insights", aiLimiter, wrap(async (req, res) => {
   } catch (err) {
     (req.log || logger).error("insights_failed", { leadId: req.params.id, error: err.message });
     res.status(502).json({ error: "Empfehlung fehlgeschlagen. Bitte erneut versuchen." });
+  }
+}));
+
+// --- KI-Tagesempfehlung („Heute"-Seite) ------------------------------------
+// Empfiehlt die nächsten Handlungen über alle offenen Leads hinweg – dieselben
+// Signale wie die „Heute"-Ansicht: fällige/überfällige Wiedervorlagen, offene
+// Leads ohne nächsten Schritt, KI-Score und Stillstand. Read-only: legt keine
+// Aktivitäten an und ändert keine Leads.
+
+// Tagesdatum „YYYY-MM-DD". Bevorzugt das vom Client übergebene (lokale) Datum,
+// damit die Fälligkeits-Einstufung exakt der „Heute"-Ansicht entspricht; sonst
+// die lokale Serverzeit.
+function agendaToday(req) {
+  const c = req && req.body && req.body.today;
+  if (typeof c === "string" && /^\d{4}-\d{2}-\d{2}$/.test(c)) return c;
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// Ganze Tage seit einem ISO-Zeitpunkt (für „letzte Aktivität vor N Tagen").
+function daysSince(iso) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  return Math.max(0, Math.floor((Date.now() - t) / 86400000));
+}
+
+// Fälligkeits-Zustand einer Wiedervorlage relativ zu `today`.
+function agendaDueState(l, today) {
+  if (!l.nextStepAt) return null;
+  if (l.nextStepAt < today) return "overdue";
+  if (l.nextStepAt === today) return "today";
+  return "future";
+}
+
+// Wählt die handlungsrelevanten offenen Leads (gespiegelt von der Heute-Logik),
+// sortiert nach Dringlichkeit und deckelt die Menge (Token-Last).
+function selectAgendaCandidates(leads, today) {
+  const open = leads.filter((l) => l.status !== "gewonnen" && l.status !== "verloren");
+  // Relevant: alles mit Wiedervorlage + bearbeitete offene Leads ohne Schritt
+  // (frische „neu"-Leads bleiben – wie in der Ansicht – außen vor).
+  const candidates = open.filter((l) => agendaDueState(l, today) || l.status !== "neu");
+  // Priorität für die Auswahl: überfällig → heute → ohne Schritt → demnächst.
+  const rank = (l) => {
+    const s = agendaDueState(l, today);
+    if (s === "overdue") return 0;
+    if (s === "today") return 1;
+    if (s === "future") return 3;
+    return 2;
+  };
+  candidates.sort((a, b) => {
+    const r = rank(a) - rank(b);
+    if (r !== 0) return r;
+    const ad = a.nextStepAt || "9999-12-31";
+    const bd = b.nextStepAt || "9999-12-31";
+    if (ad !== bd) return ad < bd ? -1 : 1;
+    return ((b.ai && b.ai.score) || 0) - ((a.ai && a.ai.score) || 0);
+  });
+  return candidates.slice(0, 30);
+}
+
+// Whitespace/Zeilenumbrüche zu einer Zeile glätten (Notizen/Aktivitätstexte).
+function oneLine(s) { return String(s == null ? "" : s).replace(/\s+/g, " ").trim(); }
+
+// Relatives Tageslabel für Aktivitäten („heute" / „gestern" / „vor N Tg.").
+function relDaysLabel(iso) {
+  const n = daysSince(iso);
+  if (n == null) return "";
+  if (n === 0) return "heute";
+  if (n === 1) return "gestern";
+  return `vor ${n} Tg.`;
+}
+
+// Baut aus den (bereits ausgewählten) Kandidaten den kompakten KI-Kontext: je
+// Lead die Kernsignale plus Notizen und der bisherige Verlauf (letzte echte
+// Aktivitäten) – die Grundlage, um den logischen NÄCHSTEN Schritt abzuleiten.
+// `activitiesByLead`: Map leadId -> Aktivitäten (neueste zuerst).
+function buildAgendaContext(candidates, today, activitiesByLead = new Map()) {
+  const lines = candidates.map((l) => {
+    const parts = [`[${l.id}] ${l.company || l.name || "—"}`, `Status: ${l.status}`];
+    if (l.value) parts.push(`Wert: ${Math.round(Number(l.value))} €`);
+    if (l.ai && l.ai.score != null) parts.push(`Score: ${l.ai.score}/100 (${l.ai.grade || "?"})`);
+    const s = agendaDueState(l, today);
+    const due =
+      s === "overdue" ? `überfällig (war am ${l.nextStepAt})` :
+      s === "today" ? "heute fällig" :
+      s === "future" ? `geplant am ${l.nextStepAt}` : "keine Wiedervorlage geplant";
+    parts.push(`Nächster Schritt: ${l.nextStep || "—"} – ${due}`);
+    const since = daysSince(l.lastActivityAt);
+    if (since != null) parts.push(`letzte Aktivität vor ${since} Tg.`);
+    if (l.research) {
+      const r = l.research;
+      const hook = (Array.isArray(r.potenziale) && r.potenziale[0] && r.potenziale[0].titel)
+        || (typeof r.coldCallStrategie === "string" ? r.coldCallStrategie.slice(0, 140) : "");
+      if (hook) parts.push(`Aufhänger: ${hook}`);
+    }
+    // Notizen und Verlauf als eingerückte Folgezeilen (Grundlage für den
+    // nächsten Schritt). Beides knapp gedeckelt, damit der Kontext kompakt bleibt.
+    const extra = [];
+    const notes = oneLine(l.notes);
+    if (notes) extra.push(`  Notizen: ${notes.slice(0, 280)}`);
+    const acts = activitiesByLead.get(l.id) || [];
+    if (acts.length) {
+      const hist = acts.map((a) => {
+        const text = oneLine([a.title, a.body].filter(Boolean).join(" – ")).slice(0, 160);
+        const oc = oneLine(a.outcome);
+        return `${relDaysLabel(a.createdAt)} [${a.type}] ${text}${oc ? ` (${oc.slice(0, 40)})` : ""}`.trim();
+      }).join("; ");
+      extra.push(`  Verlauf: ${hist}`);
+    }
+    return ["- " + parts.join(" · "), ...extra].join("\n");
+  });
+
+  return { lines, ids: candidates.map((l) => l.id), count: candidates.length };
+}
+
+// Schema: bis zu drei priorisierte nächste Handlungen.
+const AGENDA_REC_SCHEMA = {
+  type: "object",
+  properties: {
+    recommendations: {
+      type: "array",
+      description: "Die wichtigsten nächsten Handlungen, höchste Priorität zuerst. Höchstens drei Einträge.",
+      items: {
+        type: "object",
+        properties: {
+          leadId: { type: "string", description: "ID des Leads aus der vorgelegten Liste (der Wert in eckigen Klammern). Nur vorhandene IDs verwenden." },
+          action: { type: "string", description: "Konkrete, sofort umsetzbare Handlung als kurzer Imperativ (z. B. 'Anrufen und Angebot nachfassen')." },
+          reason: { type: "string", description: "Eine kurze Begründung, warum diese Handlung jetzt dran ist (belegtes Signal aus der Liste)." },
+          priority: { type: "string", enum: ["hoch", "mittel", "niedrig"] },
+        },
+        required: ["leadId", "action", "reason", "priority"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["recommendations"],
+  additionalProperties: false,
+};
+
+// KI-Tagesempfehlung: die nächsten (bis zu 3) Handlungen über alle offenen Leads.
+app.post("/api/agenda/recommendations", aiLimiter, wrap(async (req, res) => {
+  if (!requireAi(res)) return;
+  const leads = await db.listLeads();
+  const today = agendaToday(req);
+  const candidates = selectAgendaCandidates(leads, today);
+  // Nichts zu tun → ohne KI-Aufruf (und damit ohne Kosten) leer antworten.
+  if (!candidates.length) return res.json({ recommendations: [], generatedAt: new Date().toISOString() });
+  // Letzte echte Touchpoints je Kandidat (ohne automatische ai/system-Einträge)
+  // als Grundlage für den nächsten Schritt – in einer Abfrage. Ein Fehler hier
+  // darf die Empfehlung nicht verhindern (dann eben ohne Verlauf).
+  let activitiesByLead = new Map();
+  try {
+    activitiesByLead = await db.listRecentActivitiesForLeads(candidates.map((l) => l.id), 3, ["ai", "system"]);
+  } catch (err) {
+    (req.log || logger).warn("agenda_activities_load_failed", { error: err.message });
+  }
+  const ctx = buildAgendaContext(candidates, today, activitiesByLead);
+  try {
+    const raw = await callClaude(
+      prompts.get("agenda.system"),
+      prompts.render("agenda.user", { leadList: ctx.lines.join("\n") }),
+      { json: true, kind: "agenda-recommendations", schema: AGENDA_REC_SCHEMA, maxTokens: 1200 }
+    );
+    const parsed = JSON.parse(raw);
+    const valid = new Set(ctx.ids);
+    const byId = new Map(leads.map((l) => [l.id, l]));
+    const seen = new Set();
+    const recommendations = [];
+    for (const r of (Array.isArray(parsed.recommendations) ? parsed.recommendations : [])) {
+      if (!r || !valid.has(r.leadId) || seen.has(r.leadId)) continue;
+      seen.add(r.leadId);
+      const l = byId.get(r.leadId);
+      recommendations.push({
+        leadId: r.leadId,
+        company: (l && (l.company || l.name)) || "—",
+        status: l ? l.status : "",
+        nextStepAt: l ? l.nextStepAt : null,
+        action: String(r.action || "").trim().slice(0, 300),
+        reason: String(r.reason || "").trim().slice(0, 300),
+        priority: ["hoch", "mittel", "niedrig"].includes(r.priority) ? r.priority : "mittel",
+      });
+      if (recommendations.length >= 3) break;
+    }
+    res.json({ recommendations, generatedAt: new Date().toISOString() });
+  } catch (err) {
+    (req.log || logger).error("agenda_recommendations_failed", { error: err.message });
+    res.status(502).json({ error: "KI-Empfehlung fehlgeschlagen. Bitte erneut versuchen." });
   }
 }));
 
@@ -1293,6 +1504,13 @@ db.init()
       if (savedTagColors) tagColors = sanitizeTagColors(JSON.parse(savedTagColors));
     } catch (err) {
       logger.warn("tag_colors_load_failed", { error: err.message });
+    }
+    // Gespeicherte Prompt-Anpassungen laden (nur Abweichungen vom Default).
+    try {
+      const savedPrompts = await db.getSetting(PROMPTS_SETTING_KEY);
+      if (savedPrompts) prompts.setOverrides(JSON.parse(savedPrompts));
+    } catch (err) {
+      logger.warn("prompt_overrides_load_failed", { error: err.message });
     }
     if (usingDefaultDbPassword()) {
       logger.warn("default_db_password", {
