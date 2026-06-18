@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=38" />
+  <link rel="stylesheet" href="styles.css?v=39" />
   <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
@@ -89,6 +89,9 @@
 
   <!-- ============ BERICHTE-ANSICHT ============ -->
   <main class="container hidden" id="reportsView" aria-live="polite"></main>
+
+  <!-- ============ PROMPTS-ANSICHT (KI-Prompts bearbeiten) ============ -->
+  <main class="container hidden" id="promptsView" aria-live="polite"></main>
 
   <!-- Recherche-Modal: Lead per Website/Name automatisch recherchieren -->
   <div class="modal-overlay hidden" id="researchModal">
@@ -201,6 +204,12 @@
               <button type="button" class="btn btn-primary" id="importProspectsCsvBtn" disabled>⬆️ Importieren</button>
             </div>
           </div>
+        </div>
+
+        <div class="settings-section">
+          <h3 class="field-head">🧠 KI-Prompts<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Alle im Programm verwendeten KI-Prompts (Recherche, Discovery, Scoring, E-Mail, Empfehlungen) ansehen und anpassen. Daten lassen sich per Platzhalter <code>&#123;&#123;…&#125;&#125;</code> einbinden. Änderungen werden serverseitig gespeichert und gelten global.</span></span></h3>
+          <p class="hint">Passe die Prompts aller KI-Funktionen an. Eingaben werden über Platzhalter wie <code>&#123;&#123;leadContext&#125;&#125;</code> eingefügt.</p>
+          <button type="button" class="btn" id="openPromptsBtn">🧠 Prompts bearbeiten →</button>
         </div>
 
         <div class="form-actions">
@@ -316,6 +325,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=41"></script>
+  <script src="app.js?v=42"></script>
 </body>
 </html>

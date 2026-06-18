@@ -5,6 +5,7 @@ const path = require("path");
 const crypto = require("crypto");
 const fs = require("fs");
 const db = require("./db");
+const prompts = require("./prompts");
 const { researchCompany, discoverCompanies } = require("./research");
 const { leadsToCsv, prospectsToCsv, parseCsv, csvRowsToLeads, csvRowsToProspects, parseNumber, leadsToXlsxXml } = require("./exporters");
 const { logger, httpLogger } = require("./logger");
@@ -151,6 +152,10 @@ let staleDays = DEFAULT_STALE_DAYS;
 // Tag-Farben (global, case-insensitiv pro Tag-Name): { name: "#rrggbb" }.
 const TAG_COLORS_SETTING_KEY = "tag_colors";
 let tagColors = {};
+
+// Editierbare KI-Prompts: nur die Abweichungen vom Default werden als JSON
+// persistiert (Registry-Logik in prompts.js).
+const PROMPTS_SETTING_KEY = "prompt_overrides";
 
 function sanitizeStageProbabilities(input) {
   const out = { ...DEFAULT_STAGE_PROBABILITIES };
@@ -611,6 +616,34 @@ app.put("/api/tags/color", wrap(async (req, res) => {
   if (keys.length > 300) for (const k of keys.slice(0, keys.length - 300)) delete tagColors[k];
   await db.setSetting(TAG_COLORS_SETTING_KEY, JSON.stringify(tagColors));
   res.json({ tagColors });
+}));
+
+// --- Editierbare KI-Prompts ------------------------------------------------
+// Alle im Programm verwendeten Prompts inkl. Default, aktuellem Wert und
+// Platzhaltern – Grundlage der Prompts-Editor-Seite (Einstellungen → Prompts).
+app.get("/api/prompts", (req, res) => {
+  res.json({ prompts: prompts.list() });
+});
+
+// Prompt-Anpassungen speichern. Body: { prompts: { key: text, ... } } – kann
+// auch nur einzelne Prompts enthalten (Teil-Update). Werte gleich dem Default
+// gelten als „nicht angepasst"; nur echte Abweichungen werden persistiert.
+app.put("/api/prompts", wrap(async (req, res) => {
+  const incoming = req.body && req.body.prompts;
+  if (!incoming || typeof incoming !== "object" || Array.isArray(incoming)) {
+    return res.status(400).json({ error: "Erwartet { prompts: { key: text } }." });
+  }
+  // Eingehende über die bestehenden Anpassungen legen, damit ein Teil-Update die
+  // übrigen nicht verwirft. setOverrides verwirft alles, was dem Default gleicht.
+  let current = {};
+  try { current = JSON.parse(prompts.serialize()) || {}; } catch { current = {}; }
+  const merged = { ...current };
+  for (const [k, v] of Object.entries(incoming)) {
+    if (prompts.isKnown(k) && typeof v === "string") merged[k] = v;
+  }
+  prompts.setOverrides(merged);
+  await db.setSetting(PROMPTS_SETTING_KEY, prompts.serialize());
+  res.json({ prompts: prompts.list() });
 }));
 
 // Liste aller Leads
@@ -1121,15 +1154,8 @@ function requireAi(res) {
 // nach jeder Recherche genutzt.
 async function computeLeadScore(lead) {
   const raw = await callClaude(
-    "Du bist ein erfahrener B2B-Vertriebsanalyst für FU/GE Solutions (Integration & Entwicklung " +
-      "individueller KI-Systeme im Mittelstand/Handwerk). Bewerte knapp Qualität und Abschlusspotenzial eines Leads " +
-      "und schätze den realistischen Auftragswert in EUR – immer auf 12-Monats-Basis (Einmalprojekt = Projektwert; " +
-      "laufende/SaaS-Erlöse wie TelKI = Summe der ersten 12 Monate). Leite den Wert aus belegten Signalen ab " +
-      "(Unternehmensgröße/Standorte/Branche, passende Leistung: Potenzialanalyse, Workshop, KI-Integration oder " +
-      "TelKI-SaaS). Sei eher konservativ; wenn keine seriöse Schätzung möglich ist, value=0. " +
-      "Fasse dich kurz – KEINE Handlungsempfehlungen oder Cold-Call-Strategie (die stehen bereits im Dossier). " +
-      "Antworte ausschließlich im geforderten JSON-Format auf Deutsch.",
-    `Bewerte diesen Lead von 0 (kalt) bis 100 (sehr heiß), vergib eine Schulnote A–D und schätze den 12-Monats-Auftragswert.\n\n${leadContext(lead)}`,
+    prompts.get("score.system"),
+    prompts.render("score.user", { leadContext: leadContext(lead) }),
     { json: true, kind: "score" }
   );
   const result = JSON.parse(raw);
@@ -1190,12 +1216,8 @@ app.post("/api/leads/:id/email", aiLimiter, wrap(async (req, res) => {
       : "Erstkontakt herstellen und ein kurzes Kennenlerngespräch vorschlagen";
   try {
     const text = await callClaude(
-      "Du bist Vertriebstexter für FU/GE Solutions (Integration & Entwicklung individueller KI-Systeme im Mittelstand/Handwerk). " +
-        "Schreibe eine personalisierte, freundliche und prägnante Akquise-E-Mail auf Deutsch. Knüpfe an einen konkreten, " +
-        "belegten Ansatzpunkt aus dem Recherche-Dossier an (z. B. eine Schwachstelle oder ein Potenzial). " +
-        "Verwende eine klare Betreffzeile (Format: 'Betreff: ...'), eine persönliche Ansprache und einen klaren Call-to-Action. " +
-        "Keine Floskeln, kein Spam-Ton, maximal 150 Wörter.",
-      `Ziel der E-Mail: ${goal}\n\nLead:\n${leadContext(lead)}`,
+      prompts.get("email.system"),
+      prompts.render("email.user", { goal, leadContext: leadContext(lead) }),
       { kind: "email" }
     );
     await logActivity(lead.id, { type: "email", title: "KI-E-Mail-Entwurf erstellt", body: text }, actor(req));
@@ -1213,10 +1235,8 @@ app.post("/api/leads/:id/insights", aiLimiter, wrap(async (req, res) => {
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
   try {
     const text = await callClaude(
-      "Du bist Vertriebs-Coach für FU/GE Solutions und bereitest Cold Calls vor. Gib eine kurze, konkrete " +
-        "Handlungsempfehlung auf Deutsch: 2–4 priorisierte nächste Schritte als Aufzählung, abgeleitet aus den " +
-        "belegten Ansatzpunkten und Potenzialen des Recherche-Dossiers. Pragmatisch und umsetzbar.",
-      `Was sind die besten nächsten Schritte für diesen Lead?\n\n${leadContext(lead)}`,
+      prompts.get("insights.system"),
+      prompts.render("insights.user", { leadContext: leadContext(lead) }),
       { kind: "insight" }
     );
     await logActivity(lead.id, { type: "ai", title: "KI-Empfehlung erstellt", body: text }, actor(req));
@@ -1385,17 +1405,8 @@ app.post("/api/agenda/recommendations", aiLimiter, wrap(async (req, res) => {
   const ctx = buildAgendaContext(candidates, today, activitiesByLead);
   try {
     const raw = await callClaude(
-      "Du bist Vertriebs-Coach für FU/GE Solutions (Integration & Entwicklung individueller KI-Systeme im " +
-        "Mittelstand/Handwerk). Dir liegt die heutige Arbeitsliste offener Leads vor – je Lead mit Kernsignalen " +
-        "(Wiedervorlage, Score, Wert, Stillstand, Aufhänger) sowie den Notizen und dem bisherigen Verlauf " +
-        "(letzte Aktivitäten). Wähle die wichtigsten nächsten Handlungen aus und priorisiere sie. Regeln: " +
-        "überfällige Wiedervorlagen und heiße Leads (hoher Score) zuerst; wertvolle, lange stillstehende Leads " +
-        "nicht vergessen; leite die Handlung aus Notizen und Verlauf ab, sodass sie der logische NÄCHSTE Schritt " +
-        "ist (niemals etwas empfehlen, das laut Verlauf bereits erledigt wurde); genau ein Lead pro Empfehlung " +
-        "und jeden Lead höchstens einmal. Nenne ausschließlich Leads aus der Liste und verwende exakt deren ID. " +
-        "Formuliere jede Handlung konkret und umsetzbar. Antworte ausschließlich im geforderten JSON-Format auf Deutsch.",
-      "Heutige Lead-Liste:\n\n" + ctx.lines.join("\n") +
-        "\n\nEmpfiehl die nächsten 3 Handlungen (oder weniger, wenn es weniger sinnvolle gibt), wichtigste zuerst.",
+      prompts.get("agenda.system"),
+      prompts.render("agenda.user", { leadList: ctx.lines.join("\n") }),
       { json: true, kind: "agenda-recommendations", schema: AGENDA_REC_SCHEMA, maxTokens: 1200 }
     );
     const parsed = JSON.parse(raw);
@@ -1493,6 +1504,13 @@ db.init()
       if (savedTagColors) tagColors = sanitizeTagColors(JSON.parse(savedTagColors));
     } catch (err) {
       logger.warn("tag_colors_load_failed", { error: err.message });
+    }
+    // Gespeicherte Prompt-Anpassungen laden (nur Abweichungen vom Default).
+    try {
+      const savedPrompts = await db.getSetting(PROMPTS_SETTING_KEY);
+      if (savedPrompts) prompts.setOverrides(JSON.parse(savedPrompts));
+    } catch (err) {
+      logger.warn("prompt_overrides_load_failed", { error: err.message });
     }
     if (usingDefaultDbPassword()) {
       logger.warn("default_db_password", {

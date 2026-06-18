@@ -253,7 +253,7 @@ function populateStatusSelect() {
 }
 
 // --- Routing (Liste ⇄ Detail ⇄ Heute ⇄ Prospects ⇄ Berichte) ---------------
-const VIEWS = ["listView", "detailView", "agendaView", "prospectsView", "reportsView"];
+const VIEWS = ["listView", "detailView", "agendaView", "prospectsView", "reportsView", "promptsView"];
 function showOnly(viewId) {
   for (const v of VIEWS) $("#" + v).classList.toggle("hidden", v !== viewId);
 }
@@ -271,6 +271,7 @@ function router() {
   if (location.hash === "#/discovery") { location.hash = "#/prospects"; return; }
   if (location.hash === "#/prospects") return showProspects();
   if (location.hash === "#/reports") return showReports();
+  if (location.hash === "#/prompts") return showPrompts();
   showList();
 }
 
@@ -304,6 +305,14 @@ function showReports() {
   showOnly("reportsView");
   setActiveNav("reports");
   renderReportsView();
+  window.scrollTo(0, 0);
+}
+
+function showPrompts() {
+  detailId = null;
+  showOnly("promptsView");
+  setActiveNav("");
+  renderPromptsView();
   window.scrollTo(0, 0);
 }
 
@@ -1354,6 +1363,8 @@ function bindEvents() {
   $("#settingsBtn").addEventListener("click", openSettingsModal);
   $("#closeSettingsModal").addEventListener("click", closeSettingsModal);
   $("#cancelSettingsBtn").addEventListener("click", closeSettingsModal);
+  // „Prompts bearbeiten" schließt das Modal und öffnet die Prompts-Seite.
+  $("#openPromptsBtn").addEventListener("click", () => { closeSettingsModal(); location.hash = "#/prompts"; });
   $("#settingsForm").addEventListener("submit", saveSettings);
   $("#stageProbFields").addEventListener("input", onProbInput);
   $("#exportCsvBtn").addEventListener("click", () => downloadFile("/api/leads/export.csv"));
@@ -2910,6 +2921,126 @@ function renderAgenda() {
         ${noStep.slice(0, 25).map(agendaItemHtml).join("")}
       </section>` : ""}
   `;
+}
+
+// --- KI-Prompts bearbeiten -------------------------------------------------
+let promptList = []; // zuletzt vom Server geladene Prompts (Liste aus /api/prompts)
+
+// Platzhalter als klickbare Chips (Einfügen an der Cursorposition).
+function placeholderChipsHtml(p) {
+  if (!p.placeholders || !p.placeholders.length) return `<span class="ph-none">keine Platzhalter</span>`;
+  return p.placeholders.map((ph) =>
+    `<button type="button" class="ph-chip" data-ph="${esc(ph.name)}" data-key="${esc(p.key)}" title="${esc(ph.description || "")}">{{${esc(ph.name)}}}</button>`
+  ).join("");
+}
+
+function promptCardHtml(p) {
+  const custom = p.isCustom ? `<span class="prompt-badge">angepasst</span>` : "";
+  const rows = Math.min(20, Math.max(4, Math.ceil((p.value || "").length / 90)));
+  return `<div class="prompt-item" data-prompt="${esc(p.key)}">
+    <div class="prompt-head">
+      <span class="prompt-title">${esc(p.label)}${custom}</span>
+      <button type="button" class="btn btn-sm prompt-reset" data-reset="${esc(p.key)}" ${p.isCustom ? "" : "disabled"}>↩︎ Zurücksetzen</button>
+    </div>
+    <p class="prompt-desc">${esc(p.description || "")}</p>
+    <div class="prompt-ph">Platzhalter: ${placeholderChipsHtml(p)}</div>
+    <textarea class="prompt-text" data-key="${esc(p.key)}" rows="${rows}" spellcheck="false">${esc(p.value || "")}</textarea>
+  </div>`;
+}
+
+function renderPromptsView() {
+  const v = $("#promptsView");
+  if (!promptList.length) {
+    v.innerHTML = `<div class="view-head"><h2>🧠 KI-Prompts</h2></div>
+      <section class="card"><div class="ai-loading"><span class="spinner"></span> Lade Prompts…</div></section>`;
+    loadPrompts();
+    return;
+  }
+  // Nach Gruppe gliedern (Reihenfolge des ersten Auftretens beibehalten).
+  const groups = [];
+  const byGroup = {};
+  for (const p of promptList) {
+    if (!byGroup[p.group]) { byGroup[p.group] = []; groups.push(p.group); }
+    byGroup[p.group].push(p);
+  }
+  const sections = groups.map((g) => `
+    <section class="card prompt-group">
+      <h3>${esc(g)}</h3>
+      ${byGroup[g].map(promptCardHtml).join("")}
+    </section>`).join("");
+
+  v.innerHTML = `
+    <div class="view-head view-head-row">
+      <div>
+        <h2>🧠 KI-Prompts</h2>
+        <p class="d-muted">Alle KI-Prompts anpassen. Daten per Platzhalter <code>{{…}}</code> einfügen. Änderungen gelten global.</p>
+      </div>
+      <a class="btn" href="#/">← Zurück</a>
+    </div>
+    ${sections}
+    <div class="prompt-actions">
+      <span class="d-muted">Änderungen werden erst nach dem Speichern aktiv.</span>
+      <button type="button" class="btn btn-primary" id="promptsSaveBtn">💾 Speichern</button>
+    </div>`;
+
+  $("#promptsSaveBtn").addEventListener("click", savePrompts);
+  v.querySelectorAll(".ph-chip").forEach((c) => c.addEventListener("click", () => {
+    const ta = v.querySelector(`textarea.prompt-text[data-key="${c.dataset.key}"]`);
+    if (ta) insertAtCursor(ta, `{{${c.dataset.ph}}}`);
+  }));
+  v.querySelectorAll(".prompt-reset").forEach((b) => b.addEventListener("click", () => resetPrompt(b.dataset.reset)));
+}
+
+async function loadPrompts() {
+  try {
+    const data = await api("/api/prompts");
+    promptList = Array.isArray(data.prompts) ? data.prompts : [];
+    renderPromptsView();
+  } catch (err) {
+    $("#promptsView").innerHTML = `<div class="view-head"><h2>🧠 KI-Prompts</h2></div>
+      <section class="card"><p class="warn">Konnte Prompts nicht laden: ${esc(err.message)}</p></section>`;
+  }
+}
+
+function collectPromptValues() {
+  const out = {};
+  document.querySelectorAll("#promptsView textarea.prompt-text").forEach((ta) => { out[ta.dataset.key] = ta.value; });
+  return out;
+}
+
+async function savePrompts() {
+  const btn = $("#promptsSaveBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "⏳ Speichern…"; }
+  try {
+    const data = await api("/api/prompts", {
+      method: "PUT",
+      body: JSON.stringify({ prompts: collectPromptValues() }),
+    });
+    promptList = Array.isArray(data.prompts) ? data.prompts : promptList;
+    toast("Prompts gespeichert", "success");
+    renderPromptsView();
+  } catch (err) {
+    toast(err.message, "error");
+    if (btn) { btn.disabled = false; btn.textContent = "💾 Speichern"; }
+  }
+}
+
+// Setzt einen Prompt im Editor auf seinen Default zurück (erst nach Speichern aktiv).
+function resetPrompt(key) {
+  const p = promptList.find((x) => x.key === key);
+  if (!p) return;
+  const ta = document.querySelector(`#promptsView textarea.prompt-text[data-key="${key}"]`);
+  if (ta) { ta.value = p.default || ""; ta.focus(); }
+}
+
+// Fügt Text an der Cursorposition eines Textareas ein.
+function insertAtCursor(ta, text) {
+  const start = ta.selectionStart != null ? ta.selectionStart : ta.value.length;
+  const end = ta.selectionEnd != null ? ta.selectionEnd : ta.value.length;
+  ta.value = ta.value.slice(0, start) + text + ta.value.slice(end);
+  const pos = start + text.length;
+  ta.focus();
+  ta.setSelectionRange(pos, pos);
 }
 
 // --- Mehrfachauswahl (Bulk) ------------------------------------------------

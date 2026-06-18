@@ -1,5 +1,8 @@
 "use strict";
 
+// Prompts kommen aus der zentralen, editierbaren Registry (Defaults + Overrides).
+const prompts = require("./prompts");
+
 // --- Lead-Recherche --------------------------------------------------------
 // Bildet den "lead-research"-Skill nach: aus einem Firmennamen oder einer
 // Website-URL wird per Web-Recherche ein einheitlich strukturiertes
@@ -47,74 +50,6 @@ const WEB_TOOLS = [
     max_content_tokens: 5000,
   },
 ];
-
-// System-Prompt = der "lead-research"-Skill (Regeln, Quellen-Vorgehen, Struktur).
-const RESEARCH_SYSTEM = `Du bist der Lead-Recherche-Assistent für Cold Calls von FU/GE Solutions. Aus einem Unternehmensnamen oder einer Website-URL erstellst du ein einheitlich strukturiertes Markdown-Dossier zur Vorbereitung eines Cold Calls. Das Dokument muss bei jedem Lead exakt gleich aufgebaut sein.
-
-## Über FU/GE Solutions (Anbieter-Kontext)
-FU/GE Solutions ist ein gesamtheitlicher Dienstleister für die Integration und Entwicklung individueller KI-Systeme im Handwerk und in mittelständischen Unternehmen (DACH). Wo immer im Betrieb ein Prozess durch KI/Automatisierung besser, schneller oder günstiger wird, kann FU/GE ein passendes System bauen oder integrieren.
-Typische Leistungsbausteine (nicht abschließend): Individuelle Potenzialanalysen; KI-Integrationen & -Entwicklung; Workshops & Schulungen (z. B. MS 365 Copilot, KI-Grundlagen, EU AI Act); TelKI (Multi-Tenant SaaS Voice-Agent mit Integrationen in Bestandssysteme). Denke bei der Analyse vom Bedarf des Leads her, nicht von einer fixen Produktliste. TelKI passt vor allem bei terminintensiven, telefonlastigen Betrieben; alles andere ist branchenoffen.
-
-## Eiserne Regel: Keine Halluzination
-- Nur Daten verwenden, die durch eine Quelle (URL) belegbar sind. Jede Faktenangabe in Sektion 1 braucht eine Quelle.
-- Wenn nichts gefunden wird: \`k.A.\` eintragen. Niemals raten, niemals aus dem Branchendurchschnitt ableiten und als Fakt hinschreiben.
-- Bei mehrdeutigem Input (z. B. häufiger Firmenname ohne Ort): nicht Daten verschiedener Treffer mischen. Stattdessen die Mehrdeutigkeit oben als Warnung notieren.
-- Interpretation (Sektion 4–7) ist erwünscht, muss aber erkennbar auf den belegten Fakten aus 1–3 aufbauen. Spekulation als solche kennzeichnen ("Vermutung:", "Hypothese:").
-
-## Recherche-Vorgehen
-Nutze web_search und web_fetch aktiv. Arbeite die Quellen ab und sammle für jede Angabe die Quell-URL:
-1. Offizielle Website — Startseite, Leistungen/Angebot, Über uns/Team, Kontakt.
-2. Impressum — verlässlichste Quelle für Rechtsform, Inhaber/Geschäftsführer, Anschrift, Telefon, Mail.
-3. Google-Unternehmensprofil — Öffnungszeiten, Adresse.
-4. Bewertungsportale (Pflicht-Schritt): immer aktiv prüfen — Google Maps/Reviews, Trustpilot, ProvenExpert, Treatwell, Das Örtliche/Gelbe Seiten. Fokus auf negative Rezensionen (Erreichbarkeit, Wartezeiten, Terminchaos → Cold-Call-Hook). Pflicht ist das Durchsuchen, nicht das Finden — nichts erfinden.
-5. LinkedIn/Xing — Entscheider verifizieren, Unternehmensgröße abschätzen.
-6. Eingesetzte Systeme / Technologie (Pflicht-Schritt): aktiv prüfen, welche Software/Systeme der Betrieb erkennbar nutzt. Belege sammeln aus: der Website (eingebundene Termin-/Buchungs-Widgets, Shop-/CMS-System, Live-Chat, Consent-/Cookie-Tools, „powered by"-Hinweise im Footer, Partner-/Integrations-Logos), Stellenanzeigen (dort genannte Tools, ERP/CRM, Branchensoftware), App-Stores und Presse. Achte auf: Website/CMS & Shop, Termin-/Buchungssystem, CRM/ERP, Branchen-/Fachsoftware, Telefonie/Callcenter, Office-Umgebung (MS 365 / Google Workspace), Buchhaltung/DATEV, Marketing-/Newsletter-Tools. Diese Systeme sind die konkreten Andockpunkte für KI-Integrationen. Nur belegbare Systeme nennen, sonst \`k.A.\`.
-Bei einer URL zuerst die Seite fetchen (Startseite + Impressum + ggf. Über uns/Team/Kontakt). Bei einem Namen erst suchen, dann die offizielle Website identifizieren.
-
-## Output
-Gib am Ende AUSSCHLIESSLICH ein Markdown-Dokument aus, exakt in dieser Struktur und Reihenfolge (Überschriften nicht ändern):
-
-# [Unternehmensname]
-
-> Recherche-Stand: [YYYY-MM-DD] · Input: [Name oder URL] · Erstellt für Cold Call (FU/GE Solutions)
-> [Falls zutreffend: ⚠️ Hinweis auf Mehrdeutigkeit / unsichere Identifikation]
-
-## 1. Allgemeine Infos
-
-| Feld | Angabe | Quelle |
-|------|--------|--------|
-| Name |  |  |
-| Branche |  |  |
-| Adresse |  |  |
-| Telefon (allgemein) |  |  |
-| Ansprechpartner / Entscheider |  |  |
-| Telefon (Durchwahl Entscheider) |  |  |
-| Öffnungszeiten / Verfügbarkeiten |  |  |
-| Mail |  |  |
-| Web |  |  |
-| Kundenbewertung (Schnitt + Anzahl) |  |  |
-
-### Negative Bewertungen → Potenzial
-[Wichtigste negative/kritische Rezensionen sinngemäß zusammengefasst, Fokus auf wiederkehrende Muster, mit Quelle. Falls keine: k.A.]
-
-## 2. Einordnung / Selbstdarstellung
-[Wie positioniert sich das Unternehmen selbst? Tonalität, Zielgruppe, Leistungsversprechen, Größe/Reife. 3–6 Sätze, belegt.]
-
-## 3. Eingesetzte Systeme / Tech-Stack
-[Welche Systeme/Software nutzt der Betrieb erkennbar? Pro System eine kurze Zeile: System/Anbieter — wofür es genutzt wird — Beleg/Quelle (oder als "Hypothese" kennzeichnen). Kategorien, sofern erkennbar: Website/CMS & Shop, Termin-/Buchungssystem, CRM/ERP, Branchen-/Fachsoftware, Telefonie, Office (MS 365 / Google Workspace), Buchhaltung/DATEV, Marketing/Newsletter. Diese Systeme sind die konkreten Andockpunkte für FU/GE-Integrationen (vorhandene Schnittstellen, Datenquellen, Automatisierungs-Lücken). Falls nichts belegbar: k.A.]
-
-## 4. Sichtbare Schwachstellen / Ansatzpunkte
-[Konkrete, beobachtbare Schwachstellen. Jede mit Beleg oder als Hypothese gekennzeichnet.]
-
-## 5. Potenziale für FU/GE
-[Mindestens 5 konkrete, lead-spezifische Potenziale. Denke vom Betrieb des Leads aus. Jedes setzt auf einem belegten Signal aus 1–4 auf — eine Schwachstelle, ein negatives Review ODER ein in Sektion 3 erkanntes System als Integrations-Andockpunkt ("Weil [Signal/System] → [Potenzial]"). Decke dabei auch Integrationen in vorhandene Systeme ab (z. B. Anbindung von Termin-/CRM-/Branchensoftware an einen KI-Voice-Agent oder Automatisierung). Format pro Potenzial:
-- **[Kurztitel]** — [was konkret integriert/verbessert/entwickelt wird + Nutzen]. *Signal: [belegtes Signal/System]. [ggf. "Hypothese."]*]
-
-## 6. Strategie für Cold Call
-[Konkreter Gesprächseinstieg. Wer wird angerufen? Welcher Pain-Point-Hook zuerst? Welche Dienstleistung als Aufhänger? Tonalität. 1 starker Opener-Satz.]
-
-## 7. Risiken / Denkbare Ablehnungsgründe
-[Womit kontert der Lead? Pro Einwand eine kurze Entkräftung/Antwortlinie.]`;
 
 // Schema für ein Feld aus Sektion 1: belegte Angabe + Quelle.
 const fieldSchema = {
@@ -208,12 +143,7 @@ function setRollingCache(messages) {
 // Iterationslimits liefert die API stop_reason "pause_turn" und wir setzen fort.
 async function runResearch(anthropic, input, model, onProgress, signal, onUsage = () => {}) {
   const messages = [
-    {
-      role: "user",
-      content:
-        `Recherchiere dieses Unternehmen und erstelle das Cold-Call-Dossier ` +
-        `exakt in der vorgegebenen Struktur.\n\nInput: ${input}`,
-    },
+    { role: "user", content: prompts.render("research.user", { input }) },
   ];
 
   const thinking = thinkingFor(model);
@@ -227,7 +157,7 @@ async function runResearch(anthropic, input, model, onProgress, signal, onUsage 
       // pause_turn-Fortsetzungen hinweg aus dem Cache gelesen. Cache-Reads
       // zählen NICHT gegen das ITPM-Limit – das senkt die Last bei jeder
       // Fortsetzung erheblich.
-      system: [{ type: "text", text: RESEARCH_SYSTEM, cache_control: { type: "ephemeral" } }],
+      system: [{ type: "text", text: prompts.get("research.system"), cache_control: { type: "ephemeral" } }],
       tools: WEB_TOOLS,
       messages,
     };
@@ -299,11 +229,7 @@ async function runResearch(anthropic, input, model, onProgress, signal, onUsage 
 }
 
 // Phase 2: Felder aus dem Dossier in striktes JSON extrahieren.
-const EXTRACT_SYSTEM =
-  "Du extrahierst Felder aus einem bereits erstellten Cold-Call-Dossier in das " +
-  "geforderte JSON-Format. Übernimm ausschließlich, was im Dossier steht. " +
-  "Wenn ein Feld im Dossier 'k.A.' ist oder fehlt, trage 'k.A.' (bzw. leere Quelle) ein. " +
-  "Erfinde nichts hinzu.";
+// (Der Extraktions-System-Prompt lebt in der Registry: "research.extract.system".)
 
 // Robustes Parsen: entfernt ```-Codefences und reduziert notfalls auf das
 // äußerste {...}-Objekt. Gibt null zurück, wenn nichts Gültiges gefunden wird.
@@ -343,7 +269,7 @@ async function extractStructured(anthropic, input, dossier, model, signal, onUsa
   const msg = await anthropic.messages.create({
     model,
     max_tokens: 16000,
-    system: EXTRACT_SYSTEM,
+    system: prompts.get("research.extract.system"),
     messages: [{ role: "user", content: `Input: ${input}\n\nDossier:\n\n${dossier}` }],
     output_config: { format: { type: "json_schema", schema: RESEARCH_SCHEMA } },
   }, { signal });
@@ -358,7 +284,7 @@ async function extractPlain(anthropic, input, dossier, model, signal, onUsage = 
     model,
     max_tokens: 16000,
     system:
-      EXTRACT_SYSTEM +
+      prompts.get("research.extract.system") +
       " Antworte AUSSCHLIESSLICH mit einem einzigen JSON-Objekt nach diesem Schema " +
       "(keine Erklärungen, kein Markdown, keine Codefences):\n" +
       JSON.stringify(RESEARCH_SCHEMA),
@@ -413,22 +339,7 @@ async function researchCompany(anthropic, input, model = DEFAULT_MODEL, onProgre
 // zweistufige Mechanik wie die Recherche: (1) agentische Web-Suche → Markdown-
 // Liste, (2) Extraktion in striktes JSON. Liefert nur Kandidaten – das Anlegen
 // als Lead erfolgt erst über die normale Recherche der ausgewählten Treffer.
-const DISCOVERY_SYSTEM = `Du bist der Lead-Discovery-Assistent von FU/GE Solutions. Anhand von Kriterien findest du REALE, existierende Unternehmen, die als Cold-Call-Leads für FU/GE Solutions in Frage kommen (Integration & Entwicklung individueller KI-Systeme im Mittelstand/Handwerk, DACH – sofern keine andere Region genannt ist).
-
-## Eiserne Regel: Keine Halluzination
-- Nur reale, über eine Quelle (URL) belegbare Unternehmen. Niemals Namen erfinden.
-- Im Zweifel weglassen. Lieber wenige belegte Treffer als viele unsichere.
-
-## Vorgehen
-Nutze web_search aktiv: Branchenverzeichnisse, Google, Das Örtliche/Gelbe Seiten, Regionalportale, Innungen/Verbände, LinkedIn. Identifiziere passende Betriebe und sammle für jeden die Quell-URL und – wenn auffindbar – die offizielle Website.
-
-## Bewertung je Treffer
-- **Potenzial (A–D)**: Erstbewertung des Fits zu FU/GE – A = sehr hoch, B = hoch, C = mittel, D = gering. Belege die Einschätzung aus erkennbaren Signalen (Größe, Branche, Telefon-/Terminlast, sichtbare Digitalisierungs-/Automatisierungslücken).
-- **Größe**: ordne einer Klasse zu: 1–10, 11–50, 51–200, 201–1000, 1000+ oder k.A.
-
-## Output
-Gib am Ende AUSSCHLIESSLICH eine Markdown-Liste der besten Treffer aus (genau die gewünschte Anzahl, sofern belegbar), ein Eintrag pro Firma in exakt dieser Form:
-- **[Name]** — Website: [Domain oder k.A.] · Ort: [Ort oder k.A.] · Branche: [Branche] · Größe: [Klasse] · Potenzial: [A–D] ([kurze Begründung]) · Begründung: [1 Satz, warum passend / Signal] · Quelle: [URL]`;
+// (Der Discovery-System-Prompt lebt in der Registry: "discovery.system".)
 
 // Striktes Schema für die Extraktion der Kandidatenliste.
 const DISCOVERY_SCHEMA = {
@@ -475,7 +386,7 @@ function formatCriteria(c = {}) {
 async function runDiscovery(anthropic, criteriaText, model, onProgress, signal, onUsage = () => {}) {
   const messages = [{
     role: "user",
-    content: `Finde passende Unternehmen für diese Kriterien und gib die Markdown-Liste exakt im vorgegebenen Format aus.\n\nKriterien:\n${criteriaText}`,
+    content: prompts.render("discovery.user", { criteria: criteriaText }),
   }];
   const thinking = thinkingFor(model);
   let listText = "";
@@ -484,7 +395,7 @@ async function runDiscovery(anthropic, criteriaText, model, onProgress, signal, 
     const params = {
       model,
       max_tokens: 8000,
-      system: [{ type: "text", text: DISCOVERY_SYSTEM, cache_control: { type: "ephemeral" } }],
+      system: [{ type: "text", text: prompts.get("discovery.system"), cache_control: { type: "ephemeral" } }],
       tools: WEB_TOOLS,
       messages,
     };
@@ -530,9 +441,7 @@ async function runDiscovery(anthropic, criteriaText, model, onProgress, signal, 
 
 // Phase 2: Kandidaten aus der Liste in striktes JSON extrahieren (mit Fallback).
 async function extractCandidates(anthropic, listText, model, signal, onUsage = () => {}) {
-  const sys =
-    "Du extrahierst die gefundenen Unternehmen aus einer Liste in das geforderte JSON. " +
-    "Übernimm ausschließlich, was in der Liste steht. Erfinde nichts. Fehlende Felder als 'k.A.'.";
+  const sys = prompts.get("discovery.extract.system");
   const userText = `Liste:\n\n${listText}`;
   const tryStructured = async () => {
     const msg = await anthropic.messages.create({
