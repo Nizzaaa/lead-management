@@ -2532,27 +2532,32 @@ function costChart(days) {
   }
 
   const bw = plotW / days.length;
-  // Gestapelter Balken je Tag: unten KI-Recherche/Übrige (grün), oben Discovery
-  // (amber) – so heben sich die Discovery-Kosten farblich ab.
+  // Gestapelter Balken je Tag (von unten): KI-Recherche/Übrige (grün),
+  // KI-Empfehlung (blau), Discovery (amber) – so heben sich die jeweiligen
+  // Kostenarten farblich voneinander ab.
   const bars = days.map((d, i) => {
     const x = padL + i * bw;
     const total = d.value || 0;
     const disc = Math.min(Math.max(0, d.discovery || 0), total);
-    const other = total - disc;
+    const rec = Math.min(Math.max(0, d.recommend || 0), Math.max(0, total - disc));
+    const other = Math.max(0, total - disc - rec);
     const bx = x + bw * 0.18, bwid = bw * 0.64;
-    const hOther = top > 0 ? (other / top) * plotH : 0;
-    const hDisc = top > 0 ? (disc / top) * plotH : 0;
+    const hOf = (v) => (top > 0 ? (v / top) * plotH : 0);
+    const hOther = hOf(other), hRec = hOf(rec), hDisc = hOf(disc);
     const yOther = padT + plotH - hOther;
-    const yDisc = yOther - hDisc;
+    const yRec = yOther - hRec;
+    const yDisc = yRec - hDisc;
     const payload = esc(JSON.stringify({
-      day: d.day, value: total, discovery: disc, models: d.models || {},
+      day: d.day, value: total, discovery: disc, recommend: rec, models: d.models || {},
       researched: d.researched || 0, discovered: d.discovered || 0,
     }));
     const otherRect = hOther > 0 ? `<rect class="cc-bar" x="${bx}" y="${yOther}" width="${bwid}" height="${hOther}" rx="3" />` : "";
+    const recRect = hRec > 0 ? `<rect class="cc-bar-rec" x="${bx}" y="${yRec}" width="${bwid}" height="${hRec}" rx="3" />` : "";
     const discRect = hDisc > 0 ? `<rect class="cc-bar-disc" x="${bx}" y="${yDisc}" width="${bwid}" height="${hDisc}" rx="3" />` : "";
     return `<g class="cc-col" data-tip="${payload}">
         <rect class="cc-hit" x="${x}" y="${padT}" width="${bw}" height="${plotH}" />
         ${otherRect}
+        ${recRect}
         ${discRect}
         <text x="${x + bw / 2}" y="${H - 8}" class="cc-lbl">${esc(dayLabel(d.day))}</text>
       </g>`;
@@ -2568,6 +2573,7 @@ function costChart(days) {
     </div>
     <div class="cost-legend">
       <span class="cost-legend-item"><span class="ci-swatch ci-research"></span> KI-Recherche</span>
+      <span class="cost-legend-item"><span class="ci-swatch ci-rec"></span> KI-Empfehlung</span>
       <span class="cost-legend-item"><span class="ci-swatch ci-disc"></span> Discovery</span>
     </div>`;
 }
@@ -2590,9 +2596,13 @@ function wireCostChart(root) {
       const discRow = (Number(d.discovery) || 0) > 0
         ? `<div class="tip-row tip-disc"><span>· davon Discovery</span><span>${esc(usd(d.discovery))}</span></div>`
         : "";
+      const recRow = (Number(d.recommend) || 0) > 0
+        ? `<div class="tip-row tip-rec"><span>· davon KI-Empfehlung</span><span>${esc(usd(d.recommend))}</span></div>`
+        : "";
       tip.innerHTML = `<div class="tip-head">${esc(dayLabelLong(d.day))}</div>
         <div class="tip-row tip-total"><span>Gesamt</span><span>${esc(usd(d.value))}</span></div>
         ${discRow}
+        ${recRow}
         ${rows}
         <div class="tip-row tip-meta"><span>Recherchierte Leads</span><span>${Number(d.researched) || 0}</span></div>
         <div class="tip-row tip-meta"><span>Entdeckte Leads</span><span>${Number(d.discovered) || 0}</span></div>`;

@@ -563,10 +563,11 @@ async function getReport(statuses, probabilities = {}) {
   const costRes = await pool.query(
     `SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS day, model,
             (kind LIKE 'discovery%') AS is_discovery,
+            (kind LIKE 'agenda%') AS is_recommend,
             COALESCE(SUM(cost_usd),0)::float AS cost
      FROM ai_usage
      WHERE created_at >= date_trunc('day', now()) - interval '13 days'
-     GROUP BY 1, 2, 3`
+     GROUP BY 1, 2, 3, 4`
   );
   // Recherchierte & entdeckte Leads je Tag – verlustfrei aus report_events
   // (bleiben erhalten, auch wenn Leads/Prospects gelöscht oder konvertiert werden).
@@ -579,10 +580,11 @@ async function getReport(statuses, probabilities = {}) {
   );
   const byDay = {};
   for (const r of costRes.rows) {
-    const e = (byDay[r.day] = byDay[r.day] || { cost: 0, discovery: 0, models: {} });
+    const e = (byDay[r.day] = byDay[r.day] || { cost: 0, discovery: 0, recommend: 0, models: {} });
     const c = Number(r.cost) || 0;
     e.cost += c;
     if (r.is_discovery) e.discovery += c;
+    if (r.is_recommend) e.recommend += c;
     if (r.model) e.models[r.model] = (e.models[r.model] || 0) + c;
   }
   const researchedByDay = {};
@@ -595,6 +597,7 @@ async function getReport(statuses, probabilities = {}) {
     day,
     value: byDay[day] ? byDay[day].cost : 0,
     discovery: byDay[day] ? byDay[day].discovery : 0,
+    recommend: byDay[day] ? byDay[day].recommend : 0,
     models: byDay[day] ? byDay[day].models : {},
     researched: researchedByDay[day] || 0,
     discovered: discoveredByDay[day] || 0,
