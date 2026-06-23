@@ -1042,9 +1042,18 @@ function parseStatusChange(title) {
   return m ? { from: m[1].trim(), to: m[2].trim() } : null;
 }
 
+// Akteur kompakt: lokaler Teil bis zum 1. Punkt, 1. Buchstabe groß
+// (z. B. "lennart.gericke@fuge-solutions.de" → "Lennart").
+function actorName(actor) {
+  if (!actor || actor === "—") return "";
+  const first = String(actor).trim().split("@")[0].split(".")[0];
+  return first ? first.charAt(0).toUpperCase() + first.slice(1) : "";
+}
+
 function activityItem(a) {
   const m = ACTIVITY_META[a.type] || ACTIVITY_META.note;
-  const who = a.actor && a.actor !== "—" ? ` · ${esc(a.actor)}` : "";
+  const name = actorName(a.actor);
+  const who = name ? ` · ${esc(name)}` : "";
   // Statuswechsel kompakt als farbigen Chip (Farbe = neuer Status) statt Karte.
   if (a.type === "status") {
     const sc = parseStatusChange(a.title);
