@@ -1012,7 +1012,7 @@ function filterBarHtml(acts) {
 }
 
 function setActivityFilter(f) {
-  if (!FILTER_TYPES[f]) return;
+  if (!(f in FILTER_TYPES)) return;   // "all" hat den Wert null – Key-Prüfung statt Truthiness
   activityFilter = f;
   document.querySelectorAll("[data-filter]").forEach((b) => b.classList.toggle("active", b.dataset.filter === f));
   const list = $("#activityList");
