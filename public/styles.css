@@ -829,18 +829,20 @@ a { color: inherit; }
   );
 }
 
-/* Datums-Marker als Pille, die die Schiene sauber unterbricht */
+/* Datums-Marker als Pille, die die Schiene sauber unterbricht.
+   Einheitliche Tages-Labels (Heute / Gestern / Wochentag, Datum) in
+   natürlicher Schreibweise – kein text-transform, das Daten verstümmeln würde. */
 .act-date {
   position: relative; z-index: 2;
   display: inline-flex; align-items: center;
-  margin: 20px 0 12px; padding: 4px 12px;
+  margin: 20px 0 12px; padding: 5px 13px;
   background: var(--glass-bg-subtle);
   -webkit-backdrop-filter: var(--glass-blur);
   backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow);
   border-radius: 999px;
-  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.6px;
+  font-size: 12px; letter-spacing: 0.2px;
   color: var(--muted); font-weight: 700;
 }
 .act-date:first-child { margin-top: 0; }

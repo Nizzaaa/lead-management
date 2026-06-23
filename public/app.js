@@ -1019,15 +1019,21 @@ function setActivityFilter(f) {
   if (list) list.innerHTML = timelineHtml(filterActs(detailActivities));
 }
 
-// Datums-Gruppe für eine Aktivität: Heute / Gestern / Diese Woche / Datum.
+// Datums-Gruppe für eine Aktivität. Einheitliches Schema: Heute / Gestern /
+// danach durchgehend ein konkreter Wochentag + Datum (Jahr nur, wenn nicht
+// das laufende). So ist jede Überschrift ein präziser Kalendertag – kein
+// Mix aus vagen Zeiträumen ("Diese Woche") und harten Daten.
 function dateBucket(iso) {
   const d = new Date(iso), now = new Date();
   const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   const diff = Math.round((startOf(now) - startOf(d)) / 86400000);
   if (diff <= 0) return "Heute";
   if (diff === 1) return "Gestern";
-  if (diff < 7) return "Diese Woche";
-  return d.toLocaleDateString("de-DE", { day: "numeric", month: "long", year: "numeric" });
+  const sameYear = d.getFullYear() === now.getFullYear();
+  return d.toLocaleDateString("de-DE", {
+    weekday: "long", day: "numeric", month: "long",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
 }
 
 function activityItem(a) {
