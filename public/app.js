@@ -1040,24 +1040,17 @@ function activityItem(a) {
   const m = ACTIVITY_META[a.type] || ACTIVITY_META.note;
   const who = a.actor && a.actor !== "—" ? ` · ${esc(a.actor)}` : "";
   const canDelete = ["note", "call", "email", "meeting"].includes(a.type);
-  // Überschrift konsistent halten: System-/Status-/KI-Einträge tragen einen
-  // beschreibenden Titel. Manuelle Notizen/Mails/Anrufe/Termine haben keinen –
-  // ihr Typ ist bereits am Icon erkennbar. Dann ist der Text selbst die
-  // Überschrift statt eines redundanten "Notiz"/"E-Mail".
-  const titleHtml = a.title ? `<strong class="act-title">${esc(a.title)}</strong>` : "";
-  const bodyHtml = a.body ? `<p class="act-text">${esc(a.body)}</p>` : "";
-  // Inhalt zuerst, volle Breite: bei Titel-Einträgen der Titel (+ optional Text),
-  // bei manuellen Einträgen direkt der Text. Fällt beides weg, der Typname.
-  const lead = titleHtml || bodyHtml || `<strong class="act-title">${esc(m.label)}</strong>`;
-  const rest = titleHtml ? bodyHtml : "";
+  const title = a.title ? esc(a.title) : esc(m.label);
   return `<li class="act-item act-${a.type}">
     <span class="act-dot" title="${esc(m.label)}">${m.icon}</span>
     <div class="act-card">
-      ${lead}
-      ${rest}
+      <div class="act-head">
+        <strong>${title}</strong>
+        <span class="act-time" title="${esc(fmtDateTime(a.createdAt))}">${esc(relTime(a.createdAt))}${who}</span>
+        ${canDelete ? `<button class="icon-btn act-del" data-del-act="${a.id}" title="Löschen">🗑️</button>` : ""}
+      </div>
+      ${a.body ? `<p class="act-text">${esc(a.body)}</p>` : ""}
       ${a.outcome ? `<span class="act-outcome-chip">${esc(a.outcome)}</span>` : ""}
-      <div class="act-foot"><span class="act-time" title="${esc(fmtDateTime(a.createdAt))}">${esc(relTime(a.createdAt))}${who}</span></div>
-      ${canDelete ? `<button class="icon-btn act-del" data-del-act="${a.id}" title="Löschen">🗑️</button>` : ""}
     </div>
   </li>`;
 }
