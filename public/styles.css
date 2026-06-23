@@ -905,6 +905,21 @@ a { color: inherit; }
   background: rgba(10,122,59,0.10); color: var(--accent);
   font-size: 0.76rem; font-weight: 600; border-radius: 999px; padding: 2px 10px;
 }
+/* Statuswechsel: kompakte Chip-Zeile statt Karte, Farbe = neuer Status */
+.act-status-change { align-items: center; padding: 2px 0 12px; }
+.act-status-change .act-dot {
+  width: 28px; height: 28px; border-width: 2px;
+  font-size: 0.82rem; justify-self: center;
+}
+.act-statusrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.act-statusrow .scc { display: inline-flex; align-items: center; gap: 8px; }
+.scc-from {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.4px;
+  text-transform: uppercase; color: var(--muted);
+}
+.scc-arrow { color: var(--muted); font-size: 13px; line-height: 1; }
+.act-statusrow .act-time { color: var(--muted); font-size: 0.76rem; margin-left: auto; }
+
 .act-empty {
   position: relative; z-index: 1;
   color: var(--muted); font-size: 14px; padding: 18px 14px; text-align: center;

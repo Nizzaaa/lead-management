@@ -1036,9 +1036,31 @@ function dateBucket(iso) {
   });
 }
 
+// Zerlegt "Status: <alt> → <neu>" in seine Teile (für die Chip-Darstellung).
+function parseStatusChange(title) {
+  const m = /^Status:\s*(.+?)\s*→\s*(.+)$/.exec(title || "");
+  return m ? { from: m[1].trim(), to: m[2].trim() } : null;
+}
+
 function activityItem(a) {
   const m = ACTIVITY_META[a.type] || ACTIVITY_META.note;
   const who = a.actor && a.actor !== "—" ? ` · ${esc(a.actor)}` : "";
+  // Statuswechsel kompakt als farbigen Chip (Farbe = neuer Status) statt Karte.
+  if (a.type === "status") {
+    const sc = parseStatusChange(a.title);
+    if (sc) {
+      const from = sc.from
+        ? `<span class="scc-from">${esc(sc.from)}</span><span class="scc-arrow">→</span>`
+        : "";
+      return `<li class="act-item act-status act-status-change">
+    <span class="act-dot" title="${esc(m.label)}">${m.icon}</span>
+    <div class="act-statusrow">
+      <span class="scc">${from}<span class="status-pill s-${esc(sc.to)}">${esc(sc.to)}</span></span>
+      <span class="act-time" title="${esc(fmtDateTime(a.createdAt))}">${esc(relTime(a.createdAt))}${who}</span>
+    </div>
+  </li>`;
+    }
+  }
   const canDelete = ["note", "call", "email", "meeting"].includes(a.type);
   const title = a.title ? esc(a.title) : esc(m.label);
   return `<li class="act-item act-${a.type}">
