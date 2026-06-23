@@ -1012,27 +1012,64 @@ function filterBarHtml(acts) {
 }
 
 function setActivityFilter(f) {
-  if (!FILTER_TYPES[f]) return;
+  if (!(f in FILTER_TYPES)) return;   // "all" hat den Wert null – Key-Prüfung statt Truthiness
   activityFilter = f;
   document.querySelectorAll("[data-filter]").forEach((b) => b.classList.toggle("active", b.dataset.filter === f));
   const list = $("#activityList");
   if (list) list.innerHTML = timelineHtml(filterActs(detailActivities));
 }
 
-// Datums-Gruppe für eine Aktivität: Heute / Gestern / Diese Woche / Datum.
+// Datums-Gruppe für eine Aktivität. Einheitliches Schema: Heute / Gestern /
+// danach durchgehend ein konkreter Wochentag + Datum (Jahr nur, wenn nicht
+// das laufende). So ist jede Überschrift ein präziser Kalendertag – kein
+// Mix aus vagen Zeiträumen ("Diese Woche") und harten Daten.
 function dateBucket(iso) {
   const d = new Date(iso), now = new Date();
   const startOf = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   const diff = Math.round((startOf(now) - startOf(d)) / 86400000);
   if (diff <= 0) return "Heute";
   if (diff === 1) return "Gestern";
-  if (diff < 7) return "Diese Woche";
-  return d.toLocaleDateString("de-DE", { day: "numeric", month: "long", year: "numeric" });
+  const sameYear = d.getFullYear() === now.getFullYear();
+  return d.toLocaleDateString("de-DE", {
+    weekday: "long", day: "numeric", month: "long",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+}
+
+// Zerlegt "Status: <alt> → <neu>" in seine Teile (für die Chip-Darstellung).
+function parseStatusChange(title) {
+  const m = /^Status:\s*(.+?)\s*→\s*(.+)$/.exec(title || "");
+  return m ? { from: m[1].trim(), to: m[2].trim() } : null;
+}
+
+// Akteur kompakt: lokaler Teil bis zum 1. Punkt, 1. Buchstabe groß
+// (z. B. "lennart.gericke@fuge-solutions.de" → "Lennart").
+function actorName(actor) {
+  if (!actor || actor === "—") return "";
+  const first = String(actor).trim().split("@")[0].split(".")[0];
+  return first ? first.charAt(0).toUpperCase() + first.slice(1) : "";
 }
 
 function activityItem(a) {
   const m = ACTIVITY_META[a.type] || ACTIVITY_META.note;
-  const who = a.actor && a.actor !== "—" ? ` · ${esc(a.actor)}` : "";
+  const name = actorName(a.actor);
+  const who = name ? ` · ${esc(name)}` : "";
+  // Statuswechsel kompakt als farbigen Chip (Farbe = neuer Status) statt Karte.
+  if (a.type === "status") {
+    const sc = parseStatusChange(a.title);
+    if (sc) {
+      const from = sc.from
+        ? `<span class="scc-from">${esc(sc.from)}</span><span class="scc-arrow">→</span>`
+        : "";
+      return `<li class="act-item act-status act-status-change">
+    <span class="act-dot" title="${esc(m.label)}">${m.icon}</span>
+    <div class="act-statusrow">
+      <span class="scc">${from}<span class="status-pill s-${esc(sc.to)}">${esc(sc.to)}</span></span>
+      <span class="act-time" title="${esc(fmtDateTime(a.createdAt))}">${esc(relTime(a.createdAt))}${who}</span>
+    </div>
+  </li>`;
+    }
+  }
   const canDelete = ["note", "call", "email", "meeting"].includes(a.type);
   const title = a.title ? esc(a.title) : esc(m.label);
   return `<li class="act-item act-${a.type}">
