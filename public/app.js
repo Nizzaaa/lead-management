@@ -367,6 +367,21 @@ function isStale(l) {
   return Date.now() - new Date(iso).getTime() > staleDays * 86400000;
 }
 
+// Kundenpflege-Health: gewonnene Kunden ohne Kontakt seit CUSTOMER_STALE_MONTHS
+// Monaten (Aktivität; Fallback wonAt/updatedAt). Solche mit bereits fälliger
+// Wiedervorlage bleiben außen vor (stehen schon unter „Kundenpflege"). Älteste
+// zuerst. Rein passiv aus dem bereits geladenen leads-Array (kein Backend nötig).
+const CUSTOMER_STALE_MONTHS = 6;
+function staleWonCustomers() {
+  const cutoff = Date.now() - CUSTOMER_STALE_MONTHS * 30 * 86400000;
+  const dueLeadIds = new Set((Array.isArray(dueFollowUps) ? dueFollowUps : []).map((f) => f.leadId));
+  const anchor = (l) => l.lastActivityAt || l.wonAt || l.updatedAt || "";
+  return leads
+    .filter((l) => l.status === "gewonnen" && !dueLeadIds.has(l.id))
+    .filter((l) => { const iso = anchor(l); return iso && new Date(iso).getTime() < cutoff; })
+    .sort((a, b) => (anchor(a) < anchor(b) ? -1 : anchor(a) > anchor(b) ? 1 : 0));
+}
+
 // Gemeinsame Filter (Fällig, Kalt, Tag) – ohne Status, da dieser je nach
 // Ansicht anders behandelt wird (Chips in der Liste, Spalten im Board). Die
 // frühere Textsuche entfällt (globale Schnellsuche in der Topbar übernimmt das).
@@ -1614,6 +1629,8 @@ function bindEvents() {
     if (fuDone) { patchFollowUpStatus(fuDone.dataset.fuDone, "done"); return; }
     const fuDismiss = e.target.closest("[data-fu-dismiss]");
     if (fuDismiss) { patchFollowUpStatus(fuDismiss.dataset.fuDismiss, "dismissed"); return; }
+    const plan = e.target.closest("[data-agenda-plan]");
+    if (plan) { openFollowUpModal(plan.dataset.agendaPlan); return; }
     const open = e.target.closest("[data-nav]");
     if (open) location.hash = "#/lead/" + encodeURIComponent(open.dataset.nav);
   });
@@ -3248,11 +3265,22 @@ function renderAgenda() {
        </section>`
     : "";
 
+  // After-Sales-Health: gewonnene Kunden ohne Kontakt seit längerem (Nudge).
+  const stale = staleWonCustomers();
+  const staleSection = stale.length
+    ? `<section class="card agenda-section care">
+         <h3>🔔 Lange kein Kontakt <span class="agenda-n">${stale.length}</span></h3>
+         <p class="d-muted">Gewonnene Kunden ohne Kontakt seit ${CUSTOMER_STALE_MONTHS}+ Monaten.</p>
+         ${stale.slice(0, 25).map(staleCustomerItemHtml).join("")}
+       </section>`
+    : "";
+
   v.innerHTML = `
     <div class="view-head"><h2>📅 Heute</h2><p class="d-muted">Anstehende Wiedervorlagen &amp; nächste Schritte</p></div>
     ${aiEnabled ? agendaAiSectionHtml() : ""}
     ${planned}
     ${careSection}
+    ${staleSection}
     ${noStep.length ? `<section class="card agenda-section nostep">
         <h3>Offen ohne Wiedervorlage <span class="agenda-n">${noStep.length}</span></h3>
         <p class="d-muted">Diese offenen Leads haben keinen geplanten nächsten Schritt.</p>
@@ -3264,6 +3292,23 @@ function renderAgenda() {
 // Symbol je Wiedervorlage-Sorte (Referenz/Jubiläum/manuell).
 function followUpKindIcon(kind) {
   return kind === "reference" ? "⭐" : kind === "anniversary" ? "🎉" : kind === "winback" ? "♻️" : "📌";
+}
+
+// Eine Agenda-Zeile: gewonnener Kunde ohne Kontakt seit längerem (Health-Nudge).
+function staleCustomerItemHtml(l) {
+  const iso = l.lastActivityAt || l.wonAt || l.updatedAt;
+  const months = iso ? Math.floor((Date.now() - new Date(iso).getTime()) / (30 * 86400000)) : null;
+  const ago = months != null ? `seit ${months} Mon. kein Kontakt` : "lange kein Kontakt";
+  return `<div class="agenda-item">
+    <button type="button" class="agenda-open" data-nav="${esc(l.id)}">
+      <span class="agenda-title">🤝 ${esc(l.company || l.name || "—")}</span>
+      <span class="status-pill s-gewonnen">gewonnen</span>
+      <span class="agenda-step">${esc(ago)}</span>
+    </button>
+    <div class="agenda-actions">
+      <button type="button" class="btn btn-sm" data-agenda-plan="${esc(l.id)}">+ Wiedervorlage</button>
+    </div>
+  </div>`;
 }
 
 // Eine fällige After-Sales-Wiedervorlage (gewonnener Lead) als Agenda-Zeile.
