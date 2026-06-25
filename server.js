@@ -158,6 +158,19 @@ let tagColors = {};
 // persistiert (Registry-Logik in prompts.js).
 const PROMPTS_SETTING_KEY = "prompt_overrides";
 
+// Automatische Wiedervorlagen (After-Sales): vom System gesetzte Follow-ups,
+// ausgelöst durch den Übergang eines Leads nach 'gewonnen'. offsetMonths =
+// Fälligkeit relativ zum Abschluss (won_at). In den Einstellungen je Regel
+// an-/abschaltbar und in Zeitversatz/Text anpassbar; als JSON in app_settings.
+const AUTO_FOLLOWUP_RULES_SETTING_KEY = "auto_followup_rules";
+const FOLLOWUP_KINDS = ["reference", "anniversary", "manual"];
+const DEFAULT_AUTO_FOLLOWUP_RULES = [
+  { key: "won_reference_3m", enabled: true, offsetMonths: 3, kind: "reference", title: "Nach Referenz fragen" },
+  { key: "anniversary_6m", enabled: true, offsetMonths: 6, kind: "anniversary", title: "6-Monats-Jubiläum: Kontakt halten" },
+  { key: "anniversary_12m", enabled: true, offsetMonths: 12, kind: "anniversary", title: "12-Monats-Jubiläum: Folgegeschäft anbahnen" },
+];
+let autoFollowupRules = DEFAULT_AUTO_FOLLOWUP_RULES.map((r) => ({ ...r }));
+
 function sanitizeStageProbabilities(input) {
   const out = { ...DEFAULT_STAGE_PROBABILITIES };
   if (input && typeof input === "object") {
@@ -188,6 +201,41 @@ function sanitizeTagColors(input) {
     }
   }
   return out;
+}
+
+// Validiert die Auto-Wiedervorlage-Regeln (frei konfigurierbar). Jede Regel
+// braucht einen stabilen key; offsetMonths 1–120, kind aus der Whitelist, Titel
+// gedeckelt. Leere/kaputte Eingaben fallen auf die Defaults zurück.
+function sanitizeAutoFollowupRules(input) {
+  if (!Array.isArray(input)) return DEFAULT_AUTO_FOLLOWUP_RULES.map((r) => ({ ...r }));
+  const out = [];
+  const seen = new Set();
+  for (const r of input) {
+    if (!r || typeof r !== "object") continue;
+    const key = String(r.key || "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 40);
+    if (!key || seen.has(key)) continue;
+    const months = Math.round(Number(r.offsetMonths));
+    if (!Number.isFinite(months) || months < 1 || months > 120) continue;
+    const kind = FOLLOWUP_KINDS.includes(r.kind) ? r.kind : "anniversary";
+    const title = (typeof r.title === "string" ? r.title.trim() : "").slice(0, 200) || "Wiedervorlage";
+    seen.add(key);
+    out.push({ key, enabled: r.enabled !== false, offsetMonths: months, kind, title });
+    if (out.length >= 20) break;
+  }
+  return out.length ? out : DEFAULT_AUTO_FOLLOWUP_RULES.map((r) => ({ ...r }));
+}
+
+// anchor (ISO-Zeitstempel oder YYYY-MM-DD) + months → "YYYY-MM-DD". UTC-basiert,
+// mit Monatsende-Clamp (31.01. + 1 Monat → 28./29.02.). Ohne Datums-Bibliothek.
+function addMonthsYMD(anchor, months) {
+  const d = anchor ? new Date(anchor) : new Date();
+  if (Number.isNaN(d.getTime())) return null;
+  const day = d.getUTCDate();
+  const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + Number(months), 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(day, lastDay));
+  const p = (n) => String(n).padStart(2, "0");
+  return `${target.getUTCFullYear()}-${p(target.getUTCMonth() + 1)}-${p(target.getUTCDate())}`;
 }
 
 function sanitizeLead(body = {}) {
@@ -296,6 +344,11 @@ async function enrichLead(existing, data, ai, research, req) {
       type: "system", title: "Per CSV-Import ergänzt",
       body: "Ergänzte Felder: " + filled.join(", "),
     }, actor(req));
+  }
+  // Wurde beim Ergänzen eine Wiedervorlage gesetzt, diese in Tabelle/Kalender übernehmen.
+  if (filled.includes("nextStepAt")) {
+    const updated = await db.getLead(existing.id);
+    if (updated) await reconcileLeadFollowUps(updated, existing, reqBaseUrl(req));
   }
   return filled;
 }
@@ -525,6 +578,73 @@ async function logActivity(leadId, fields, who) {
   }
 }
 
+// Legt beim Übergang nach 'gewonnen' die automatischen After-Sales-
+// Wiedervorlagen an (Referenz/Jubiläum). Eager mit zukünftigem Fälligkeitsdatum –
+// die „Heute"-Sicht ist eine passive Datumsabfrage, daher braucht es keinen
+// Scheduler. Idempotent (Unique-Index). Reine DB-Arbeit; den Kalender gleicht
+// der aufrufende Handler im Anschluss für alle offenen Wiedervorlagen an.
+async function applyAutoFollowUps(lead, prevStatus) {
+  if (!lead || lead.status !== "gewonnen" || prevStatus === "gewonnen") return;
+  const anchor = lead.wonAt || lead.updatedAt;
+  for (const rule of autoFollowupRules) {
+    if (!rule.enabled) continue;
+    const dueDate = addMonthsYMD(anchor, rule.offsetMonths);
+    if (!dueDate) continue;
+    const created = await db.createAutoFollowUp({
+      leadId: lead.id, kind: rule.kind, ruleKey: rule.key, title: rule.title, dueDate,
+    });
+    if (created) {
+      await logActivity(lead.id,
+        { type: "system", title: `Automatische Wiedervorlage: ${rule.title} (${dueDate})` }, "System");
+    }
+  }
+  await db.syncLeadMirror(lead.id);
+}
+
+// Zieht die Auto-Wiedervorlagen für bereits gewonnene Leads nach (Altbestand /
+// neu hinzugekommene Regeln). Idempotent und nur für Regeln, deren Fälligkeit in
+// der ZUKUNFT liegt – längst vergangene Jubiläen sollen nicht als „überfällig"
+// aufpoppen. Läuft einmal beim Start, ohne Kalender-Aufrufe.
+async function backfillAutoFollowUps() {
+  const today = addMonthsYMD(null, 0); // heutiges Datum als YYYY-MM-DD
+  const leads = await db.listLeads();
+  for (const lead of leads) {
+    if (lead.status !== "gewonnen") continue;
+    const anchor = lead.wonAt || lead.updatedAt;
+    let createdAny = false;
+    for (const rule of autoFollowupRules) {
+      if (!rule.enabled) continue;
+      const dueDate = addMonthsYMD(anchor, rule.offsetMonths);
+      if (!dueDate || dueDate <= today) continue; // nur zukünftige Fälligkeiten
+      const created = await db.createAutoFollowUp({
+        leadId: lead.id, kind: rule.kind, ruleKey: rule.key, title: rule.title, dueDate,
+      });
+      if (created) createdAny = true;
+    }
+    if (createdAny) await db.syncLeadMirror(lead.id);
+  }
+}
+
+// Legacy-Brücke: hält EINE manuelle Wiedervorlage passend zum Lead-Spiegel
+// (next_step/next_step_at, gesetzt vom alten Modal bzw. Import) und gleicht die
+// betroffenen Kalender-Termine an. Best-effort, blockiert den Request nicht.
+async function reconcileLeadFollowUps(lead, prevLead, baseUrl) {
+  if (!lead) return;
+  try {
+    const shim = await db.upsertManualFollowUpFromMirror(lead.id);
+    if (!caldav.isEnabled()) return;
+    for (const fu of shim.dismissed) caldav.removeFollowUp(fu.id);
+    const newlyId = shim.upserted && shim.upserted.id;
+    for (const fu of await db.listFollowUps(lead.id)) {
+      if (fu.status !== "open") continue;
+      const prev = fu.id === newlyId ? null : { lead: prevLead || lead, followUp: fu };
+      caldav.syncFollowUp(lead, fu, prev, baseUrl);
+    }
+  } catch (err) {
+    logger.warn("reconcile_follow_ups_failed", { leadId: lead && lead.id, error: err.message });
+  }
+}
+
 // --- App -------------------------------------------------------------------
 const app = express();
 app.use(httpLogger());
@@ -585,6 +705,7 @@ app.get("/api/config", (req, res) => {
     statuses: STATUSES,
     stageProbabilities,
     staleDays,
+    autoFollowupRules,
     tagColors,
     user: actor(req) !== "—" ? actor(req) : "",
     logoutUrl: LOGOUT_URL,
@@ -593,7 +714,7 @@ app.get("/api/config", (req, res) => {
 
 // Einstellungen lesen
 app.get("/api/settings", (req, res) => {
-  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays });
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays, autoFollowupRules });
 });
 
 // Einstellungen speichern (KI-Modell und/oder Abschlusswahrscheinlichkeiten).
@@ -614,19 +735,28 @@ app.put("/api/settings", wrap(async (req, res) => {
     staleDays = sanitizeStaleDays(req.body.staleDays);
     await db.setSetting(STALE_DAYS_SETTING_KEY, String(staleDays));
   }
-  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays });
+  if (req.body.autoFollowupRules !== undefined) {
+    autoFollowupRules = sanitizeAutoFollowupRules(req.body.autoFollowupRules);
+    await db.setSetting(AUTO_FOLLOWUP_RULES_SETTING_KEY, JSON.stringify(autoFollowupRules));
+  }
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays, autoFollowupRules });
 }));
 
-// Alle bestehenden Wiedervorlagen (offene Leads mit Datum) in den CalDAV-
+// Alle offenen Wiedervorlagen (ein Termin je Wiedervorlage) in den CalDAV-
 // Kalender übertragen – Backfill nach dem Einrichten bzw. manuelle
-// Resynchronisation aus den Einstellungen. Meldet einen Verbindungsfehler
+// Resynchronisation aus den Einstellungen. Räumt zugleich evtl. noch vorhandene
+// Legacy-Termine (ein-Termin-je-Lead) auf. Meldet einen Verbindungsfehler
 // (z. B. HTTP 401/404) direkt zurück, damit er in der UI sichtbar wird.
 app.post("/api/caldav/sync-all", wrap(async (req, res) => {
   if (!caldav.isEnabled()) {
     return res.status(400).json({ error: "Kalender (CalDAV) ist nicht konfiguriert." });
   }
+  // Legacy-Termine (ein-Termin-je-Lead aus der Zeit vor der Umstellung) entfernen.
   const leads = await db.listLeads();
-  const result = await caldav.syncAll(leads, reqBaseUrl(req));
+  for (const l of leads) await caldav.removeLead(l.id); // best effort, 404 = ok
+  // Offene Wiedervorlagen samt Lead-Anzeigedaten neu schreiben.
+  const items = await db.listOpenFollowUpsWithLead();
+  const result = await caldav.syncAll(items, reqBaseUrl(req));
   if (result.error) {
     return res.status(502).json({ error: `Kalender-Fehler: ${result.error}`, ...result });
   }
@@ -759,7 +889,7 @@ app.post("/api/leads/import", wrap(async (req, res) => {
       const lead = await db.createLead(data, research);
       if (ai) await db.setLeadAi(lead.id, ai);
       await logActivity(lead.id, { type: "system", title: "Per CSV-Import angelegt" }, actor(req));
-      caldav.syncLead(lead, null, reqBaseUrl(req)); // importierte Wiedervorlage in den Kalender (best effort)
+      await reconcileLeadFollowUps(lead, null, reqBaseUrl(req)); // Wiedervorlage in Tabelle/Kalender übernehmen (best effort)
       created++;
     } catch (err) {
       errors.push({ row: idx + 2, error: err.message }); // +2: Kopfzeile + 1-basiert
@@ -784,7 +914,7 @@ app.post("/api/leads", wrap(async (req, res) => {
   }
   const lead = await db.createLead(data);
   await logActivity(lead.id, { type: "system", title: "Lead manuell angelegt" }, actor(req));
-  caldav.syncLead(lead, null, reqBaseUrl(req)); // Wiedervorlage in den Kalender (best effort)
+  await reconcileLeadFollowUps(lead, null, reqBaseUrl(req)); // Wiedervorlage in Tabelle/Kalender (best effort)
   res.status(201).json(lead);
 }));
 
@@ -1020,17 +1150,42 @@ app.put("/api/leads/:id", wrap(async (req, res) => {
   const existing = await db.getLead(req.params.id);
   if (!existing) return res.status(404).json({ error: "Lead nicht gefunden." });
   const data = sanitizeLead({ ...existing, ...req.body });
-  const lead = await db.updateLead(req.params.id, data);
-  if (lead && existing.status !== lead.status) {
+  let lead = await db.updateLead(req.params.id, data);
+  // Manuelle Wiedervorlage aus dem Spiegel nur dann reconcilen, wenn die
+  // Schritt-Felder tatsächlich verändert wurden (Legacy-Modal/Formular). Ein
+  // reiner Status-PUT trägt den abgeleiteten Spiegel (evtl. eine AUTO-Wieder-
+  // vorlage) nur durch – daraus darf keine manuelle Dublette entstehen.
+  const stepChanged =
+    data.nextStep !== existing.nextStep ||
+    (data.nextStepAt || null) !== (existing.nextStepAt || null);
+  const shim = stepChanged
+    ? await db.upsertManualFollowUpFromMirror(lead.id)
+    : { upserted: null, dismissed: [] };
+  if (existing.status !== lead.status) {
     await logActivity(lead.id, {
       type: "status",
       title: `Status: ${existing.status} → ${lead.status}`,
     }, actor(req));
   }
-  // Kalender-Termin der Wiedervorlage angleichen: anlegen/aktualisieren bzw.
-  // entfernen, wenn die Wiedervorlage erledigt wurde oder der Lead schließt.
-  caldav.syncLead(lead, existing, reqBaseUrl(req));
-  res.json(lead);
+  // Übergang nach 'gewonnen': Abschlusszeitpunkt verankern und automatische
+  // After-Sales-Wiedervorlagen (Referenz/Jubiläum) anlegen.
+  if (lead.status === "gewonnen" && existing.status !== "gewonnen") {
+    lead = (await db.markWon(lead.id)) || lead;
+    await applyAutoFollowUps(lead, existing.status);
+  }
+  // Kalender (best effort): erledigte manuelle Termine entfernen, alle offenen
+  // Wiedervorlagen-Termine anlegen/auffrischen (ein Termin je Wiedervorlage).
+  if (caldav.isEnabled()) {
+    for (const fu of shim.dismissed) caldav.removeFollowUp(fu.id);
+    const newlyId = shim.upserted && shim.upserted.id;
+    for (const fu of await db.listFollowUps(lead.id)) {
+      if (fu.status !== "open") continue;
+      const prev = fu.id === newlyId ? null : { lead: existing, followUp: fu };
+      caldav.syncFollowUp(lead, fu, prev, reqBaseUrl(req));
+    }
+  }
+  // Aktuellen Stand zurückgeben (Spiegel evtl. neu abgeleitet, won_at gesetzt).
+  res.json((await db.getLead(lead.id)) || lead);
 }));
 
 // DSGVO-Datenauskunft: alle zu einem Lead gespeicherten Daten (Stammdaten +
@@ -1044,9 +1199,13 @@ app.get("/api/leads/:id/export", wrap(async (req, res) => {
 
 // Lead löschen
 app.delete("/api/leads/:id", wrap(async (req, res) => {
+  // Follow-up-IDs vor dem Löschen merken (ON DELETE CASCADE entfernt die Zeilen),
+  // um die zugehörigen Kalender-Termine aufzuräumen.
+  const followUps = await db.listFollowUps(req.params.id);
   const ok = await db.deleteLead(req.params.id);
   if (!ok) return res.status(404).json({ error: "Lead nicht gefunden." });
-  caldav.removeLead(req.params.id); // zugehörigen Kalender-Termin entfernen (best effort)
+  for (const fu of followUps) caldav.removeFollowUp(fu.id); // best effort
+  caldav.removeLead(req.params.id); // evtl. noch vorhandener Legacy-Termin
   res.status(204).end();
 }));
 
@@ -1475,6 +1634,70 @@ app.post("/api/agenda/recommendations", aiLimiter, wrap(async (req, res) => {
 // --- Aktivitäten-Timeline --------------------------------------------------
 const ACTIVITY_TYPES = ["note", "call", "email", "meeting", "status", "ai", "system"];
 
+// --- Wiedervorlagen (Follow-ups) -------------------------------------------
+function sanitizeFollowUpInput(body = {}) {
+  const title = typeof body.title === "string" ? body.title.trim().slice(0, 500) : undefined;
+  let dueDate;
+  if (body.dueDate !== undefined) {
+    const d = typeof body.dueDate === "string" ? body.dueDate.trim() : "";
+    dueDate = /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(new Date(d).getTime()) ? d : null;
+  }
+  return { title, dueDate };
+}
+
+// Fällige offene Wiedervorlagen auf geschlossenen Leads (Gruppe „Kundenpflege /
+// Referenzen" der „Heute"-Seite). MUSS vor etwaigen /:id-Routen stehen.
+app.get("/api/follow-ups/due", wrap(async (req, res) => {
+  res.json(await db.getDueFollowUpsForWonLeads());
+}));
+
+// Alle Wiedervorlagen eines Leads (offene zuerst).
+app.get("/api/leads/:id/follow-ups", wrap(async (req, res) => {
+  res.json(await db.listFollowUps(req.params.id));
+}));
+
+// Manuelle Wiedervorlage planen.
+app.post("/api/leads/:id/follow-ups", wrap(async (req, res) => {
+  const lead = await db.getLead(req.params.id);
+  if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
+  const { title, dueDate } = sanitizeFollowUpInput(req.body);
+  if (!dueDate) return res.status(400).json({ error: "Gültiges Datum (YYYY-MM-DD) erforderlich." });
+  const fu = await db.createFollowUp({ leadId: lead.id, source: "manual", kind: "manual", title: title || "", dueDate });
+  await db.syncLeadMirror(lead.id);
+  await logActivity(lead.id, { type: "system", title: `Wiedervorlage geplant: ${fu.title || dueDate}` }, actor(req));
+  caldav.syncFollowUp(lead, fu, null, reqBaseUrl(req));
+  res.status(201).json(fu);
+}));
+
+// Wiedervorlage ändern: Status (done/dismissed/open) ODER Titel/Datum (verschieben).
+app.patch("/api/follow-ups/:id", wrap(async (req, res) => {
+  const existing = await db.getFollowUp(req.params.id);
+  if (!existing) return res.status(404).json({ error: "Wiedervorlage nicht gefunden." });
+  let fu = existing;
+  if (typeof req.body.status === "string") {
+    const status = req.body.status.toLowerCase();
+    if (!["open", "done", "dismissed"].includes(status)) {
+      return res.status(400).json({ error: "Ungültiger Status." });
+    }
+    fu = await db.setFollowUpStatus(existing.id, status);
+    if (status !== "open") {
+      await logActivity(existing.leadId,
+        { type: "system", title: `Wiedervorlage ${status === "done" ? "erledigt" : "verworfen"}: ${existing.title || existing.dueDate}` },
+        actor(req));
+    }
+  } else {
+    const { title, dueDate } = sanitizeFollowUpInput(req.body);
+    if (req.body.dueDate !== undefined && !dueDate) {
+      return res.status(400).json({ error: "Gültiges Datum (YYYY-MM-DD) erforderlich." });
+    }
+    fu = await db.updateFollowUp(existing.id, { title, dueDate });
+  }
+  await db.syncLeadMirror(existing.leadId);
+  const lead = await db.getLead(existing.leadId);
+  if (lead) caldav.syncFollowUp(lead, fu, { lead, followUp: existing }, reqBaseUrl(req));
+  res.json(fu);
+}));
+
 // Aktivitäten eines Leads (chronologisch, neueste zuerst).
 app.get("/api/leads/:id/activities", wrap(async (req, res) => {
   res.json(await db.listActivities(req.params.id));
@@ -1548,6 +1771,18 @@ db.init()
     } catch (err) {
       logger.warn("prompt_overrides_load_failed", { error: err.message });
     }
+    // Gespeicherte Auto-Wiedervorlage-Regeln laden.
+    try {
+      const savedRules = await db.getSetting(AUTO_FOLLOWUP_RULES_SETTING_KEY);
+      if (savedRules) autoFollowupRules = sanitizeAutoFollowupRules(JSON.parse(savedRules));
+    } catch (err) {
+      logger.warn("auto_followup_rules_load_failed", { error: err.message });
+    }
+    // Auto-Wiedervorlagen für bereits gewonnene Leads nachziehen (Altbestand);
+    // idempotent, nur zukünftig fällige Regeln. Blockiert den Start nicht.
+    backfillAutoFollowUps().catch((err) =>
+      logger.warn("auto_followup_backfill_failed", { error: err.message })
+    );
     if (usingDefaultDbPassword()) {
       logger.warn("default_db_password", {
         hint: "Das DB-Passwort ist auf den unsicheren Standard 'leadpilot' gesetzt. Bitte POSTGRES_PASSWORD auf ein sicheres Passwort ändern.",

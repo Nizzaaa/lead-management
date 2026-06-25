@@ -23,6 +23,9 @@ let currentModel = "";
 let stageProbabilities = {};
 let staleDays = 14; // „Kalt"-Schwelle (Tage ohne Aktivität), kommt aus /api/config
 let tagColors = {}; // { tagNameLowercase: "#rrggbb" } – globale Tag-Farben aus /api/config
+let autoFollowupRules = []; // konfigurierbare Auto-Wiedervorlage-Regeln (aus /api/config)
+let dueFollowUps = [];      // fällige Wiedervorlagen auf gewonnenen Leads (Kundenpflege)
+let detailFollowUps = [];   // alle Wiedervorlagen des aktuell geöffneten Leads
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
 // KI-Tagesempfehlung der „Heute"-Seite: zwischengespeichertes Ergebnis
@@ -161,6 +164,7 @@ async function init() {
     currentModel = cfg.model || "";
     stageProbabilities = cfg.stageProbabilities || {};
     staleDays = cfg.staleDays || 14;
+    autoFollowupRules = Array.isArray(cfg.autoFollowupRules) ? cfg.autoFollowupRules : [];
     tagColors = cfg.tagColors || {};
     renderUserBar(cfg);
     renderStatusFilters();
@@ -321,6 +325,7 @@ function showPrompts() {
 // --- Daten laden + rendern -------------------------------------------------
 async function refresh() {
   leads = await api("/api/leads");
+  try { dueFollowUps = await api("/api/follow-ups/due"); } catch { dueFollowUps = []; }
   renderTagFilter();
   updateAgendaBadge();
   renderStats(await api("/api/stats"));
@@ -401,7 +406,11 @@ function filteredLeads() {
 // Anzahl fälliger/überfälliger Wiedervorlagen (für den Toolbar-Chip).
 function dueLeadCount() {
   const today = todayYMD();
-  return leads.filter((l) => l.nextStepAt && l.nextStepAt <= today).length;
+  const pipeline = leads.filter(
+    (l) => l.status !== "gewonnen" && l.status !== "verloren" && l.nextStepAt && l.nextStepAt <= today
+  ).length;
+  const care = Array.isArray(dueFollowUps) ? dueFollowUps.length : 0;
+  return pipeline + care;
 }
 
 function scoreColor(score) {
@@ -862,6 +871,7 @@ function detailViewHtml(l) {
         </div>
         <div class="dtab-panel" data-dtab-panel="activity">
           ${nextStepBannerHtml(l)}
+          <div id="followUpsCard">${followUpsCardHtml(detailId === l.id ? detailFollowUps : [])}</div>
           <section class="card" id="activityPanel">${activityPanelHtml(null)}</section>
         </div>
         <div class="dtab-panel hidden" data-dtab-panel="dossier">
@@ -911,6 +921,37 @@ function nextStepBannerHtml(l) {
   </div>`;
 }
 
+// Karte mit allen Wiedervorlagen des Leads (manuell + automatisch). Offene
+// lassen sich direkt erledigen/verwerfen; „+ Planen" legt eine neue an.
+function followUpsCardHtml(list) {
+  const items = Array.isArray(list) ? list : [];
+  const rows = items.map((fu) => {
+    const info = dueInfo(fu.dueDate);
+    const due = info
+      ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>`
+      : `<span class="ns-due">${esc(fmtDate(fu.dueDate))}</span>`;
+    const src = fu.source === "auto" ? `<span class="fu-badge auto">automatisch</span>` : "";
+    const actions = fu.status === "open"
+      ? `<div class="fu-actions">
+           <button type="button" class="btn btn-sm" data-fu-done="${esc(fu.id)}">✓ Erledigt</button>
+           <button type="button" class="btn btn-sm" data-fu-dismiss="${esc(fu.id)}">Verwerfen</button>
+         </div>`
+      : `<span class="fu-state">${fu.status === "done" ? "✓ erledigt" : "verworfen"}</span>`;
+    return `<div class="fu-row ${fu.status === "open" ? "open" : "closed"}">
+      <span class="fu-icon">${followUpKindIcon(fu.kind)}</span>
+      <span class="fu-main"><span class="fu-title">${esc(fu.title || "Wiedervorlage")} ${src}</span> ${due}</span>
+      ${actions}
+    </div>`;
+  }).join("");
+  return `<section class="card follow-ups">
+    <div class="fu-head">
+      <h3>🔁 Wiedervorlagen</h3>
+      <button type="button" class="btn btn-sm" data-fu-add>+ Planen</button>
+    </div>
+    ${items.length ? rows : `<p class="d-muted">Keine Wiedervorlagen.</p>`}
+  </section>`;
+}
+
 // --- Detailseite: Aktivitäten-Timeline -------------------------------------
 // Diese Daten liegen nicht im leads-Array, sondern werden je Detailseite
 // nachgeladen und in das Platzhalter-Panel gerendert.
@@ -920,11 +961,17 @@ let activityFilter = "all";   // aktiver Timeline-Filter
 
 async function loadDetailExtras(id) {
   try {
-    const acts = await api(`/api/leads/${id}/activities`);
+    const [acts, fus] = await Promise.all([
+      api(`/api/leads/${id}/activities`),
+      api(`/api/leads/${id}/follow-ups`).catch(() => []),
+    ]);
     if (detailId !== id) return; // inzwischen weggeblättert
     detailActivities = acts;
+    detailFollowUps = Array.isArray(fus) ? fus : [];
     const ap = $("#activityPanel");
     if (ap) ap.innerHTML = activityPanelHtml(acts);
+    const fc = $("#followUpsCard");
+    if (fc) fc.innerHTML = followUpsCardHtml(detailFollowUps);
   } catch (err) {
     /* Panel zeigt weiter den Ladezustand */
   }
@@ -1301,6 +1348,12 @@ function onDetailClick(e) {
   if (delAct) { removeActivity(delAct.dataset.delAct); return; }
   const tagRm = e.target.closest("[data-tag-remove]");
   if (tagRm) { removeTagFromDetail(tagRm.dataset.tagRemove); return; }
+  const fuDone = e.target.closest("[data-fu-done]");
+  if (fuDone) { patchFollowUpStatus(fuDone.dataset.fuDone, "done"); return; }
+  const fuDismiss = e.target.closest("[data-fu-dismiss]");
+  if (fuDismiss) { patchFollowUpStatus(fuDismiss.dataset.fuDismiss, "dismissed"); return; }
+  const fuAdd = e.target.closest("[data-fu-add]");
+  if (fuAdd) { openFollowUpModal(detailId); return; }
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
   const action = btn.dataset.action;
@@ -1469,6 +1522,10 @@ function bindEvents() {
     if (done) { completeNextStep(done.dataset.agendaDone); return; }
     const edit = e.target.closest("[data-agenda-edit]");
     if (edit) { openNextStepModal(edit.dataset.agendaEdit); return; }
+    const fuDone = e.target.closest("[data-fu-done]");
+    if (fuDone) { patchFollowUpStatus(fuDone.dataset.fuDone, "done"); return; }
+    const fuDismiss = e.target.closest("[data-fu-dismiss]");
+    if (fuDismiss) { patchFollowUpStatus(fuDismiss.dataset.fuDismiss, "dismissed"); return; }
     const open = e.target.closest("[data-nav]");
     if (open) location.hash = "#/lead/" + encodeURIComponent(open.dataset.nav);
   });
@@ -1670,9 +1727,29 @@ function closeDupModal() {
   $("#dupModal").classList.add("hidden");
 }
 
+// Status einer konkreten Wiedervorlage setzen (done/dismissed/open) und neu zeichnen.
+async function patchFollowUpStatus(id, status) {
+  try {
+    await api(`/api/follow-ups/${id}`, { method: "PATCH", body: JSON.stringify({ status }) });
+    toast(status === "done" ? "Wiedervorlage erledigt" : status === "dismissed" ? "Wiedervorlage verworfen" : "Wiedervorlage geöffnet", "success");
+    await refresh();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
 // Wiedervorlage als erledigt markieren: nächsten Schritt leeren + protokollieren
 // (inkl. Grund der Wiedervorlage im Aktivitäts-Log).
 async function completeNextStep(id) {
+  // Auf der Detailseite (Wiedervorlagen geladen) die dringlichste OFFENE direkt
+  // als erledigt markieren – schließt auch automatische After-Sales-Wiedervorlagen
+  // korrekt (statt nur den Spiegel zu leeren).
+  if (detailId === id && Array.isArray(detailFollowUps)) {
+    const open = detailFollowUps
+      .filter((f) => f.status === "open")
+      .sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
+    if (open.length) { await patchFollowUpStatus(open[0].id, "done"); return; }
+  }
   const l = getLead(id);
   const step = l && l.nextStep ? l.nextStep : "";
   try {
@@ -1691,16 +1768,36 @@ async function completeNextStep(id) {
   }
 }
 
-// Eigenes, schlankes Modal zum Planen/Bearbeiten der Wiedervorlage.
+// Modus des Wiedervorlage-Modals: "legacy" = Spiegel des Leads (Banner),
+// "followup-new" = neue eigenständige Wiedervorlage anlegen (Detail-Karte).
+let nsMode = "legacy";
+
+// Eigenes, schlankes Modal zum Planen/Bearbeiten der Wiedervorlage (Banner).
 function openNextStepModal(id) {
   const l = getLead(id);
   if (!l) return;
+  nsMode = "legacy";
   $("#ns_lead_id").value = id;
+  $("#ns_followup_id").value = "";
   $("#ns_step").value = l.nextStep || "";
   $("#ns_at").value = l.nextStepAt || "";
   const planned = l.nextStep || l.nextStepAt;
   $("#nsModalTitle").textContent = planned ? "Wiedervorlage bearbeiten" : "Wiedervorlage planen";
   $("#nsClear").classList.toggle("hidden", !planned);
+  $("#nextStepModal").classList.remove("hidden");
+  $("#ns_step").focus();
+}
+
+// Neue eigenständige Wiedervorlage zu einem Lead planen (Detail-Karte „+ Planen").
+function openFollowUpModal(id) {
+  if (!id) return;
+  nsMode = "followup-new";
+  $("#ns_lead_id").value = id;
+  $("#ns_followup_id").value = "";
+  $("#ns_step").value = "";
+  $("#ns_at").value = "";
+  $("#nsModalTitle").textContent = "Wiedervorlage planen";
+  $("#nsClear").classList.add("hidden");
   $("#nextStepModal").classList.remove("hidden");
   $("#ns_step").focus();
 }
@@ -1712,12 +1809,21 @@ function closeNextStepModal() {
 async function saveNextStep(e, clear = false) {
   if (e) e.preventDefault();
   const id = $("#ns_lead_id").value;
-  const payload = clear
-    ? { nextStep: "", nextStepAt: null }
-    : { nextStep: $("#ns_step").value, nextStepAt: $("#ns_at").value };
   try {
-    await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify(payload) });
-    toast(clear ? "Wiedervorlage entfernt" : "Wiedervorlage gespeichert", "success");
+    if (nsMode === "followup-new" && !clear) {
+      if (!$("#ns_at").value) { toast("Bitte ein Datum wählen.", "error"); return; }
+      await api(`/api/leads/${id}/follow-ups`, {
+        method: "POST",
+        body: JSON.stringify({ title: $("#ns_step").value, dueDate: $("#ns_at").value }),
+      });
+      toast("Wiedervorlage gespeichert", "success");
+    } else {
+      const payload = clear
+        ? { nextStep: "", nextStepAt: null }
+        : { nextStep: $("#ns_step").value, nextStepAt: $("#ns_at").value };
+      await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast(clear ? "Wiedervorlage entfernt" : "Wiedervorlage gespeichert", "success");
+    }
     closeNextStepModal();
     await refresh();
   } catch (err) {
@@ -1947,6 +2053,32 @@ function renderStageProbFields() {
     .join("");
 }
 
+// Editor für die automatischen After-Sales-Wiedervorlage-Regeln (an/aus, Text,
+// Zeitversatz in Monaten). kind bleibt erhalten (data-Attribut), key ist stabil.
+function renderAutoRuleFields() {
+  const box = $("#autoRulesFields");
+  if (!box) return;
+  const rules = Array.isArray(autoFollowupRules) ? autoFollowupRules : [];
+  if (!rules.length) {
+    box.innerHTML = `<p class="d-muted">Keine Regeln definiert.</p>`;
+    return;
+  }
+  box.innerHTML = rules.map((r) => `
+    <div class="auto-rule" data-rule-key="${esc(r.key)}" data-rule-kind="${esc(r.kind || "anniversary")}">
+      <label class="auto-rule-on">
+        <input type="checkbox" data-rule-enabled ${r.enabled ? "checked" : ""} />
+        <span>aktiv</span>
+      </label>
+      <input type="text" class="auto-rule-title" data-rule-title value="${esc(r.title || "")}"
+        maxlength="200" placeholder="Titel der Wiedervorlage" aria-label="Titel" />
+      <span class="auto-rule-when">nach
+        <input type="number" class="auto-rule-months" data-rule-months min="1" max="120" step="1"
+          value="${Number(r.offsetMonths) || 1}" aria-label="Monate nach Abschluss" />
+        Mon.</span>
+    </div>
+  `).join("");
+}
+
 // Live-Update beim Schieben: Prozentzahl und Füllstand des Reglers.
 function onProbInput(e) {
   const input = e.target.closest(".prob-range");
@@ -1970,6 +2102,7 @@ function openSettingsModal() {
     sel.disabled = true;
   }
   renderStageProbFields();
+  renderAutoRuleFields();
   $("#settingsStaleDays").value = staleDays;
   const cd = $("#settingsCaldavStatus");
   if (cd) {
@@ -2018,11 +2151,23 @@ async function saveSettings(e) {
   });
   body.stageProbabilities = probs;
   body.staleDays = Number($("#settingsStaleDays").value) || staleDays;
+  const rules = [];
+  document.querySelectorAll("#autoRulesFields .auto-rule").forEach((el) => {
+    rules.push({
+      key: el.dataset.ruleKey,
+      kind: el.dataset.ruleKind || "anniversary",
+      enabled: el.querySelector("[data-rule-enabled]").checked,
+      offsetMonths: Number(el.querySelector("[data-rule-months]").value) || 1,
+      title: el.querySelector("[data-rule-title]").value,
+    });
+  });
+  if (rules.length) body.autoFollowupRules = rules;
   try {
     const cfg = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
     currentModel = cfg.model;
     stageProbabilities = cfg.stageProbabilities || stageProbabilities;
     if (cfg.staleDays) staleDays = cfg.staleDays;
+    if (Array.isArray(cfg.autoFollowupRules)) autoFollowupRules = cfg.autoFollowupRules;
     await refresh(); // Pipeline-Wert + „Kalt"-Filter mit neuen Werten neu berechnen
     toast("Einstellungen gespeichert", "success");
     closeSettingsModal();
@@ -2981,16 +3126,50 @@ function renderAgenda() {
     ? section("Überfällig", overdue, "overdue") + section("Heute", todays, "today") + section("Demnächst", upcoming)
     : `<section class="card"><p class="d-muted">Keine geplanten Wiedervorlagen. 🎉</p></section>`;
 
+  // After-Sales: fällige automatische/manuelle Wiedervorlagen auf gewonnenen
+  // Leads (z. B. Referenz erfragen, Jubiläum). Getrennt von der Pipeline.
+  const care = Array.isArray(dueFollowUps) ? dueFollowUps : [];
+  const careSection = care.length
+    ? `<section class="card agenda-section care">
+         <h3>🤝 Kundenpflege / Referenzen <span class="agenda-n">${care.length}</span></h3>
+         <p class="d-muted">Fällige Wiedervorlagen auf gewonnenen Leads.</p>
+         ${care.map(followUpDueItemHtml).join("")}
+       </section>`
+    : "";
+
   v.innerHTML = `
     <div class="view-head"><h2>📅 Heute</h2><p class="d-muted">Anstehende Wiedervorlagen &amp; nächste Schritte</p></div>
     ${aiEnabled ? agendaAiSectionHtml() : ""}
     ${planned}
+    ${careSection}
     ${noStep.length ? `<section class="card agenda-section nostep">
         <h3>Offen ohne Wiedervorlage <span class="agenda-n">${noStep.length}</span></h3>
         <p class="d-muted">Diese offenen Leads haben keinen geplanten nächsten Schritt.</p>
         ${noStep.slice(0, 25).map(agendaItemHtml).join("")}
       </section>` : ""}
   `;
+}
+
+// Symbol je Wiedervorlage-Sorte (Referenz/Jubiläum/manuell).
+function followUpKindIcon(kind) {
+  return kind === "reference" ? "⭐" : kind === "anniversary" ? "🎉" : "📌";
+}
+
+// Eine fällige After-Sales-Wiedervorlage (gewonnener Lead) als Agenda-Zeile.
+function followUpDueItemHtml(fu) {
+  const info = dueInfo(fu.dueDate);
+  const due = info ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>` : "";
+  return `<div class="agenda-item">
+    <button type="button" class="agenda-open" data-nav="${esc(fu.leadId)}">
+      <span class="agenda-title">${followUpKindIcon(fu.kind)} ${esc(fu.company || fu.name || "—")}</span>
+      <span class="status-pill s-${esc(fu.leadStatus || "gewonnen")}">${esc(fu.leadStatus || "gewonnen")}</span>
+      <span class="agenda-step">${esc(fu.title || "Wiedervorlage")} ${due}</span>
+    </button>
+    <div class="agenda-actions">
+      <button type="button" class="btn btn-sm" data-fu-done="${esc(fu.id)}">✓ Erledigt</button>
+      <button type="button" class="btn btn-sm" data-fu-dismiss="${esc(fu.id)}">Verwerfen</button>
+    </div>
+  </div>`;
 }
 
 // --- KI-Prompts bearbeiten -------------------------------------------------

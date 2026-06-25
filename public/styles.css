@@ -1453,3 +1453,37 @@ a { color: inherit; }
   .gs-results, .bulk-bar { background: rgba(255,255,255,0.97); }
   .modal-overlay { background: rgba(31,41,30,0.55); }
 }
+
+/* ===== Wiedervorlagen: Kundenpflege-Gruppe & Detail-Karte ===== */
+.agenda-section.care h3 { color: var(--green); }
+.follow-ups { margin-top: 14px; }
+.fu-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.fu-head h3 { margin: 0; font-size: 15px; }
+.fu-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 2px; border-top: 1px solid var(--border);
+}
+.fu-row:first-of-type { border-top: none; }
+.fu-row.closed { opacity: 0.6; }
+.fu-icon { font-size: 15px; flex-shrink: 0; }
+.fu-main { flex: 1; display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fu-title { font-size: 14px; color: var(--text); font-weight: 600; }
+.fu-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.fu-state { font-size: 12px; color: var(--muted); font-weight: 600; }
+.fu-badge {
+  font-size: 11px; font-weight: 700; border-radius: 999px; padding: 1px 8px;
+  background: var(--surface-2); color: var(--muted);
+}
+.fu-badge.auto { background: rgba(21,163,74,0.14); color: var(--green); }
+
+/* ===== Einstellungen: Auto-Wiedervorlage-Regeln ===== */
+.auto-rules { display: flex; flex-direction: column; gap: 8px; }
+.auto-rule {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 8px 10px; border-radius: 10px;
+  background: var(--glass-fill); border: 1px solid var(--glass-border);
+}
+.auto-rule-on { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.auto-rule-title { flex: 1; min-width: 160px; }
+.auto-rule-when { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap; }
+.auto-rule-months { width: 64px; }
