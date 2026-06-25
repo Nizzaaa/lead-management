@@ -23,6 +23,11 @@ let currentModel = "";
 let stageProbabilities = {};
 let staleDays = 14; // „Kalt"-Schwelle (Tage ohne Aktivität), kommt aus /api/config
 let tagColors = {}; // { tagNameLowercase: "#rrggbb" } – globale Tag-Farben aus /api/config
+let autoFollowupEnabled = true; // Schalter: Auto-After-Sales-Wiedervorlagen (aus /api/config)
+let winbackEnabled = true;      // Schalter: automatische Win-back-Wiedervorlagen (aus /api/config)
+let lossReasons = [];           // Verlustgründe [{key,label,winbackMonths}] (aus /api/config)
+let dueFollowUps = [];      // fällige Wiedervorlagen auf gewonnenen Leads (Kundenpflege)
+let detailFollowUps = [];   // alle Wiedervorlagen des aktuell geöffneten Leads
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
 // KI-Tagesempfehlung der „Heute"-Seite: zwischengespeichertes Ergebnis
@@ -161,6 +166,9 @@ async function init() {
     currentModel = cfg.model || "";
     stageProbabilities = cfg.stageProbabilities || {};
     staleDays = cfg.staleDays || 14;
+    autoFollowupEnabled = cfg.autoFollowupEnabled !== false;
+    winbackEnabled = cfg.winbackEnabled !== false;
+    lossReasons = Array.isArray(cfg.lossReasons) ? cfg.lossReasons : [];
     tagColors = cfg.tagColors || {};
     renderUserBar(cfg);
     renderStatusFilters();
@@ -321,6 +329,7 @@ function showPrompts() {
 // --- Daten laden + rendern -------------------------------------------------
 async function refresh() {
   leads = await api("/api/leads");
+  try { dueFollowUps = await api("/api/follow-ups/due"); } catch { dueFollowUps = []; }
   renderTagFilter();
   updateAgendaBadge();
   renderStats(await api("/api/stats"));
@@ -356,6 +365,21 @@ function isStale(l) {
   const iso = l.lastActivityAt || l.createdAt;
   if (!iso) return false;
   return Date.now() - new Date(iso).getTime() > staleDays * 86400000;
+}
+
+// Kundenpflege-Health: gewonnene Kunden ohne Kontakt seit CUSTOMER_STALE_MONTHS
+// Monaten (Aktivität; Fallback wonAt/updatedAt). Solche mit bereits fälliger
+// Wiedervorlage bleiben außen vor (stehen schon unter „Kundenpflege"). Älteste
+// zuerst. Rein passiv aus dem bereits geladenen leads-Array (kein Backend nötig).
+const CUSTOMER_STALE_MONTHS = 6;
+function staleWonCustomers() {
+  const cutoff = Date.now() - CUSTOMER_STALE_MONTHS * 30 * 86400000;
+  const dueLeadIds = new Set((Array.isArray(dueFollowUps) ? dueFollowUps : []).map((f) => f.leadId));
+  const anchor = (l) => l.lastActivityAt || l.wonAt || l.updatedAt || "";
+  return leads
+    .filter((l) => l.status === "gewonnen" && !dueLeadIds.has(l.id))
+    .filter((l) => { const iso = anchor(l); return iso && new Date(iso).getTime() < cutoff; })
+    .sort((a, b) => (anchor(a) < anchor(b) ? -1 : anchor(a) > anchor(b) ? 1 : 0));
 }
 
 // Gemeinsame Filter (Fällig, Kalt, Tag) – ohne Status, da dieser je nach
@@ -401,7 +425,11 @@ function filteredLeads() {
 // Anzahl fälliger/überfälliger Wiedervorlagen (für den Toolbar-Chip).
 function dueLeadCount() {
   const today = todayYMD();
-  return leads.filter((l) => l.nextStepAt && l.nextStepAt <= today).length;
+  const pipeline = leads.filter(
+    (l) => l.status !== "gewonnen" && l.status !== "verloren" && l.nextStepAt && l.nextStepAt <= today
+  ).length;
+  const care = Array.isArray(dueFollowUps) ? dueFollowUps.length : 0;
+  return pipeline + care;
 }
 
 function scoreColor(score) {
@@ -519,6 +547,11 @@ async function changeStatus(id, status) {
     renderLeads();
     return;
   }
+  // Beim Verlieren zuerst den Grund erfassen (steuert auch das Win-back).
+  if (status === "verloren") {
+    openLossReasonModal(id);
+    return;
+  }
   try {
     await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ status }) });
     await refresh();
@@ -526,6 +559,39 @@ async function changeStatus(id, status) {
   } catch (err) {
     toast(err.message, "error");
     renderLeads();
+  }
+}
+
+// Verlustgrund-Modal (Kanban-Drop auf „verloren"): erfasst den Grund und setzt
+// dann den Status. Abbrechen stellt das Board wieder her (kein Statuswechsel).
+function openLossReasonModal(id) {
+  const sel = $("#loss_reason");
+  if (sel) {
+    sel.innerHTML = `<option value="">— bitte wählen —</option>` +
+      lossReasons.map((r) => `<option value="${esc(r.key)}">${esc(r.label)}</option>`).join("");
+  }
+  $("#loss_lead_id").value = id;
+  $("#lossReasonModal").classList.remove("hidden");
+}
+
+function closeLossReasonModal(revert) {
+  $("#lossReasonModal").classList.add("hidden");
+  if (revert) renderLeads(); // verschobene Karte zurück an ihren Platz
+}
+
+async function saveLossReason(e) {
+  if (e) e.preventDefault();
+  const id = $("#loss_lead_id").value;
+  try {
+    await api(`/api/leads/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ status: "verloren", lossReason: $("#loss_reason").value }),
+    });
+    $("#lossReasonModal").classList.add("hidden");
+    await refresh();
+    toast("Status → verloren", "success");
+  } catch (err) {
+    toast(err.message, "error");
   }
 }
 
@@ -861,7 +927,7 @@ function detailViewHtml(l) {
           <button type="button" class="dtab" data-dtab="dossier">📋 Dossier</button>
         </div>
         <div class="dtab-panel" data-dtab-panel="activity">
-          ${nextStepBannerHtml(l)}
+          <div id="followUpsCard">${followUpsCardHtml(l, detailId === l.id ? detailFollowUps : [])}</div>
           <section class="card" id="activityPanel">${activityPanelHtml(null)}</section>
         </div>
         <div class="dtab-panel hidden" data-dtab-panel="dossier">
@@ -888,27 +954,83 @@ function leadAboutHtml(l) {
   return `<dl class="about-list">${rows.map(([k, val]) => `<div><dt>${esc(k)}</dt><dd>${val}</dd></div>`).join("")}</dl>`;
 }
 
-// Wiedervorlage-Banner oben im Aktivitäten-Tab: nächster Schritt + Fälligkeit.
-function nextStepBannerHtml(l) {
-  const info = dueInfo(l.nextStepAt);
-  if (!l.nextStep && !info) {
-    return `<div class="next-step-banner empty">
+// Eine zusammengeführte Wiedervorlagen-Karte: der nächste fällige Eintrag steht
+// prominent oben (erledigen/bearbeiten), weitere offene klein und eingeklappt
+// darunter. Erledigte/verworfene erscheinen hier nicht mehr – sie stehen in der
+// Aktivitäts-Timeline. So gibt es keine Doppelung mit einem separaten Banner.
+function followUpsCardHtml(l, list) {
+  const open = (Array.isArray(list) ? list : []).filter((f) => f.status === "open");
+  const next = open[0] || null;
+  const rest = open.slice(1);
+  const dueChip = (ymd) => {
+    const info = dueInfo(ymd);
+    return info
+      ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>`
+      : `<span class="ns-due">${esc(fmtDate(ymd))}</span>`;
+  };
+  // Einheitliche Aktionen je Wiedervorlage – auf jeder Zeile gleich:
+  // erledigen, bearbeiten (Stift) und verwerfen (Papierkorb).
+  const fuButtons = (id) => `
+        <button type="button" class="btn btn-sm" data-fu-done="${esc(id)}">✓ Erledigt</button>
+        <button type="button" class="btn btn-sm btn-icon" data-fu-edit="${esc(id)}" title="Bearbeiten" aria-label="Bearbeiten">✏️</button>
+        <button type="button" class="btn btn-sm btn-icon" data-fu-dismiss="${esc(id)}" title="Verwerfen" aria-label="Verwerfen">🗑️</button>`;
+
+  // Prominente Kopfzeile: nächste offene Wiedervorlage; sonst ein evtl. gesetzter
+  // datumsloser Legacy-„nächster Schritt" (Mirror); sonst Leerzustand.
+  let head;
+  if (next) {
+    const info = dueInfo(next.dueDate);
+    head = `<div class="next-step-banner ${info ? info.state : ""}">
+      <div class="ns-main">
+        <span class="ns-label">Nächster Schritt</span>
+        <span class="ns-text">${esc(next.title || "Wiedervorlage")}</span>
+        ${dueChip(next.dueDate)}
+      </div>
+      <div class="ns-actions">${fuButtons(next.id)}</div>
+    </div>`;
+  } else if (l && l.nextStep) {
+    const info = dueInfo(l.nextStepAt);
+    const due = info ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>` : "";
+    head = `<div class="next-step-banner ${info ? info.state : ""}">
+      <div class="ns-main">
+        <span class="ns-label">Nächster Schritt</span>
+        <span class="ns-text">${esc(l.nextStep)}</span>
+        ${due}
+      </div>
+      <div class="ns-actions">
+        <button type="button" class="btn btn-sm" data-action="next-step-done">✓ Erledigt</button>
+        <button type="button" class="btn btn-sm btn-icon" data-action="next-step-edit" title="Bearbeiten" aria-label="Bearbeiten">✏️</button>
+        <button type="button" class="btn btn-sm btn-icon" data-action="next-step-dismiss" title="Verwerfen" aria-label="Verwerfen">🗑️</button>
+      </div>
+    </div>`;
+  } else {
+    head = `<div class="next-step-banner empty">
       <span class="ns-text">Kein nächster Schritt geplant.</span>
-      <button type="button" class="btn btn-sm" data-action="next-step-edit">+ Wiedervorlage planen</button>
     </div>`;
   }
-  const due = info ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>` : "";
-  return `<div class="next-step-banner ${info ? info.state : ""}">
-    <div class="ns-main">
-      <span class="ns-label">Nächster Schritt</span>
-      <span class="ns-text">${esc(l.nextStep || "—")}</span>
-      ${due}
+
+  // Weitere offene Wiedervorlagen: kompakt und standardmäßig eingeklappt.
+  const moreRows = rest.map((fu) => `
+    <div class="fu-row open">
+      <span class="fu-icon">${followUpKindIcon(fu.kind)}</span>
+      <span class="fu-main"><span class="fu-title">${esc(fu.title || "Wiedervorlage")}</span> ${dueChip(fu.dueDate)}</span>
+      <div class="fu-actions">${fuButtons(fu.id)}</div>
+    </div>`).join("");
+  const more = rest.length
+    ? `<details class="fu-more">
+        <summary>+ ${rest.length} weitere ${rest.length === 1 ? "Wiedervorlage" : "Wiedervorlagen"}</summary>
+        ${moreRows}
+      </details>`
+    : "";
+
+  return `<section class="card follow-ups">
+    <div class="fu-head">
+      <h3>🔁 Wiedervorlagen</h3>
+      <button type="button" class="btn btn-sm" data-fu-add>+ Planen</button>
     </div>
-    <div class="ns-actions">
-      <button type="button" class="btn btn-sm" data-action="next-step-done">✓ Erledigt</button>
-      <button type="button" class="btn btn-sm" data-action="next-step-edit">Bearbeiten</button>
-    </div>
-  </div>`;
+    ${head}
+    ${more}
+  </section>`;
 }
 
 // --- Detailseite: Aktivitäten-Timeline -------------------------------------
@@ -920,11 +1042,17 @@ let activityFilter = "all";   // aktiver Timeline-Filter
 
 async function loadDetailExtras(id) {
   try {
-    const acts = await api(`/api/leads/${id}/activities`);
+    const [acts, fus] = await Promise.all([
+      api(`/api/leads/${id}/activities`),
+      api(`/api/leads/${id}/follow-ups`).catch(() => []),
+    ]);
     if (detailId !== id) return; // inzwischen weggeblättert
     detailActivities = acts;
+    detailFollowUps = Array.isArray(fus) ? fus : [];
     const ap = $("#activityPanel");
     if (ap) ap.innerHTML = activityPanelHtml(acts);
+    const fc = $("#followUpsCard");
+    if (fc) fc.innerHTML = followUpsCardHtml(getLead(id), detailFollowUps);
   } catch (err) {
     /* Panel zeigt weiter den Ladezustand */
   }
@@ -1199,6 +1327,12 @@ function detailEditHtml(l) {
           ${input("ed_value", "Geschätzter Wert (€)", l.value, "number")}
         </div>
         <label>Status<select id="ed_status">${statusOpts}</select></label>
+        <div id="ed_loss_wrap" class="${l.status === "verloren" ? "" : "hidden"}">
+          <label>Verlustgrund<select id="ed_loss_reason">
+            <option value="">— bitte wählen —</option>
+            ${lossReasons.map((rs) => `<option value="${esc(rs.key)}" ${rs.key === l.lossReason ? "selected" : ""}>${esc(rs.label)}</option>`).join("")}
+          </select></label>
+        </div>
         <div class="form-row">
           ${input("ed_next_step", "Nächster Schritt", l.nextStep || "")}
           ${input("ed_next_step_at", "Wiedervorlage am", l.nextStepAt || "", "date")}
@@ -1222,6 +1356,7 @@ function collectStammdaten() {
     source: g("ed_source"),
     value: g("ed_value"),
     status: g("ed_status"),
+    lossReason: $("#ed_loss_reason") ? $("#ed_loss_reason").value : "",
     nextStep: g("ed_next_step"),
     nextStepAt: g("ed_next_step_at"),
     tags: parseTags(g("ed_tags")),
@@ -1301,6 +1436,14 @@ function onDetailClick(e) {
   if (delAct) { removeActivity(delAct.dataset.delAct); return; }
   const tagRm = e.target.closest("[data-tag-remove]");
   if (tagRm) { removeTagFromDetail(tagRm.dataset.tagRemove); return; }
+  const fuDone = e.target.closest("[data-fu-done]");
+  if (fuDone) { patchFollowUpStatus(fuDone.dataset.fuDone, "done"); return; }
+  const fuDismiss = e.target.closest("[data-fu-dismiss]");
+  if (fuDismiss) { patchFollowUpStatus(fuDismiss.dataset.fuDismiss, "dismissed"); return; }
+  const fuEdit = e.target.closest("[data-fu-edit]");
+  if (fuEdit) { openFollowUpEditModal(fuEdit.dataset.fuEdit); return; }
+  const fuAdd = e.target.closest("[data-fu-add]");
+  if (fuAdd) { openFollowUpModal(detailId); return; }
   const btn = e.target.closest("[data-action]");
   if (!btn) return;
   const action = btn.dataset.action;
@@ -1336,6 +1479,9 @@ function onDetailClick(e) {
       break;
     case "next-step-edit":
       openNextStepModal(id);
+      break;
+    case "next-step-dismiss":
+      dismissLegacyNextStep(id);
       break;
     case "research":
       researchLead(id, btn);
@@ -1382,6 +1528,16 @@ function bindEvents() {
   $("#nsCancel").addEventListener("click", closeNextStepModal);
   $("#nsClear").addEventListener("click", () => saveNextStep(null, true));
   $("#nextStepForm").addEventListener("submit", saveNextStep);
+  $("#lossClose").addEventListener("click", () => closeLossReasonModal(true));
+  $("#lossCancel").addEventListener("click", () => closeLossReasonModal(true));
+  $("#lossReasonForm").addEventListener("submit", saveLossReason);
+  // Verlustgrund-Feld im Detail-Edit nur bei Status „verloren" zeigen.
+  document.addEventListener("change", (e) => {
+    if (e.target && e.target.id === "ed_status") {
+      const wrap = $("#ed_loss_wrap");
+      if (wrap) wrap.classList.toggle("hidden", e.target.value !== "verloren");
+    }
+  });
 
   $("#closeResearchModal").addEventListener("click", closeResearchModal);
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
@@ -1469,6 +1625,12 @@ function bindEvents() {
     if (done) { completeNextStep(done.dataset.agendaDone); return; }
     const edit = e.target.closest("[data-agenda-edit]");
     if (edit) { openNextStepModal(edit.dataset.agendaEdit); return; }
+    const fuDone = e.target.closest("[data-fu-done]");
+    if (fuDone) { patchFollowUpStatus(fuDone.dataset.fuDone, "done"); return; }
+    const fuDismiss = e.target.closest("[data-fu-dismiss]");
+    if (fuDismiss) { patchFollowUpStatus(fuDismiss.dataset.fuDismiss, "dismissed"); return; }
+    const plan = e.target.closest("[data-agenda-plan]");
+    if (plan) { openFollowUpModal(plan.dataset.agendaPlan); return; }
     const open = e.target.closest("[data-nav]");
     if (open) location.hash = "#/lead/" + encodeURIComponent(open.dataset.nav);
   });
@@ -1670,9 +1832,29 @@ function closeDupModal() {
   $("#dupModal").classList.add("hidden");
 }
 
+// Status einer konkreten Wiedervorlage setzen (done/dismissed/open) und neu zeichnen.
+async function patchFollowUpStatus(id, status) {
+  try {
+    await api(`/api/follow-ups/${id}`, { method: "PATCH", body: JSON.stringify({ status }) });
+    toast(status === "done" ? "Wiedervorlage erledigt" : status === "dismissed" ? "Wiedervorlage verworfen" : "Wiedervorlage geöffnet", "success");
+    await refresh();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
 // Wiedervorlage als erledigt markieren: nächsten Schritt leeren + protokollieren
 // (inkl. Grund der Wiedervorlage im Aktivitäts-Log).
 async function completeNextStep(id) {
+  // Auf der Detailseite (Wiedervorlagen geladen) die dringlichste OFFENE direkt
+  // als erledigt markieren – schließt auch automatische After-Sales-Wiedervorlagen
+  // korrekt (statt nur den Spiegel zu leeren).
+  if (detailId === id && Array.isArray(detailFollowUps)) {
+    const open = detailFollowUps
+      .filter((f) => f.status === "open")
+      .sort((a, b) => (a.dueDate < b.dueDate ? -1 : a.dueDate > b.dueDate ? 1 : 0));
+    if (open.length) { await patchFollowUpStatus(open[0].id, "done"); return; }
+  }
   const l = getLead(id);
   const step = l && l.nextStep ? l.nextStep : "";
   try {
@@ -1691,16 +1873,64 @@ async function completeNextStep(id) {
   }
 }
 
-// Eigenes, schlankes Modal zum Planen/Bearbeiten der Wiedervorlage.
+// Verwirft den datumslosen Legacy-„nächsten Schritt" (Spiegel), wenn ausnahmsweise
+// keine echte Wiedervorlage dahintersteht (Altbestand/Import).
+async function dismissLegacyNextStep(id) {
+  try {
+    await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ nextStep: "", nextStepAt: null }) });
+    toast("Wiedervorlage verworfen", "success");
+    await refresh();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+// Modus des Wiedervorlage-Modals: "legacy" = Spiegel des Leads (Banner),
+// "followup-new" = neue Wiedervorlage, "followup-edit" = bestehende bearbeiten.
+let nsMode = "legacy";
+
+// Eigenes, schlankes Modal zum Planen/Bearbeiten der Wiedervorlage (Banner).
 function openNextStepModal(id) {
   const l = getLead(id);
   if (!l) return;
+  nsMode = "legacy";
   $("#ns_lead_id").value = id;
+  $("#ns_followup_id").value = "";
   $("#ns_step").value = l.nextStep || "";
   $("#ns_at").value = l.nextStepAt || "";
   const planned = l.nextStep || l.nextStepAt;
   $("#nsModalTitle").textContent = planned ? "Wiedervorlage bearbeiten" : "Wiedervorlage planen";
   $("#nsClear").classList.toggle("hidden", !planned);
+  $("#nextStepModal").classList.remove("hidden");
+  $("#ns_step").focus();
+}
+
+// Neue eigenständige Wiedervorlage zu einem Lead planen (Detail-Karte „+ Planen").
+function openFollowUpModal(id) {
+  if (!id) return;
+  nsMode = "followup-new";
+  $("#ns_lead_id").value = id;
+  $("#ns_followup_id").value = "";
+  $("#ns_step").value = "";
+  $("#ns_at").value = "";
+  $("#nsModalTitle").textContent = "Wiedervorlage planen";
+  $("#nsClear").classList.add("hidden");
+  $("#nextStepModal").classList.remove("hidden");
+  $("#ns_step").focus();
+}
+
+// Bestehende Wiedervorlage bearbeiten (Detail-Karte „Bearbeiten" am Top-Eintrag):
+// Titel/Datum dieser konkreten Wiedervorlage ändern – auch automatische.
+function openFollowUpEditModal(fuId) {
+  const fu = Array.isArray(detailFollowUps) ? detailFollowUps.find((f) => f.id === fuId) : null;
+  if (!fu) return;
+  nsMode = "followup-edit";
+  $("#ns_lead_id").value = detailId || "";
+  $("#ns_followup_id").value = fu.id;
+  $("#ns_step").value = fu.title || "";
+  $("#ns_at").value = fu.dueDate || "";
+  $("#nsModalTitle").textContent = "Wiedervorlage bearbeiten";
+  $("#nsClear").classList.remove("hidden");
   $("#nextStepModal").classList.remove("hidden");
   $("#ns_step").focus();
 }
@@ -1712,12 +1942,34 @@ function closeNextStepModal() {
 async function saveNextStep(e, clear = false) {
   if (e) e.preventDefault();
   const id = $("#ns_lead_id").value;
-  const payload = clear
-    ? { nextStep: "", nextStepAt: null }
-    : { nextStep: $("#ns_step").value, nextStepAt: $("#ns_at").value };
   try {
-    await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify(payload) });
-    toast(clear ? "Wiedervorlage entfernt" : "Wiedervorlage gespeichert", "success");
+    if (nsMode === "followup-edit") {
+      const fuId = $("#ns_followup_id").value;
+      if (clear) {
+        await api(`/api/follow-ups/${fuId}`, { method: "PATCH", body: JSON.stringify({ status: "dismissed" }) });
+        toast("Wiedervorlage verworfen", "success");
+      } else {
+        if (!$("#ns_at").value) { toast("Bitte ein Datum wählen.", "error"); return; }
+        await api(`/api/follow-ups/${fuId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ title: $("#ns_step").value, dueDate: $("#ns_at").value }),
+        });
+        toast("Wiedervorlage gespeichert", "success");
+      }
+    } else if (nsMode === "followup-new" && !clear) {
+      if (!$("#ns_at").value) { toast("Bitte ein Datum wählen.", "error"); return; }
+      await api(`/api/leads/${id}/follow-ups`, {
+        method: "POST",
+        body: JSON.stringify({ title: $("#ns_step").value, dueDate: $("#ns_at").value }),
+      });
+      toast("Wiedervorlage gespeichert", "success");
+    } else {
+      const payload = clear
+        ? { nextStep: "", nextStepAt: null }
+        : { nextStep: $("#ns_step").value, nextStepAt: $("#ns_at").value };
+      await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify(payload) });
+      toast(clear ? "Wiedervorlage entfernt" : "Wiedervorlage gespeichert", "success");
+    }
     closeNextStepModal();
     await refresh();
   } catch (err) {
@@ -1970,6 +2222,8 @@ function openSettingsModal() {
     sel.disabled = true;
   }
   renderStageProbFields();
+  $("#settingsAutoFollowups").checked = autoFollowupEnabled;
+  $("#settingsWinback").checked = winbackEnabled;
   $("#settingsStaleDays").value = staleDays;
   const cd = $("#settingsCaldavStatus");
   if (cd) {
@@ -2018,11 +2272,15 @@ async function saveSettings(e) {
   });
   body.stageProbabilities = probs;
   body.staleDays = Number($("#settingsStaleDays").value) || staleDays;
+  body.autoFollowupEnabled = $("#settingsAutoFollowups").checked;
+  body.winbackEnabled = $("#settingsWinback").checked;
   try {
     const cfg = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
     currentModel = cfg.model;
     stageProbabilities = cfg.stageProbabilities || stageProbabilities;
     if (cfg.staleDays) staleDays = cfg.staleDays;
+    if (typeof cfg.autoFollowupEnabled === "boolean") autoFollowupEnabled = cfg.autoFollowupEnabled;
+    if (typeof cfg.winbackEnabled === "boolean") winbackEnabled = cfg.winbackEnabled;
     await refresh(); // Pipeline-Wert + „Kalt"-Filter mit neuen Werten neu berechnen
     toast("Einstellungen gespeichert", "success");
     closeSettingsModal();
@@ -2756,6 +3014,18 @@ function funnelHtml(funnel) {
   return `<svg viewBox="0 0 ${W} ${H}" class="funnel-chart" preserveAspectRatio="xMidYMid meet">${segs}</svg>`;
 }
 
+// Kleine Balkenliste der häufigsten Verlustgründe (Report).
+function lossReasonBars(list) {
+  const labelFor = (k) => { const f = lossReasons.find((r) => r.key === k); return f ? f.label : (k || "—"); };
+  const max = Math.max(1, ...list.map((x) => x.count));
+  return list.map((x) => `
+    <div class="lr-row">
+      <span class="lr-label">${esc(labelFor(x.key))}</span>
+      <span class="lr-bar"><span class="lr-fill" style="width:${Math.round((x.count / max) * 100)}%"></span></span>
+      <span class="lr-count">${x.count}</span>
+    </div>`).join("");
+}
+
 async function renderReportsView() {
   const v = $("#reportsView");
   v.innerHTML = `<div class="view-head"><h2>📊 Berichte</h2></div><p class="d-muted">Lädt…</p>`;
@@ -2816,6 +3086,9 @@ async function renderReportsView() {
           <div><span class="mini-val">${esc(eur(lost.value))}</span><span class="mini-lbl">Verlorener Wert</span></div>
           <div><span class="mini-val">${lostRate} %</span><span class="mini-lbl">Verlustquote</span></div>
         </div>
+        ${(r.lossReasons && r.lossReasons.length) ? `
+        <h4 class="report-subhead">Top-Verlustgründe</h4>
+        <div class="loss-reasons">${lossReasonBars(r.lossReasons)}</div>` : ""}
       </section>
     </div>
 
@@ -2981,16 +3254,78 @@ function renderAgenda() {
     ? section("Überfällig", overdue, "overdue") + section("Heute", todays, "today") + section("Demnächst", upcoming)
     : `<section class="card"><p class="d-muted">Keine geplanten Wiedervorlagen. 🎉</p></section>`;
 
+  // After-Sales: fällige automatische/manuelle Wiedervorlagen auf gewonnenen
+  // Leads (z. B. Referenz erfragen, Jubiläum). Getrennt von der Pipeline.
+  const care = Array.isArray(dueFollowUps) ? dueFollowUps : [];
+  const careSection = care.length
+    ? `<section class="card agenda-section care">
+         <h3>🤝 Kundenpflege / Referenzen <span class="agenda-n">${care.length}</span></h3>
+         <p class="d-muted">Fällige Wiedervorlagen auf gewonnenen Leads.</p>
+         ${care.map(followUpDueItemHtml).join("")}
+       </section>`
+    : "";
+
+  // After-Sales-Health: gewonnene Kunden ohne Kontakt seit längerem (Nudge).
+  const stale = staleWonCustomers();
+  const staleSection = stale.length
+    ? `<section class="card agenda-section care">
+         <h3>🔔 Lange kein Kontakt <span class="agenda-n">${stale.length}</span></h3>
+         <p class="d-muted">Gewonnene Kunden ohne Kontakt seit ${CUSTOMER_STALE_MONTHS}+ Monaten.</p>
+         ${stale.slice(0, 25).map(staleCustomerItemHtml).join("")}
+       </section>`
+    : "";
+
   v.innerHTML = `
     <div class="view-head"><h2>📅 Heute</h2><p class="d-muted">Anstehende Wiedervorlagen &amp; nächste Schritte</p></div>
     ${aiEnabled ? agendaAiSectionHtml() : ""}
     ${planned}
+    ${careSection}
+    ${staleSection}
     ${noStep.length ? `<section class="card agenda-section nostep">
         <h3>Offen ohne Wiedervorlage <span class="agenda-n">${noStep.length}</span></h3>
         <p class="d-muted">Diese offenen Leads haben keinen geplanten nächsten Schritt.</p>
         ${noStep.slice(0, 25).map(agendaItemHtml).join("")}
       </section>` : ""}
   `;
+}
+
+// Symbol je Wiedervorlage-Sorte (Referenz/Jubiläum/manuell).
+function followUpKindIcon(kind) {
+  return kind === "reference" ? "⭐" : kind === "anniversary" ? "🎉" : kind === "winback" ? "♻️" : "📌";
+}
+
+// Eine Agenda-Zeile: gewonnener Kunde ohne Kontakt seit längerem (Health-Nudge).
+function staleCustomerItemHtml(l) {
+  const iso = l.lastActivityAt || l.wonAt || l.updatedAt;
+  const months = iso ? Math.floor((Date.now() - new Date(iso).getTime()) / (30 * 86400000)) : null;
+  const ago = months != null ? `seit ${months} Mon. kein Kontakt` : "lange kein Kontakt";
+  return `<div class="agenda-item">
+    <button type="button" class="agenda-open" data-nav="${esc(l.id)}">
+      <span class="agenda-title">🤝 ${esc(l.company || l.name || "—")}</span>
+      <span class="status-pill s-gewonnen">gewonnen</span>
+      <span class="agenda-step">${esc(ago)}</span>
+    </button>
+    <div class="agenda-actions">
+      <button type="button" class="btn btn-sm" data-agenda-plan="${esc(l.id)}">+ Wiedervorlage</button>
+    </div>
+  </div>`;
+}
+
+// Eine fällige After-Sales-Wiedervorlage (gewonnener Lead) als Agenda-Zeile.
+function followUpDueItemHtml(fu) {
+  const info = dueInfo(fu.dueDate);
+  const due = info ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>` : "";
+  return `<div class="agenda-item">
+    <button type="button" class="agenda-open" data-nav="${esc(fu.leadId)}">
+      <span class="agenda-title">${followUpKindIcon(fu.kind)} ${esc(fu.company || fu.name || "—")}</span>
+      <span class="status-pill s-${esc(fu.leadStatus || "gewonnen")}">${esc(fu.leadStatus || "gewonnen")}</span>
+      <span class="agenda-step">${esc(fu.title || "Wiedervorlage")} ${due}</span>
+    </button>
+    <div class="agenda-actions">
+      <button type="button" class="btn btn-sm" data-fu-done="${esc(fu.id)}">✓ Erledigt</button>
+      <button type="button" class="btn btn-sm" data-fu-dismiss="${esc(fu.id)}">Verwerfen</button>
+    </div>
+  </div>`;
 }
 
 // --- KI-Prompts bearbeiten -------------------------------------------------

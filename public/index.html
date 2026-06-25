@@ -168,6 +168,19 @@
         </label>
 
         <div class="settings-section">
+          <label class="settings-switch">
+            <span class="field-head">🔁 Automatische After-Sales-Follow-ups<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Legt nach „gewonnen" automatisch drei Wiedervorlagen an: nach 3&nbsp;Monaten „Nach Referenz fragen" sowie ein 6- und 12-Monats-Jubiläum. Der Zeitversatz zählt ab dem Abschlussdatum. Sie erscheinen bei Fälligkeit unter „Heute → Kundenpflege" und – falls eingerichtet – im Kalender. Aus = es werden keine neuen mehr angelegt; bereits bestehende Wiedervorlagen bleiben.</span></span></span>
+            <input type="checkbox" id="settingsAutoFollowups" class="switch-input" />
+            <span class="switch-visual" aria-hidden="true"></span>
+          </label>
+          <label class="settings-switch">
+            <span class="field-head">↩️ Automatische Win-back-Wiedervorlagen<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Legt bei „verloren" – je nach Verlustgrund – automatisch eine Wiedervorlage in der Zukunft an (z. B. „Preis"/„Timing" → 6 Monate, „Wettbewerber" → 9 Monate), um den Lead erneut anzusprechen. Sie erscheint bei Fälligkeit unter „Heute → Kundenpflege". Gründe wie „kein Bedarf" lösen kein Win-back aus.</span></span></span>
+            <input type="checkbox" id="settingsWinback" class="switch-input" />
+            <span class="switch-visual" aria-hidden="true"></span>
+          </label>
+        </div>
+
+        <div class="settings-section">
           <h3 class="field-head">📦 Daten-Import &amp; -Export<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Leads und Prospects als Datei sichern oder importieren. Die CSV verwendet das Trennzeichen „;“ und öffnet sich direkt in Excel.<br><br>Erkannte Spalten beim Lead-Import (deutsch oder englisch): Name, Firma, E-Mail, Telefon, Quelle, Status, Wert, Notizen, Nächster Schritt, Wiedervorlage sowie „KI-Bewertung (JSON)“ und „Dossier (JSON)“ aus dem Export. Bei Lead-Dubletten (gleiche E-Mail oder Firma) wird kein zweiter Datensatz angelegt; stattdessen werden nur fehlende Felder des bestehenden Leads ergänzt.<br><br>Prospect-Import erkennt u. a.: Name, Website, Ort, Branche, Größe, Potenzial, Begründung, Quelle, Status, „Kriterien (JSON)“. Dubletten (gegen vorhandene Prospects und Leads) werden übersprungen. Der Prospect-Export enthält die komplette Discovery-Liste (offen + abgelehnt).</span></span></h3>
           <div class="io-group">
             <span class="io-group-label">Leads</span>
@@ -291,12 +304,31 @@
       </div>
       <form id="nextStepForm" class="form">
         <input type="hidden" id="ns_lead_id" />
+        <input type="hidden" id="ns_followup_id" />
         <label>Nächster Schritt<input type="text" id="ns_step" placeholder="z. B. Angebot nachfassen" /></label>
         <label>Wiedervorlage am<input type="date" id="ns_at" /></label>
         <div class="form-actions">
           <button type="button" class="btn" id="nsClear">Entfernen</button>
           <button type="button" class="btn" id="nsCancel">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Speichern</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Lead als „verloren" markieren: Verlustgrund erfassen (steuert Win-back) -->
+  <div class="modal-overlay hidden" id="lossReasonModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>Lead als verloren markieren</h2>
+        <button class="icon-btn" id="lossClose" aria-label="Schließen">✕</button>
+      </div>
+      <form id="lossReasonForm" class="form">
+        <input type="hidden" id="loss_lead_id" />
+        <label>Verlustgrund<select id="loss_reason"></select></label>
+        <div class="form-actions">
+          <button type="button" class="btn" id="lossCancel">Abbrechen</button>
+          <button type="submit" class="btn btn-primary">Als verloren speichern</button>
         </div>
       </form>
     </div>

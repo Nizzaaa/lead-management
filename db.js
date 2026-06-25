@@ -47,6 +47,17 @@ function rowToLead(row) {
       : null,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+    // Abschlusszeitpunkt (gesetzt beim Übergang nach 'gewonnen') – Anker für die
+    // automatischen After-Sales-Wiedervorlagen (Referenz/Jubiläum).
+    wonAt: row.won_at
+      ? (row.won_at instanceof Date ? row.won_at.toISOString() : row.won_at)
+      : null,
+    // Verlustzeitpunkt + Grund (gesetzt beim Übergang nach 'verloren') – Anker
+    // bzw. Bedingung für die automatische Win-back-Wiedervorlage.
+    lostAt: row.lost_at
+      ? (row.lost_at instanceof Date ? row.lost_at.toISOString() : row.lost_at)
+      : null,
+    lossReason: row.loss_reason || null,
   };
 }
 
@@ -79,6 +90,13 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_step TEXT NOT NULL DEFAULT '';");
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_step_at DATE;");
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';");
+      // Abschlusszeitpunkt: stabiler Anker für die automatischen After-Sales-
+      // Wiedervorlagen (3-Monats-Referenz, 6-/12-Monats-Jubiläum). updated_at
+      // taugt dafür nicht (jede Bearbeitung verschiebt es).
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS won_at TIMESTAMPTZ;");
+      // Verlustzeitpunkt + -grund: Anker bzw. Bedingung für die Win-back-Wiedervorlage.
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS lost_at TIMESTAMPTZ;");
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS loss_reason TEXT;");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_next_step ON leads(next_step_at);");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_tags ON leads USING GIN(tags);");
@@ -105,6 +123,42 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
         );
       `);
       await pool.query("CREATE INDEX IF NOT EXISTS idx_activities_lead ON activities(lead_id, created_at DESC);");
+      // Wiedervorlagen (Follow-ups): eigenständig, mehrere je Lead möglich.
+      // source 'manual' = vom Nutzer geplant (treibt einen offenen Deal);
+      // 'auto' = vom System gesetzt (After-Sales nach 'gewonnen': Referenz/
+      // Jubiläum). kind unterscheidet die Sorte, rule_key verankert die Auto-Regel.
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS follow_ups (
+          id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+          lead_id     UUID        NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+          source      TEXT        NOT NULL DEFAULT 'manual',
+          kind        TEXT        NOT NULL DEFAULT 'manual',
+          rule_key    TEXT,
+          title       TEXT        NOT NULL DEFAULT '',
+          due_date    DATE        NOT NULL,
+          status      TEXT        NOT NULL DEFAULT 'open',
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+          done_at     TIMESTAMPTZ
+        );
+      `);
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_follow_ups_lead ON follow_ups(lead_id);");
+      await pool.query("CREATE INDEX IF NOT EXISTS idx_follow_ups_due ON follow_ups(due_date) WHERE status = 'open';");
+      // Idempotenz-Garant für Auto-Regeln: höchstens eine Zeile je (Lead, Regel).
+      await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS uq_follow_ups_rule ON follow_ups(lead_id, rule_key) WHERE rule_key IS NOT NULL;");
+      // Einmal-Migration: bestehende Wiedervorlagen (next_step_at) als manuelle
+      // Follow-up-Zeilen übernehmen. Idempotent über den Leer-Check.
+      const { rowCount: hasFollowUps } = await pool.query("SELECT 1 FROM follow_ups LIMIT 1");
+      if (!hasFollowUps) {
+        await pool.query(
+          `INSERT INTO follow_ups (lead_id, source, kind, title, due_date, status)
+           SELECT id, 'manual', 'manual', COALESCE(next_step,''), next_step_at, 'open'
+             FROM leads WHERE next_step_at IS NOT NULL`
+        );
+      }
+      // won_at für Altbestand (gewonnene Leads) näherungsweise aus updated_at
+      // füllen – nur wo noch NULL (idempotent).
+      await pool.query("UPDATE leads SET won_at = updated_at WHERE status = 'gewonnen' AND won_at IS NULL;");
       // KI-Nutzung: pro Anfrage Tokens + errechnete Kosten (für die Kostenauswertung).
       await pool.query(`
         CREATE TABLE IF NOT EXISTS ai_usage (
@@ -432,6 +486,212 @@ async function deleteActivity(id) {
   return rowCount > 0;
 }
 
+// --- Wiedervorlagen (Follow-ups) -------------------------------------------
+function rowToFollowUp(row) {
+  return {
+    id: row.id,
+    leadId: row.lead_id,
+    source: row.source,
+    kind: row.kind,
+    ruleKey: row.rule_key || null,
+    title: row.title || "",
+    dueDate: toYMD(row.due_date),
+    status: row.status,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+    doneAt: row.done_at
+      ? (row.done_at instanceof Date ? row.done_at.toISOString() : row.done_at)
+      : null,
+  };
+}
+
+// Alle Wiedervorlagen eines Leads – offene zuerst (nach Fälligkeit), dann erledigte.
+async function listFollowUps(leadId) {
+  const { rows } = await pool.query(
+    `SELECT * FROM follow_ups WHERE lead_id = $1
+      ORDER BY (status = 'open') DESC, due_date ASC, created_at ASC`,
+    [leadId]
+  );
+  return rows.map(rowToFollowUp);
+}
+
+async function getFollowUp(id) {
+  const { rows } = await pool.query("SELECT * FROM follow_ups WHERE id = $1", [id]);
+  return rows[0] ? rowToFollowUp(rows[0]) : null;
+}
+
+async function createFollowUp({ leadId, source = "manual", kind = "manual", ruleKey = null, title = "", dueDate, status = "open" }) {
+  const { rows } = await pool.query(
+    `INSERT INTO follow_ups (lead_id, source, kind, rule_key, title, due_date, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+    [leadId, source, kind, ruleKey, title, dueDate, status]
+  );
+  return rowToFollowUp(rows[0]);
+}
+
+// Legt eine automatische Wiedervorlage an – idempotent: dank des partiellen
+// Unique-Index (lead_id, rule_key) entsteht dieselbe Regel nie doppelt. Liefert
+// die neue Zeile oder null (= war bereits vorhanden).
+async function createAutoFollowUp({ leadId, kind, ruleKey, title, dueDate }) {
+  const { rows } = await pool.query(
+    `INSERT INTO follow_ups (lead_id, source, kind, rule_key, title, due_date)
+     VALUES ($1, 'auto', $2, $3, $4, $5)
+     ON CONFLICT (lead_id, rule_key) WHERE rule_key IS NOT NULL DO NOTHING
+     RETURNING *`,
+    [leadId, kind, ruleKey, title, dueDate]
+  );
+  return rows[0] ? rowToFollowUp(rows[0]) : null;
+}
+
+async function setFollowUpStatus(id, status) {
+  const s = status === "done" || status === "dismissed" ? status : "open";
+  const { rows } = await pool.query(
+    `UPDATE follow_ups
+        SET status = $2,
+            done_at = CASE WHEN $2 IN ('done','dismissed') THEN now() ELSE NULL END,
+            updated_at = now()
+      WHERE id = $1 RETURNING *`,
+    [id, s]
+  );
+  return rows[0] ? rowToFollowUp(rows[0]) : null;
+}
+
+async function updateFollowUp(id, { title, dueDate } = {}) {
+  const { rows } = await pool.query(
+    `UPDATE follow_ups
+        SET title = COALESCE($2, title),
+            due_date = COALESCE($3, due_date),
+            updated_at = now()
+      WHERE id = $1 RETURNING *`,
+    [id, title === undefined ? null : title, dueDate === undefined ? null : dueDate]
+  );
+  return rows[0] ? rowToFollowUp(rows[0]) : null;
+}
+
+// Spiegelt die dringlichste OFFENE Wiedervorlage in die Altspalten
+// next_step/next_step_at zurück, damit Exporter, Pipeline-Agenda und Stats
+// unverändert weiterlaufen. BEWUSST OHNE `updated_at = now()`: ein Spiegel-
+// Schreibvorgang darf den Lead nicht „berühren“ (sonst churnt die CalDAV-
+// SEQUENCE und die updated_at-Näherung fürs Abschlussdatum driftet).
+async function syncLeadMirror(leadId) {
+  await pool.query(
+    `UPDATE leads SET
+       next_step = COALESCE((
+         SELECT title FROM follow_ups
+          WHERE lead_id = $1 AND status = 'open'
+          ORDER BY due_date ASC, created_at ASC LIMIT 1), ''),
+       next_step_at = (
+         SELECT due_date FROM follow_ups
+          WHERE lead_id = $1 AND status = 'open'
+          ORDER BY due_date ASC, created_at ASC LIMIT 1)
+     WHERE id = $1`,
+    [leadId]
+  );
+}
+
+// Setzt won_at einmalig (nur wenn noch NULL) und liefert den aktualisierten Lead.
+async function markWon(id) {
+  const { rows } = await pool.query(
+    "UPDATE leads SET won_at = COALESCE(won_at, now()) WHERE id = $1 RETURNING *",
+    [id]
+  );
+  return rows[0] ? rowToLead(rows[0]) : null;
+}
+
+// Setzt lost_at einmalig + den (optionalen) Verlustgrund; liefert den Lead zurück.
+async function markLost(id, reason) {
+  const { rows } = await pool.query(
+    "UPDATE leads SET lost_at = COALESCE(lost_at, now()), loss_reason = $2 WHERE id = $1 RETURNING *",
+    [id, reason || null]
+  );
+  return rows[0] ? rowToLead(rows[0]) : null;
+}
+
+// Hält EINE offene manuelle Wiedervorlage passend zum Spiegel (Legacy-Pfad des
+// alten Wiedervorlage-Modals, das weiterhin next_step/next_step_at per
+// PUT /api/leads schickt). Liefert die betroffenen Zeilen für die CalDAV-Sync:
+//   { upserted: FollowUp|null, dismissed: [FollowUp] }
+async function upsertManualFollowUpFromMirror(leadId) {
+  const { rows: lr } = await pool.query(
+    "SELECT next_step, next_step_at FROM leads WHERE id = $1",
+    [leadId]
+  );
+  if (!lr[0]) return { upserted: null, dismissed: [] };
+  const title = lr[0].next_step || "";
+  const dueDate = toYMD(lr[0].next_step_at);
+  const { rows: open } = await pool.query(
+    "SELECT * FROM follow_ups WHERE lead_id = $1 AND source = 'manual' AND status = 'open' ORDER BY created_at ASC",
+    [leadId]
+  );
+  // Keine Wiedervorlage mehr im Spiegel → offene manuelle Zeilen verwerfen.
+  if (!dueDate) {
+    if (!open.length) return { upserted: null, dismissed: [] };
+    const { rows } = await pool.query(
+      `UPDATE follow_ups SET status = 'dismissed', done_at = now(), updated_at = now()
+        WHERE lead_id = $1 AND source = 'manual' AND status = 'open' RETURNING *`,
+      [leadId]
+    );
+    return { upserted: null, dismissed: rows.map(rowToFollowUp) };
+  }
+  // Erste offene manuelle Zeile aktualisieren bzw. eine neue anlegen.
+  if (!open.length) {
+    const created = await createFollowUp({ leadId, title, dueDate });
+    return { upserted: created, dismissed: [] };
+  }
+  const { rows } = await pool.query(
+    "UPDATE follow_ups SET title = $2, due_date = $3, updated_at = now() WHERE id = $1 RETURNING *",
+    [open[0].id, title, dueDate]
+  );
+  return { upserted: rowToFollowUp(rows[0]), dismissed: [] };
+}
+
+// Fällige OFFENE Wiedervorlagen auf GESCHLOSSENEN Leads (gewonnen/verloren) –
+// diese erscheinen nicht in der normalen Pipeline-Agenda. Für die separate
+// Agenda-Gruppe „Kundenpflege / Referenzen“. Zukünftige Auto-Wiedervorlagen
+// bleiben bewusst außen vor (tauchen erst bei Fälligkeit auf).
+async function getDueFollowUpsForWonLeads() {
+  const { rows } = await pool.query(
+    `SELECT f.*, l.company AS lead_company, l.name AS lead_name, l.status AS lead_status
+       FROM follow_ups f
+       JOIN leads l ON l.id = f.lead_id
+      WHERE f.status = 'open'
+        AND f.due_date <= CURRENT_DATE
+        AND l.status IN ('gewonnen', 'verloren')
+      ORDER BY f.due_date ASC, f.created_at ASC`
+  );
+  return rows.map((r) => ({
+    ...rowToFollowUp(r),
+    company: r.lead_company || "",
+    name: r.lead_name || "",
+    leadStatus: r.lead_status,
+  }));
+}
+
+// Alle offenen Wiedervorlagen samt Lead-Anzeigedaten – für den CalDAV-Resync
+// (ein Termin je Wiedervorlage). Liefert [{ lead, followUp }].
+async function listOpenFollowUpsWithLead() {
+  const { rows } = await pool.query(
+    `SELECT f.*, l.company AS lead_company, l.name AS lead_name, l.phone AS lead_phone,
+            l.email AS lead_email, l.status AS lead_status, l.value AS lead_value
+       FROM follow_ups f
+       JOIN leads l ON l.id = f.lead_id
+      WHERE f.status = 'open'
+      ORDER BY f.due_date ASC`
+  );
+  return rows.map((r) => ({
+    lead: {
+      id: r.lead_id,
+      company: r.lead_company || "",
+      name: r.lead_name || "",
+      phone: r.lead_phone || "",
+      email: r.lead_email || "",
+      status: r.lead_status,
+      value: Number(r.lead_value) || 0,
+    },
+    followUp: rowToFollowUp(r),
+  }));
+}
+
 // --- Prospects (Discovery-Liste) -------------------------------------------
 // Normalisiert eine URL/Domain für den Dublettenabgleich
 // ("https://www.Foo.de/x" → "foo.de"). Ohne Punkt (kein Domainname) → leer.
@@ -640,7 +900,15 @@ async function getReport(statuses, probabilities = {}) {
   );
   const discoveryCost14d = Number(discRes.rows[0].cost) || 0;
 
-  return { stats, funnel, wonLeadsByMonth, avgWon, avgCycleDays, costByDay, prospects, discoveryCost14d };
+  // Top-Verlustgründe (nur verlorene Leads mit erfasstem Grund).
+  const lossRes = await pool.query(
+    `SELECT loss_reason AS key, COUNT(*)::int AS count
+       FROM leads WHERE status = 'verloren' AND loss_reason IS NOT NULL
+      GROUP BY 1 ORDER BY 2 DESC`
+  );
+  const lossReasons = lossRes.rows;
+
+  return { stats, funnel, wonLeadsByMonth, avgWon, avgCycleDays, costByDay, prospects, discoveryCost14d, lossReasons };
 }
 
 // Füllt fehlende Monate der letzten 12 Monate mit 0 auf.
@@ -704,6 +972,18 @@ module.exports = {
   listRecentActivitiesForLeads,
   createActivity,
   deleteActivity,
+  listFollowUps,
+  getFollowUp,
+  createFollowUp,
+  createAutoFollowUp,
+  setFollowUpStatus,
+  updateFollowUp,
+  syncLeadMirror,
+  markWon,
+  markLost,
+  upsertManualFollowUpFromMirror,
+  getDueFollowUpsForWonLeads,
+  listOpenFollowUpsWithLead,
   listProspects,
   getProspect,
   createProspect,
