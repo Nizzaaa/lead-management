@@ -1469,6 +1469,8 @@ a { color: inherit; }
 .fu-main { flex: 1; display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .fu-title { font-size: 14px; color: var(--text); font-weight: 600; }
 .fu-actions { display: flex; gap: 6px; flex-shrink: 0; }
+/* Kompakte Icon-Buttons (Bearbeiten/Verwerfen) in den Wiedervorlage-Aktionen */
+.btn.btn-icon { padding: 4px 9px; line-height: 1.1; }
 .fu-state { font-size: 12px; color: var(--muted); font-weight: 600; }
 .fu-badge {
   font-size: 11px; font-weight: 700; border-radius: 999px; padding: 1px 8px;

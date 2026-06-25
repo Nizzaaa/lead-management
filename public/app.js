@@ -911,6 +911,12 @@ function followUpsCardHtml(l, list) {
       ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>`
       : `<span class="ns-due">${esc(fmtDate(ymd))}</span>`;
   };
+  // Einheitliche Aktionen je Wiedervorlage – auf jeder Zeile gleich:
+  // erledigen, bearbeiten (Stift) und verwerfen (Papierkorb).
+  const fuButtons = (id) => `
+        <button type="button" class="btn btn-sm" data-fu-done="${esc(id)}">✓ Erledigt</button>
+        <button type="button" class="btn btn-sm btn-icon" data-fu-edit="${esc(id)}" title="Bearbeiten" aria-label="Bearbeiten">✏️</button>
+        <button type="button" class="btn btn-sm btn-icon" data-fu-dismiss="${esc(id)}" title="Verwerfen" aria-label="Verwerfen">🗑️</button>`;
 
   // Prominente Kopfzeile: nächste offene Wiedervorlage; sonst ein evtl. gesetzter
   // datumsloser Legacy-„nächster Schritt" (Mirror); sonst Leerzustand.
@@ -923,10 +929,7 @@ function followUpsCardHtml(l, list) {
         <span class="ns-text">${esc(next.title || "Wiedervorlage")}</span>
         ${dueChip(next.dueDate)}
       </div>
-      <div class="ns-actions">
-        <button type="button" class="btn btn-sm" data-fu-done="${esc(next.id)}">✓ Erledigt</button>
-        <button type="button" class="btn btn-sm" data-fu-edit="${esc(next.id)}">Bearbeiten</button>
-      </div>
+      <div class="ns-actions">${fuButtons(next.id)}</div>
     </div>`;
   } else if (l && l.nextStep) {
     const info = dueInfo(l.nextStepAt);
@@ -939,7 +942,8 @@ function followUpsCardHtml(l, list) {
       </div>
       <div class="ns-actions">
         <button type="button" class="btn btn-sm" data-action="next-step-done">✓ Erledigt</button>
-        <button type="button" class="btn btn-sm" data-action="next-step-edit">Bearbeiten</button>
+        <button type="button" class="btn btn-sm btn-icon" data-action="next-step-edit" title="Bearbeiten" aria-label="Bearbeiten">✏️</button>
+        <button type="button" class="btn btn-sm btn-icon" data-action="next-step-dismiss" title="Verwerfen" aria-label="Verwerfen">🗑️</button>
       </div>
     </div>`;
   } else {
@@ -953,10 +957,7 @@ function followUpsCardHtml(l, list) {
     <div class="fu-row open">
       <span class="fu-icon">${followUpKindIcon(fu.kind)}</span>
       <span class="fu-main"><span class="fu-title">${esc(fu.title || "Wiedervorlage")}</span> ${dueChip(fu.dueDate)}</span>
-      <div class="fu-actions">
-        <button type="button" class="btn btn-sm" data-fu-done="${esc(fu.id)}">✓ Erledigt</button>
-        <button type="button" class="btn btn-sm" data-fu-dismiss="${esc(fu.id)}">Verwerfen</button>
-      </div>
+      <div class="fu-actions">${fuButtons(fu.id)}</div>
     </div>`).join("");
   const more = rest.length
     ? `<details class="fu-more">
@@ -1415,6 +1416,9 @@ function onDetailClick(e) {
     case "next-step-edit":
       openNextStepModal(id);
       break;
+    case "next-step-dismiss":
+      dismissLegacyNextStep(id);
+      break;
     case "research":
       researchLead(id, btn);
       break;
@@ -1793,8 +1797,20 @@ async function completeNextStep(id) {
   }
 }
 
+// Verwirft den datumslosen Legacy-„nächsten Schritt" (Spiegel), wenn ausnahmsweise
+// keine echte Wiedervorlage dahintersteht (Altbestand/Import).
+async function dismissLegacyNextStep(id) {
+  try {
+    await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ nextStep: "", nextStepAt: null }) });
+    toast("Wiedervorlage verworfen", "success");
+    await refresh();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
 // Modus des Wiedervorlage-Modals: "legacy" = Spiegel des Leads (Banner),
-// "followup-new" = neue eigenständige Wiedervorlage anlegen (Detail-Karte).
+// "followup-new" = neue Wiedervorlage, "followup-edit" = bestehende bearbeiten.
 let nsMode = "legacy";
 
 // Eigenes, schlankes Modal zum Planen/Bearbeiten der Wiedervorlage (Banner).
