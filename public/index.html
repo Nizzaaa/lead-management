@@ -173,6 +173,11 @@
             <input type="checkbox" id="settingsAutoFollowups" class="switch-input" />
             <span class="switch-visual" aria-hidden="true"></span>
           </label>
+          <label class="settings-switch">
+            <span class="field-head">↩️ Automatische Win-back-Wiedervorlagen<span class="info-tip" tabindex="0" role="button" aria-label="Mehr Informationen">i<span class="info-content">Legt bei „verloren" – je nach Verlustgrund – automatisch eine Wiedervorlage in der Zukunft an (z. B. „Preis"/„Timing" → 6 Monate, „Wettbewerber" → 9 Monate), um den Lead erneut anzusprechen. Sie erscheint bei Fälligkeit unter „Heute → Kundenpflege". Gründe wie „kein Bedarf" lösen kein Win-back aus.</span></span></span>
+            <input type="checkbox" id="settingsWinback" class="switch-input" />
+            <span class="switch-visual" aria-hidden="true"></span>
+          </label>
         </div>
 
         <div class="settings-section">
@@ -306,6 +311,24 @@
           <button type="button" class="btn" id="nsClear">Entfernen</button>
           <button type="button" class="btn" id="nsCancel">Abbrechen</button>
           <button type="submit" class="btn btn-primary">Speichern</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Lead als „verloren" markieren: Verlustgrund erfassen (steuert Win-back) -->
+  <div class="modal-overlay hidden" id="lossReasonModal">
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h2>Lead als verloren markieren</h2>
+        <button class="icon-btn" id="lossClose" aria-label="Schließen">✕</button>
+      </div>
+      <form id="lossReasonForm" class="form">
+        <input type="hidden" id="loss_lead_id" />
+        <label>Verlustgrund<select id="loss_reason"></select></label>
+        <div class="form-actions">
+          <button type="button" class="btn" id="lossCancel">Abbrechen</button>
+          <button type="submit" class="btn btn-primary">Als verloren speichern</button>
         </div>
       </form>
     </div>

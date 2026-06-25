@@ -52,6 +52,12 @@ function rowToLead(row) {
     wonAt: row.won_at
       ? (row.won_at instanceof Date ? row.won_at.toISOString() : row.won_at)
       : null,
+    // Verlustzeitpunkt + Grund (gesetzt beim Übergang nach 'verloren') – Anker
+    // bzw. Bedingung für die automatische Win-back-Wiedervorlage.
+    lostAt: row.lost_at
+      ? (row.lost_at instanceof Date ? row.lost_at.toISOString() : row.lost_at)
+      : null,
+    lossReason: row.loss_reason || null,
   };
 }
 
@@ -88,6 +94,9 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
       // Wiedervorlagen (3-Monats-Referenz, 6-/12-Monats-Jubiläum). updated_at
       // taugt dafür nicht (jede Bearbeitung verschiebt es).
       await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS won_at TIMESTAMPTZ;");
+      // Verlustzeitpunkt + -grund: Anker bzw. Bedingung für die Win-back-Wiedervorlage.
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS lost_at TIMESTAMPTZ;");
+      await pool.query("ALTER TABLE leads ADD COLUMN IF NOT EXISTS loss_reason TEXT;");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_next_step ON leads(next_step_at);");
       await pool.query("CREATE INDEX IF NOT EXISTS idx_leads_tags ON leads USING GIN(tags);");
@@ -589,6 +598,15 @@ async function markWon(id) {
   return rows[0] ? rowToLead(rows[0]) : null;
 }
 
+// Setzt lost_at einmalig + den (optionalen) Verlustgrund; liefert den Lead zurück.
+async function markLost(id, reason) {
+  const { rows } = await pool.query(
+    "UPDATE leads SET lost_at = COALESCE(lost_at, now()), loss_reason = $2 WHERE id = $1 RETURNING *",
+    [id, reason || null]
+  );
+  return rows[0] ? rowToLead(rows[0]) : null;
+}
+
 // Hält EINE offene manuelle Wiedervorlage passend zum Spiegel (Legacy-Pfad des
 // alten Wiedervorlage-Modals, das weiterhin next_step/next_step_at per
 // PUT /api/leads schickt). Liefert die betroffenen Zeilen für die CalDAV-Sync:
@@ -882,7 +900,15 @@ async function getReport(statuses, probabilities = {}) {
   );
   const discoveryCost14d = Number(discRes.rows[0].cost) || 0;
 
-  return { stats, funnel, wonLeadsByMonth, avgWon, avgCycleDays, costByDay, prospects, discoveryCost14d };
+  // Top-Verlustgründe (nur verlorene Leads mit erfasstem Grund).
+  const lossRes = await pool.query(
+    `SELECT loss_reason AS key, COUNT(*)::int AS count
+       FROM leads WHERE status = 'verloren' AND loss_reason IS NOT NULL
+      GROUP BY 1 ORDER BY 2 DESC`
+  );
+  const lossReasons = lossRes.rows;
+
+  return { stats, funnel, wonLeadsByMonth, avgWon, avgCycleDays, costByDay, prospects, discoveryCost14d, lossReasons };
 }
 
 // Füllt fehlende Monate der letzten 12 Monate mit 0 auf.
@@ -954,6 +980,7 @@ module.exports = {
   updateFollowUp,
   syncLeadMirror,
   markWon,
+  markLost,
   upsertManualFollowUpFromMirror,
   getDueFollowUpsForWonLeads,
   listOpenFollowUpsWithLead,

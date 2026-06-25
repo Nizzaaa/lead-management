@@ -24,6 +24,8 @@ let stageProbabilities = {};
 let staleDays = 14; // „Kalt"-Schwelle (Tage ohne Aktivität), kommt aus /api/config
 let tagColors = {}; // { tagNameLowercase: "#rrggbb" } – globale Tag-Farben aus /api/config
 let autoFollowupEnabled = true; // Schalter: Auto-After-Sales-Wiedervorlagen (aus /api/config)
+let winbackEnabled = true;      // Schalter: automatische Win-back-Wiedervorlagen (aus /api/config)
+let lossReasons = [];           // Verlustgründe [{key,label,winbackMonths}] (aus /api/config)
 let dueFollowUps = [];      // fällige Wiedervorlagen auf gewonnenen Leads (Kundenpflege)
 let detailFollowUps = [];   // alle Wiedervorlagen des aktuell geöffneten Leads
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
@@ -165,6 +167,8 @@ async function init() {
     stageProbabilities = cfg.stageProbabilities || {};
     staleDays = cfg.staleDays || 14;
     autoFollowupEnabled = cfg.autoFollowupEnabled !== false;
+    winbackEnabled = cfg.winbackEnabled !== false;
+    lossReasons = Array.isArray(cfg.lossReasons) ? cfg.lossReasons : [];
     tagColors = cfg.tagColors || {};
     renderUserBar(cfg);
     renderStatusFilters();
@@ -528,6 +532,11 @@ async function changeStatus(id, status) {
     renderLeads();
     return;
   }
+  // Beim Verlieren zuerst den Grund erfassen (steuert auch das Win-back).
+  if (status === "verloren") {
+    openLossReasonModal(id);
+    return;
+  }
   try {
     await api(`/api/leads/${id}`, { method: "PUT", body: JSON.stringify({ status }) });
     await refresh();
@@ -535,6 +544,39 @@ async function changeStatus(id, status) {
   } catch (err) {
     toast(err.message, "error");
     renderLeads();
+  }
+}
+
+// Verlustgrund-Modal (Kanban-Drop auf „verloren"): erfasst den Grund und setzt
+// dann den Status. Abbrechen stellt das Board wieder her (kein Statuswechsel).
+function openLossReasonModal(id) {
+  const sel = $("#loss_reason");
+  if (sel) {
+    sel.innerHTML = `<option value="">— bitte wählen —</option>` +
+      lossReasons.map((r) => `<option value="${esc(r.key)}">${esc(r.label)}</option>`).join("");
+  }
+  $("#loss_lead_id").value = id;
+  $("#lossReasonModal").classList.remove("hidden");
+}
+
+function closeLossReasonModal(revert) {
+  $("#lossReasonModal").classList.add("hidden");
+  if (revert) renderLeads(); // verschobene Karte zurück an ihren Platz
+}
+
+async function saveLossReason(e) {
+  if (e) e.preventDefault();
+  const id = $("#loss_lead_id").value;
+  try {
+    await api(`/api/leads/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ status: "verloren", lossReason: $("#loss_reason").value }),
+    });
+    $("#lossReasonModal").classList.add("hidden");
+    await refresh();
+    toast("Status → verloren", "success");
+  } catch (err) {
+    toast(err.message, "error");
   }
 }
 
@@ -1270,6 +1312,12 @@ function detailEditHtml(l) {
           ${input("ed_value", "Geschätzter Wert (€)", l.value, "number")}
         </div>
         <label>Status<select id="ed_status">${statusOpts}</select></label>
+        <div id="ed_loss_wrap" class="${l.status === "verloren" ? "" : "hidden"}">
+          <label>Verlustgrund<select id="ed_loss_reason">
+            <option value="">— bitte wählen —</option>
+            ${lossReasons.map((rs) => `<option value="${esc(rs.key)}" ${rs.key === l.lossReason ? "selected" : ""}>${esc(rs.label)}</option>`).join("")}
+          </select></label>
+        </div>
         <div class="form-row">
           ${input("ed_next_step", "Nächster Schritt", l.nextStep || "")}
           ${input("ed_next_step_at", "Wiedervorlage am", l.nextStepAt || "", "date")}
@@ -1293,6 +1341,7 @@ function collectStammdaten() {
     source: g("ed_source"),
     value: g("ed_value"),
     status: g("ed_status"),
+    lossReason: $("#ed_loss_reason") ? $("#ed_loss_reason").value : "",
     nextStep: g("ed_next_step"),
     nextStepAt: g("ed_next_step_at"),
     tags: parseTags(g("ed_tags")),
@@ -1464,6 +1513,16 @@ function bindEvents() {
   $("#nsCancel").addEventListener("click", closeNextStepModal);
   $("#nsClear").addEventListener("click", () => saveNextStep(null, true));
   $("#nextStepForm").addEventListener("submit", saveNextStep);
+  $("#lossClose").addEventListener("click", () => closeLossReasonModal(true));
+  $("#lossCancel").addEventListener("click", () => closeLossReasonModal(true));
+  $("#lossReasonForm").addEventListener("submit", saveLossReason);
+  // Verlustgrund-Feld im Detail-Edit nur bei Status „verloren" zeigen.
+  document.addEventListener("change", (e) => {
+    if (e.target && e.target.id === "ed_status") {
+      const wrap = $("#ed_loss_wrap");
+      if (wrap) wrap.classList.toggle("hidden", e.target.value !== "verloren");
+    }
+  });
 
   $("#closeResearchModal").addEventListener("click", closeResearchModal);
   $("#cancelResearchBtn").addEventListener("click", closeResearchModal);
@@ -2147,6 +2206,7 @@ function openSettingsModal() {
   }
   renderStageProbFields();
   $("#settingsAutoFollowups").checked = autoFollowupEnabled;
+  $("#settingsWinback").checked = winbackEnabled;
   $("#settingsStaleDays").value = staleDays;
   const cd = $("#settingsCaldavStatus");
   if (cd) {
@@ -2196,12 +2256,14 @@ async function saveSettings(e) {
   body.stageProbabilities = probs;
   body.staleDays = Number($("#settingsStaleDays").value) || staleDays;
   body.autoFollowupEnabled = $("#settingsAutoFollowups").checked;
+  body.winbackEnabled = $("#settingsWinback").checked;
   try {
     const cfg = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
     currentModel = cfg.model;
     stageProbabilities = cfg.stageProbabilities || stageProbabilities;
     if (cfg.staleDays) staleDays = cfg.staleDays;
     if (typeof cfg.autoFollowupEnabled === "boolean") autoFollowupEnabled = cfg.autoFollowupEnabled;
+    if (typeof cfg.winbackEnabled === "boolean") winbackEnabled = cfg.winbackEnabled;
     await refresh(); // Pipeline-Wert + „Kalt"-Filter mit neuen Werten neu berechnen
     toast("Einstellungen gespeichert", "success");
     closeSettingsModal();
@@ -2935,6 +2997,18 @@ function funnelHtml(funnel) {
   return `<svg viewBox="0 0 ${W} ${H}" class="funnel-chart" preserveAspectRatio="xMidYMid meet">${segs}</svg>`;
 }
 
+// Kleine Balkenliste der häufigsten Verlustgründe (Report).
+function lossReasonBars(list) {
+  const labelFor = (k) => { const f = lossReasons.find((r) => r.key === k); return f ? f.label : (k || "—"); };
+  const max = Math.max(1, ...list.map((x) => x.count));
+  return list.map((x) => `
+    <div class="lr-row">
+      <span class="lr-label">${esc(labelFor(x.key))}</span>
+      <span class="lr-bar"><span class="lr-fill" style="width:${Math.round((x.count / max) * 100)}%"></span></span>
+      <span class="lr-count">${x.count}</span>
+    </div>`).join("");
+}
+
 async function renderReportsView() {
   const v = $("#reportsView");
   v.innerHTML = `<div class="view-head"><h2>📊 Berichte</h2></div><p class="d-muted">Lädt…</p>`;
@@ -2995,6 +3069,9 @@ async function renderReportsView() {
           <div><span class="mini-val">${esc(eur(lost.value))}</span><span class="mini-lbl">Verlorener Wert</span></div>
           <div><span class="mini-val">${lostRate} %</span><span class="mini-lbl">Verlustquote</span></div>
         </div>
+        ${(r.lossReasons && r.lossReasons.length) ? `
+        <h4 class="report-subhead">Top-Verlustgründe</h4>
+        <div class="loss-reasons">${lossReasonBars(r.lossReasons)}</div>` : ""}
       </section>
     </div>
 
@@ -3186,7 +3263,7 @@ function renderAgenda() {
 
 // Symbol je Wiedervorlage-Sorte (Referenz/Jubiläum/manuell).
 function followUpKindIcon(kind) {
-  return kind === "reference" ? "⭐" : kind === "anniversary" ? "🎉" : "📌";
+  return kind === "reference" ? "⭐" : kind === "anniversary" ? "🎉" : kind === "winback" ? "♻️" : "📌";
 }
 
 // Eine fällige After-Sales-Wiedervorlage (gewonnener Lead) als Agenda-Zeile.

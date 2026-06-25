@@ -1001,6 +1001,15 @@ a { color: inherit; }
 .mini-val { font-size: 1.35rem; font-weight: 700; color: var(--text); }
 .mini-lbl { font-size: 0.8rem; color: var(--muted); }
 
+/* Report: Top-Verlustgründe (kleine Balkenliste) */
+.report-subhead { margin: 14px 0 6px; font-size: 13px; color: var(--muted); font-weight: 700; }
+.loss-reasons { display: flex; flex-direction: column; gap: 6px; }
+.lr-row { display: grid; grid-template-columns: minmax(110px, 38%) 1fr auto; align-items: center; gap: 10px; }
+.lr-label { font-size: 13px; color: var(--text); }
+.lr-bar { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+.lr-fill { display: block; height: 100%; border-radius: 999px; background: var(--red); }
+.lr-count { font-size: 13px; font-weight: 700; color: var(--muted); min-width: 1.5em; text-align: right; }
+
 /* ===== Wiedervorlage / nächster Schritt ===== */
 .next-step-banner {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;

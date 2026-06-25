@@ -171,6 +171,20 @@ const DEFAULT_AUTO_FOLLOWUP_RULES = [
 const autoFollowupRules = DEFAULT_AUTO_FOLLOWUP_RULES.map((r) => ({ ...r }));
 let autoFollowupEnabled = true;
 
+// Verlustgründe (fest eingebaut). winbackMonths = Zeitversatz für die automatische
+// Win-back-Wiedervorlage ab lost_at; null = kein Win-back für diesen Grund.
+const LOSS_REASONS = [
+  { key: "price",         label: "Preis zu hoch",                 winbackMonths: 6 },
+  { key: "competitor",    label: "An Wettbewerber verloren",      winbackMonths: 9 },
+  { key: "budget_timing", label: "Kein Budget / falsches Timing", winbackMonths: 6 },
+  { key: "no_need",       label: "Kein Bedarf / unpassend",       winbackMonths: null },
+  { key: "no_response",   label: "Keine Reaktion / kein Kontakt", winbackMonths: null },
+  { key: "other",         label: "Sonstiges",                     winbackMonths: null },
+];
+const sanitizeLossReason = (v) => (LOSS_REASONS.some((r) => r.key === v) ? v : null);
+const WINBACK_ENABLED_SETTING_KEY = "winback_enabled";
+let winbackEnabled = true;
+
 function sanitizeStageProbabilities(input) {
   const out = { ...DEFAULT_STAGE_PROBABILITIES };
   if (input && typeof input === "object") {
@@ -580,6 +594,27 @@ async function applyAutoFollowUps(lead, prevStatus) {
   await db.syncLeadMirror(lead.id);
 }
 
+// Legt beim Übergang nach 'verloren' – je nach Verlustgrund – eine zukünftige
+// Win-back-Wiedervorlage an („wieder anbahnen"). Nutzt dieselbe idempotente
+// Engine wie die After-Sales-Wiedervorlagen (Unique-Index je lead_id+rule_key).
+async function applyWinBackFollowUp(lead, prevStatus) {
+  if (!winbackEnabled) return;
+  if (!lead || lead.status !== "verloren" || prevStatus === "verloren") return;
+  const reason = LOSS_REASONS.find((r) => r.key === lead.lossReason);
+  if (!reason || !reason.winbackMonths) return;
+  const dueDate = addMonthsYMD(lead.lostAt || lead.updatedAt, reason.winbackMonths);
+  if (!dueDate) return;
+  const created = await db.createAutoFollowUp({
+    leadId: lead.id, kind: "winback", ruleKey: `winback_${reason.key}`,
+    title: `Wieder anbahnen (war: ${reason.label})`, dueDate,
+  });
+  if (created) {
+    await logActivity(lead.id,
+      { type: "system", title: `Win-back geplant: ${reason.label} (${dueDate})` }, "System");
+  }
+  await db.syncLeadMirror(lead.id);
+}
+
 // Zieht die Auto-Wiedervorlagen für bereits gewonnene Leads nach (Altbestand /
 // neu hinzugekommene Regeln). Idempotent und nur für Regeln, deren Fälligkeit in
 // der ZUKUNFT liegt – längst vergangene Jubiläen sollen nicht als „überfällig"
@@ -686,6 +721,8 @@ app.get("/api/config", (req, res) => {
     stageProbabilities,
     staleDays,
     autoFollowupEnabled,
+    winbackEnabled,
+    lossReasons: LOSS_REASONS,
     tagColors,
     user: actor(req) !== "—" ? actor(req) : "",
     logoutUrl: LOGOUT_URL,
@@ -694,7 +731,7 @@ app.get("/api/config", (req, res) => {
 
 // Einstellungen lesen
 app.get("/api/settings", (req, res) => {
-  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays, autoFollowupEnabled });
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays, autoFollowupEnabled, winbackEnabled });
 });
 
 // Einstellungen speichern (KI-Modell und/oder Abschlusswahrscheinlichkeiten).
@@ -719,7 +756,11 @@ app.put("/api/settings", wrap(async (req, res) => {
     autoFollowupEnabled = !!req.body.autoFollowupEnabled;
     await db.setSetting(AUTO_FOLLOWUP_ENABLED_SETTING_KEY, autoFollowupEnabled ? "1" : "0");
   }
-  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays, autoFollowupEnabled });
+  if (req.body.winbackEnabled !== undefined) {
+    winbackEnabled = !!req.body.winbackEnabled;
+    await db.setSetting(WINBACK_ENABLED_SETTING_KEY, winbackEnabled ? "1" : "0");
+  }
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays, autoFollowupEnabled, winbackEnabled });
 }));
 
 // Alle offenen Wiedervorlagen (ein Termin je Wiedervorlage) in den CalDAV-
@@ -1142,9 +1183,11 @@ app.put("/api/leads/:id", wrap(async (req, res) => {
     ? await db.upsertManualFollowUpFromMirror(lead.id)
     : { upserted: null, dismissed: [] };
   if (existing.status !== lead.status) {
+    const reasonKey = lead.status === "verloren" ? sanitizeLossReason(req.body.lossReason) : null;
+    const reasonLabel = reasonKey ? (LOSS_REASONS.find((r) => r.key === reasonKey) || {}).label : null;
     await logActivity(lead.id, {
       type: "status",
-      title: `Status: ${existing.status} → ${lead.status}`,
+      title: `Status: ${existing.status} → ${lead.status}${reasonLabel ? ` · Grund: ${reasonLabel}` : ""}`,
     }, actor(req));
   }
   // Übergang nach 'gewonnen': Abschlusszeitpunkt verankern und automatische
@@ -1152,6 +1195,16 @@ app.put("/api/leads/:id", wrap(async (req, res) => {
   if (lead.status === "gewonnen" && existing.status !== "gewonnen") {
     lead = (await db.markWon(lead.id)) || lead;
     await applyAutoFollowUps(lead, existing.status);
+  }
+  // Übergang nach 'verloren': Verlustgrund + Zeitpunkt verankern und – je nach
+  // Grund – eine zukünftige Win-back-Wiedervorlage anlegen.
+  if (lead.status === "verloren" && existing.status !== "verloren") {
+    lead = (await db.markLost(lead.id, sanitizeLossReason(req.body.lossReason))) || lead;
+    await applyWinBackFollowUp(lead, existing.status);
+  } else if (lead.status === "verloren" && req.body.lossReason !== undefined) {
+    // Bereits verloren – Grund nachträglich geändert: nur den Grund aktualisieren
+    // (kein erneutes Win-back beim reinen Bearbeiten).
+    lead = (await db.markLost(lead.id, sanitizeLossReason(req.body.lossReason))) || lead;
   }
   // Kalender (best effort): erledigte manuelle Termine entfernen, alle offenen
   // Wiedervorlagen-Termine anlegen/auffrischen (ein Termin je Wiedervorlage).
@@ -1757,6 +1810,13 @@ db.init()
       if (v !== null) autoFollowupEnabled = v === "1";
     } catch (err) {
       logger.warn("auto_followup_enabled_load_failed", { error: err.message });
+    }
+    // Schalter laden: ob automatische Win-back-Wiedervorlagen angelegt werden.
+    try {
+      const v = await db.getSetting(WINBACK_ENABLED_SETTING_KEY);
+      if (v !== null) winbackEnabled = v === "1";
+    } catch (err) {
+      logger.warn("winback_enabled_load_failed", { error: err.message });
     }
     // Auto-Wiedervorlagen für bereits gewonnene Leads nachziehen (Altbestand);
     // idempotent, nur zukünftig fällige Regeln. Blockiert den Start nicht.
