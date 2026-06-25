@@ -23,7 +23,7 @@ let currentModel = "";
 let stageProbabilities = {};
 let staleDays = 14; // „Kalt"-Schwelle (Tage ohne Aktivität), kommt aus /api/config
 let tagColors = {}; // { tagNameLowercase: "#rrggbb" } – globale Tag-Farben aus /api/config
-let autoFollowupRules = []; // konfigurierbare Auto-Wiedervorlage-Regeln (aus /api/config)
+let autoFollowupEnabled = true; // Schalter: Auto-After-Sales-Wiedervorlagen (aus /api/config)
 let dueFollowUps = [];      // fällige Wiedervorlagen auf gewonnenen Leads (Kundenpflege)
 let detailFollowUps = [];   // alle Wiedervorlagen des aktuell geöffneten Leads
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
@@ -164,7 +164,7 @@ async function init() {
     currentModel = cfg.model || "";
     stageProbabilities = cfg.stageProbabilities || {};
     staleDays = cfg.staleDays || 14;
-    autoFollowupRules = Array.isArray(cfg.autoFollowupRules) ? cfg.autoFollowupRules : [];
+    autoFollowupEnabled = cfg.autoFollowupEnabled !== false;
     tagColors = cfg.tagColors || {};
     renderUserBar(cfg);
     renderStatusFilters();
@@ -870,8 +870,7 @@ function detailViewHtml(l) {
           <button type="button" class="dtab" data-dtab="dossier">📋 Dossier</button>
         </div>
         <div class="dtab-panel" data-dtab-panel="activity">
-          ${nextStepBannerHtml(l)}
-          <div id="followUpsCard">${followUpsCardHtml(detailId === l.id ? detailFollowUps : [])}</div>
+          <div id="followUpsCard">${followUpsCardHtml(l, detailId === l.id ? detailFollowUps : [])}</div>
           <section class="card" id="activityPanel">${activityPanelHtml(null)}</section>
         </div>
         <div class="dtab-panel hidden" data-dtab-panel="dossier">
@@ -898,57 +897,81 @@ function leadAboutHtml(l) {
   return `<dl class="about-list">${rows.map(([k, val]) => `<div><dt>${esc(k)}</dt><dd>${val}</dd></div>`).join("")}</dl>`;
 }
 
-// Wiedervorlage-Banner oben im Aktivitäten-Tab: nächster Schritt + Fälligkeit.
-function nextStepBannerHtml(l) {
-  const info = dueInfo(l.nextStepAt);
-  if (!l.nextStep && !info) {
-    return `<div class="next-step-banner empty">
+// Eine zusammengeführte Wiedervorlagen-Karte: der nächste fällige Eintrag steht
+// prominent oben (erledigen/bearbeiten), weitere offene klein und eingeklappt
+// darunter. Erledigte/verworfene erscheinen hier nicht mehr – sie stehen in der
+// Aktivitäts-Timeline. So gibt es keine Doppelung mit einem separaten Banner.
+function followUpsCardHtml(l, list) {
+  const open = (Array.isArray(list) ? list : []).filter((f) => f.status === "open");
+  const next = open[0] || null;
+  const rest = open.slice(1);
+  const dueChip = (ymd) => {
+    const info = dueInfo(ymd);
+    return info
+      ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>`
+      : `<span class="ns-due">${esc(fmtDate(ymd))}</span>`;
+  };
+
+  // Prominente Kopfzeile: nächste offene Wiedervorlage; sonst ein evtl. gesetzter
+  // datumsloser Legacy-„nächster Schritt" (Mirror); sonst Leerzustand.
+  let head;
+  if (next) {
+    const info = dueInfo(next.dueDate);
+    head = `<div class="next-step-banner ${info ? info.state : ""}">
+      <div class="ns-main">
+        <span class="ns-label">Nächster Schritt</span>
+        <span class="ns-text">${esc(next.title || "Wiedervorlage")}</span>
+        ${dueChip(next.dueDate)}
+      </div>
+      <div class="ns-actions">
+        <button type="button" class="btn btn-sm" data-fu-done="${esc(next.id)}">✓ Erledigt</button>
+        <button type="button" class="btn btn-sm" data-fu-edit="${esc(next.id)}">Bearbeiten</button>
+      </div>
+    </div>`;
+  } else if (l && l.nextStep) {
+    const info = dueInfo(l.nextStepAt);
+    const due = info ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>` : "";
+    head = `<div class="next-step-banner ${info ? info.state : ""}">
+      <div class="ns-main">
+        <span class="ns-label">Nächster Schritt</span>
+        <span class="ns-text">${esc(l.nextStep)}</span>
+        ${due}
+      </div>
+      <div class="ns-actions">
+        <button type="button" class="btn btn-sm" data-action="next-step-done">✓ Erledigt</button>
+        <button type="button" class="btn btn-sm" data-action="next-step-edit">Bearbeiten</button>
+      </div>
+    </div>`;
+  } else {
+    head = `<div class="next-step-banner empty">
       <span class="ns-text">Kein nächster Schritt geplant.</span>
-      <button type="button" class="btn btn-sm" data-action="next-step-edit">+ Wiedervorlage planen</button>
     </div>`;
   }
-  const due = info ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>` : "";
-  return `<div class="next-step-banner ${info ? info.state : ""}">
-    <div class="ns-main">
-      <span class="ns-label">Nächster Schritt</span>
-      <span class="ns-text">${esc(l.nextStep || "—")}</span>
-      ${due}
-    </div>
-    <div class="ns-actions">
-      <button type="button" class="btn btn-sm" data-action="next-step-done">✓ Erledigt</button>
-      <button type="button" class="btn btn-sm" data-action="next-step-edit">Bearbeiten</button>
-    </div>
-  </div>`;
-}
 
-// Karte mit allen Wiedervorlagen des Leads (manuell + automatisch). Offene
-// lassen sich direkt erledigen/verwerfen; „+ Planen" legt eine neue an.
-function followUpsCardHtml(list) {
-  const items = Array.isArray(list) ? list : [];
-  const rows = items.map((fu) => {
-    const info = dueInfo(fu.dueDate);
-    const due = info
-      ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>`
-      : `<span class="ns-due">${esc(fmtDate(fu.dueDate))}</span>`;
-    const src = fu.source === "auto" ? `<span class="fu-badge auto">automatisch</span>` : "";
-    const actions = fu.status === "open"
-      ? `<div class="fu-actions">
-           <button type="button" class="btn btn-sm" data-fu-done="${esc(fu.id)}">✓ Erledigt</button>
-           <button type="button" class="btn btn-sm" data-fu-dismiss="${esc(fu.id)}">Verwerfen</button>
-         </div>`
-      : `<span class="fu-state">${fu.status === "done" ? "✓ erledigt" : "verworfen"}</span>`;
-    return `<div class="fu-row ${fu.status === "open" ? "open" : "closed"}">
+  // Weitere offene Wiedervorlagen: kompakt und standardmäßig eingeklappt.
+  const moreRows = rest.map((fu) => `
+    <div class="fu-row open">
       <span class="fu-icon">${followUpKindIcon(fu.kind)}</span>
-      <span class="fu-main"><span class="fu-title">${esc(fu.title || "Wiedervorlage")} ${src}</span> ${due}</span>
-      ${actions}
-    </div>`;
-  }).join("");
+      <span class="fu-main"><span class="fu-title">${esc(fu.title || "Wiedervorlage")}</span> ${dueChip(fu.dueDate)}</span>
+      <div class="fu-actions">
+        <button type="button" class="btn btn-sm" data-fu-done="${esc(fu.id)}">✓ Erledigt</button>
+        <button type="button" class="btn btn-sm" data-fu-dismiss="${esc(fu.id)}">Verwerfen</button>
+      </div>
+    </div>`).join("");
+  const more = rest.length
+    ? `<details class="fu-more">
+        <summary>+ ${rest.length} weitere ${rest.length === 1 ? "Wiedervorlage" : "Wiedervorlagen"}</summary>
+        ${moreRows}
+      </details>`
+    : "";
+
   return `<section class="card follow-ups">
     <div class="fu-head">
       <h3>🔁 Wiedervorlagen</h3>
       <button type="button" class="btn btn-sm" data-fu-add>+ Planen</button>
     </div>
-    ${items.length ? rows : `<p class="d-muted">Keine Wiedervorlagen.</p>`}
+    ${head}
+    ${more}
   </section>`;
 }
 
@@ -971,7 +994,7 @@ async function loadDetailExtras(id) {
     const ap = $("#activityPanel");
     if (ap) ap.innerHTML = activityPanelHtml(acts);
     const fc = $("#followUpsCard");
-    if (fc) fc.innerHTML = followUpsCardHtml(detailFollowUps);
+    if (fc) fc.innerHTML = followUpsCardHtml(getLead(id), detailFollowUps);
   } catch (err) {
     /* Panel zeigt weiter den Ladezustand */
   }
@@ -1352,6 +1375,8 @@ function onDetailClick(e) {
   if (fuDone) { patchFollowUpStatus(fuDone.dataset.fuDone, "done"); return; }
   const fuDismiss = e.target.closest("[data-fu-dismiss]");
   if (fuDismiss) { patchFollowUpStatus(fuDismiss.dataset.fuDismiss, "dismissed"); return; }
+  const fuEdit = e.target.closest("[data-fu-edit]");
+  if (fuEdit) { openFollowUpEditModal(fuEdit.dataset.fuEdit); return; }
   const fuAdd = e.target.closest("[data-fu-add]");
   if (fuAdd) { openFollowUpModal(detailId); return; }
   const btn = e.target.closest("[data-action]");
@@ -1802,6 +1827,22 @@ function openFollowUpModal(id) {
   $("#ns_step").focus();
 }
 
+// Bestehende Wiedervorlage bearbeiten (Detail-Karte „Bearbeiten" am Top-Eintrag):
+// Titel/Datum dieser konkreten Wiedervorlage ändern – auch automatische.
+function openFollowUpEditModal(fuId) {
+  const fu = Array.isArray(detailFollowUps) ? detailFollowUps.find((f) => f.id === fuId) : null;
+  if (!fu) return;
+  nsMode = "followup-edit";
+  $("#ns_lead_id").value = detailId || "";
+  $("#ns_followup_id").value = fu.id;
+  $("#ns_step").value = fu.title || "";
+  $("#ns_at").value = fu.dueDate || "";
+  $("#nsModalTitle").textContent = "Wiedervorlage bearbeiten";
+  $("#nsClear").classList.remove("hidden");
+  $("#nextStepModal").classList.remove("hidden");
+  $("#ns_step").focus();
+}
+
 function closeNextStepModal() {
   $("#nextStepModal").classList.add("hidden");
 }
@@ -1810,7 +1851,20 @@ async function saveNextStep(e, clear = false) {
   if (e) e.preventDefault();
   const id = $("#ns_lead_id").value;
   try {
-    if (nsMode === "followup-new" && !clear) {
+    if (nsMode === "followup-edit") {
+      const fuId = $("#ns_followup_id").value;
+      if (clear) {
+        await api(`/api/follow-ups/${fuId}`, { method: "PATCH", body: JSON.stringify({ status: "dismissed" }) });
+        toast("Wiedervorlage verworfen", "success");
+      } else {
+        if (!$("#ns_at").value) { toast("Bitte ein Datum wählen.", "error"); return; }
+        await api(`/api/follow-ups/${fuId}`, {
+          method: "PATCH",
+          body: JSON.stringify({ title: $("#ns_step").value, dueDate: $("#ns_at").value }),
+        });
+        toast("Wiedervorlage gespeichert", "success");
+      }
+    } else if (nsMode === "followup-new" && !clear) {
       if (!$("#ns_at").value) { toast("Bitte ein Datum wählen.", "error"); return; }
       await api(`/api/leads/${id}/follow-ups`, {
         method: "POST",
@@ -2053,32 +2107,6 @@ function renderStageProbFields() {
     .join("");
 }
 
-// Editor für die automatischen After-Sales-Wiedervorlage-Regeln (an/aus, Text,
-// Zeitversatz in Monaten). kind bleibt erhalten (data-Attribut), key ist stabil.
-function renderAutoRuleFields() {
-  const box = $("#autoRulesFields");
-  if (!box) return;
-  const rules = Array.isArray(autoFollowupRules) ? autoFollowupRules : [];
-  if (!rules.length) {
-    box.innerHTML = `<p class="d-muted">Keine Regeln definiert.</p>`;
-    return;
-  }
-  box.innerHTML = rules.map((r) => `
-    <div class="auto-rule" data-rule-key="${esc(r.key)}" data-rule-kind="${esc(r.kind || "anniversary")}">
-      <label class="auto-rule-on">
-        <input type="checkbox" data-rule-enabled ${r.enabled ? "checked" : ""} />
-        <span>aktiv</span>
-      </label>
-      <input type="text" class="auto-rule-title" data-rule-title value="${esc(r.title || "")}"
-        maxlength="200" placeholder="Titel der Wiedervorlage" aria-label="Titel" />
-      <span class="auto-rule-when">nach
-        <input type="number" class="auto-rule-months" data-rule-months min="1" max="120" step="1"
-          value="${Number(r.offsetMonths) || 1}" aria-label="Monate nach Abschluss" />
-        Mon.</span>
-    </div>
-  `).join("");
-}
-
 // Live-Update beim Schieben: Prozentzahl und Füllstand des Reglers.
 function onProbInput(e) {
   const input = e.target.closest(".prob-range");
@@ -2102,7 +2130,7 @@ function openSettingsModal() {
     sel.disabled = true;
   }
   renderStageProbFields();
-  renderAutoRuleFields();
+  $("#settingsAutoFollowups").checked = autoFollowupEnabled;
   $("#settingsStaleDays").value = staleDays;
   const cd = $("#settingsCaldavStatus");
   if (cd) {
@@ -2151,23 +2179,13 @@ async function saveSettings(e) {
   });
   body.stageProbabilities = probs;
   body.staleDays = Number($("#settingsStaleDays").value) || staleDays;
-  const rules = [];
-  document.querySelectorAll("#autoRulesFields .auto-rule").forEach((el) => {
-    rules.push({
-      key: el.dataset.ruleKey,
-      kind: el.dataset.ruleKind || "anniversary",
-      enabled: el.querySelector("[data-rule-enabled]").checked,
-      offsetMonths: Number(el.querySelector("[data-rule-months]").value) || 1,
-      title: el.querySelector("[data-rule-title]").value,
-    });
-  });
-  if (rules.length) body.autoFollowupRules = rules;
+  body.autoFollowupEnabled = $("#settingsAutoFollowups").checked;
   try {
     const cfg = await api("/api/settings", { method: "PUT", body: JSON.stringify(body) });
     currentModel = cfg.model;
     stageProbabilities = cfg.stageProbabilities || stageProbabilities;
     if (cfg.staleDays) staleDays = cfg.staleDays;
-    if (Array.isArray(cfg.autoFollowupRules)) autoFollowupRules = cfg.autoFollowupRules;
+    if (typeof cfg.autoFollowupEnabled === "boolean") autoFollowupEnabled = cfg.autoFollowupEnabled;
     await refresh(); // Pipeline-Wert + „Kalt"-Filter mit neuen Werten neu berechnen
     toast("Einstellungen gespeichert", "success");
     closeSettingsModal();

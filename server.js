@@ -160,16 +160,16 @@ const PROMPTS_SETTING_KEY = "prompt_overrides";
 
 // Automatische Wiedervorlagen (After-Sales): vom System gesetzte Follow-ups,
 // ausgelöst durch den Übergang eines Leads nach 'gewonnen'. offsetMonths =
-// Fälligkeit relativ zum Abschluss (won_at). In den Einstellungen je Regel
-// an-/abschaltbar und in Zeitversatz/Text anpassbar; als JSON in app_settings.
-const AUTO_FOLLOWUP_RULES_SETTING_KEY = "auto_followup_rules";
-const FOLLOWUP_KINDS = ["reference", "anniversary", "manual"];
+// Fälligkeit relativ zum Abschluss (won_at). Die drei Regeln sind fest
+// eingebaut; in den Einstellungen lässt sich nur an-/abschalten, ob sie greifen.
+const AUTO_FOLLOWUP_ENABLED_SETTING_KEY = "auto_followup_enabled";
 const DEFAULT_AUTO_FOLLOWUP_RULES = [
   { key: "won_reference_3m", enabled: true, offsetMonths: 3, kind: "reference", title: "Nach Referenz fragen" },
   { key: "anniversary_6m", enabled: true, offsetMonths: 6, kind: "anniversary", title: "6-Monats-Jubiläum: Kontakt halten" },
   { key: "anniversary_12m", enabled: true, offsetMonths: 12, kind: "anniversary", title: "12-Monats-Jubiläum: Folgegeschäft anbahnen" },
 ];
-let autoFollowupRules = DEFAULT_AUTO_FOLLOWUP_RULES.map((r) => ({ ...r }));
+const autoFollowupRules = DEFAULT_AUTO_FOLLOWUP_RULES.map((r) => ({ ...r }));
+let autoFollowupEnabled = true;
 
 function sanitizeStageProbabilities(input) {
   const out = { ...DEFAULT_STAGE_PROBABILITIES };
@@ -201,28 +201,6 @@ function sanitizeTagColors(input) {
     }
   }
   return out;
-}
-
-// Validiert die Auto-Wiedervorlage-Regeln (frei konfigurierbar). Jede Regel
-// braucht einen stabilen key; offsetMonths 1–120, kind aus der Whitelist, Titel
-// gedeckelt. Leere/kaputte Eingaben fallen auf die Defaults zurück.
-function sanitizeAutoFollowupRules(input) {
-  if (!Array.isArray(input)) return DEFAULT_AUTO_FOLLOWUP_RULES.map((r) => ({ ...r }));
-  const out = [];
-  const seen = new Set();
-  for (const r of input) {
-    if (!r || typeof r !== "object") continue;
-    const key = String(r.key || "").trim().toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 40);
-    if (!key || seen.has(key)) continue;
-    const months = Math.round(Number(r.offsetMonths));
-    if (!Number.isFinite(months) || months < 1 || months > 120) continue;
-    const kind = FOLLOWUP_KINDS.includes(r.kind) ? r.kind : "anniversary";
-    const title = (typeof r.title === "string" ? r.title.trim() : "").slice(0, 200) || "Wiedervorlage";
-    seen.add(key);
-    out.push({ key, enabled: r.enabled !== false, offsetMonths: months, kind, title });
-    if (out.length >= 20) break;
-  }
-  return out.length ? out : DEFAULT_AUTO_FOLLOWUP_RULES.map((r) => ({ ...r }));
 }
 
 // anchor (ISO-Zeitstempel oder YYYY-MM-DD) + months → "YYYY-MM-DD". UTC-basiert,
@@ -584,6 +562,7 @@ async function logActivity(leadId, fields, who) {
 // Scheduler. Idempotent (Unique-Index). Reine DB-Arbeit; den Kalender gleicht
 // der aufrufende Handler im Anschluss für alle offenen Wiedervorlagen an.
 async function applyAutoFollowUps(lead, prevStatus) {
+  if (!autoFollowupEnabled) return;
   if (!lead || lead.status !== "gewonnen" || prevStatus === "gewonnen") return;
   const anchor = lead.wonAt || lead.updatedAt;
   for (const rule of autoFollowupRules) {
@@ -606,6 +585,7 @@ async function applyAutoFollowUps(lead, prevStatus) {
 // der ZUKUNFT liegt – längst vergangene Jubiläen sollen nicht als „überfällig"
 // aufpoppen. Läuft einmal beim Start, ohne Kalender-Aufrufe.
 async function backfillAutoFollowUps() {
+  if (!autoFollowupEnabled) return;
   const today = addMonthsYMD(null, 0); // heutiges Datum als YYYY-MM-DD
   const leads = await db.listLeads();
   for (const lead of leads) {
@@ -705,7 +685,7 @@ app.get("/api/config", (req, res) => {
     statuses: STATUSES,
     stageProbabilities,
     staleDays,
-    autoFollowupRules,
+    autoFollowupEnabled,
     tagColors,
     user: actor(req) !== "—" ? actor(req) : "",
     logoutUrl: LOGOUT_URL,
@@ -714,7 +694,7 @@ app.get("/api/config", (req, res) => {
 
 // Einstellungen lesen
 app.get("/api/settings", (req, res) => {
-  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays, autoFollowupRules });
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays, autoFollowupEnabled });
 });
 
 // Einstellungen speichern (KI-Modell und/oder Abschlusswahrscheinlichkeiten).
@@ -735,11 +715,11 @@ app.put("/api/settings", wrap(async (req, res) => {
     staleDays = sanitizeStaleDays(req.body.staleDays);
     await db.setSetting(STALE_DAYS_SETTING_KEY, String(staleDays));
   }
-  if (req.body.autoFollowupRules !== undefined) {
-    autoFollowupRules = sanitizeAutoFollowupRules(req.body.autoFollowupRules);
-    await db.setSetting(AUTO_FOLLOWUP_RULES_SETTING_KEY, JSON.stringify(autoFollowupRules));
+  if (req.body.autoFollowupEnabled !== undefined) {
+    autoFollowupEnabled = !!req.body.autoFollowupEnabled;
+    await db.setSetting(AUTO_FOLLOWUP_ENABLED_SETTING_KEY, autoFollowupEnabled ? "1" : "0");
   }
-  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays, autoFollowupRules });
+  res.json({ model: currentModel, models: AVAILABLE_MODELS, stageProbabilities, staleDays, autoFollowupEnabled });
 }));
 
 // Alle offenen Wiedervorlagen (ein Termin je Wiedervorlage) in den CalDAV-
@@ -1771,12 +1751,12 @@ db.init()
     } catch (err) {
       logger.warn("prompt_overrides_load_failed", { error: err.message });
     }
-    // Gespeicherte Auto-Wiedervorlage-Regeln laden.
+    // Schalter laden: ob automatische After-Sales-Wiedervorlagen angelegt werden.
     try {
-      const savedRules = await db.getSetting(AUTO_FOLLOWUP_RULES_SETTING_KEY);
-      if (savedRules) autoFollowupRules = sanitizeAutoFollowupRules(JSON.parse(savedRules));
+      const v = await db.getSetting(AUTO_FOLLOWUP_ENABLED_SETTING_KEY);
+      if (v !== null) autoFollowupEnabled = v === "1";
     } catch (err) {
-      logger.warn("auto_followup_rules_load_failed", { error: err.message });
+      logger.warn("auto_followup_enabled_load_failed", { error: err.message });
     }
     // Auto-Wiedervorlagen für bereits gewonnene Leads nachziehen (Altbestand);
     // idempotent, nur zukünftig fällige Regeln. Blockiert den Start nicht.

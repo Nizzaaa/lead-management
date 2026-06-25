@@ -1476,14 +1476,20 @@ a { color: inherit; }
 }
 .fu-badge.auto { background: rgba(21,163,74,0.14); color: var(--green); }
 
-/* ===== Einstellungen: Auto-Wiedervorlage-Regeln ===== */
-.auto-rules { display: flex; flex-direction: column; gap: 8px; }
-.auto-rule {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 8px 10px; border-radius: 10px;
-  background: var(--glass-fill); border: 1px solid var(--glass-border);
+/* Eingeklappte „weitere Wiedervorlagen" in der Detail-Karte */
+.fu-more { margin-top: 6px; }
+.fu-more > summary {
+  cursor: pointer; list-style: none; font-size: 13px; font-weight: 600;
+  color: var(--muted); padding: 6px 2px; user-select: none;
 }
-.auto-rule-on { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; }
-.auto-rule-title { flex: 1; min-width: 160px; }
-.auto-rule-when { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); white-space: nowrap; }
-.auto-rule-months { width: 64px; }
+.fu-more > summary::-webkit-details-marker { display: none; }
+.fu-more > summary:hover,
+.fu-more[open] > summary { color: var(--text); }
+.fu-more .fu-row { font-size: 13px; }
+
+/* ===== Einstellungen: Schalter (z. B. Auto-After-Sales-Wiedervorlagen) ===== */
+.settings-switch { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+.settings-switch input[type="checkbox"] {
+  width: 18px; height: 18px; flex-shrink: 0; accent-color: var(--primary); cursor: pointer;
+}
+.settings-switch .field-head { margin: 0; }
