@@ -31,10 +31,12 @@ let detailFollowUps = [];   // alle Wiedervorlagen des aktuell geöffneten Leads
 let view = localStorage.getItem("leadpilot_view") === "kanban" ? "kanban" : "list";
 
 // KI-Tagesempfehlung der „Heute"-Seite: zwischengespeichertes Ergebnis
-// ({ recommendations, generatedAt }) und ob gerade eine Anfrage läuft. Wird
-// pro Sitzung einmal automatisch geladen, danach nur per „Aktualisieren".
+// ({ recommendations, generatedAt }) und ob gerade eine Anfrage läuft. Die
+// Sektion ist standardmäßig eingeklappt und lädt erst beim ersten Aufklappen –
+// danach nur noch manuell per „Aktualisieren" (spart KI-Kosten beim Öffnen).
 let agendaAi = null;
 let agendaAiLoading = false;
+let agendaAiOpen = false; // ist die KI-Empfehlung aufgeklappt?
 
 // Eingeklappte Board-Spalten (Status-Namen). Persistiert wie `view`, lebt
 // außerhalb des DOM, da renderKanban() das Board per innerHTML neu aufbaut.
@@ -1621,6 +1623,8 @@ function bindEvents() {
   $("#agendaView").addEventListener("click", (e) => {
     const air = e.target.closest("[data-agenda-ai-refresh]");
     if (air) { loadAgendaRecommendations(); return; }
+    const aiToggle = e.target.closest("[data-agenda-ai-toggle]");
+    if (aiToggle) { toggleAgendaAi(); return; }
     const done = e.target.closest("[data-agenda-done]");
     if (done) { completeNextStep(done.dataset.agendaDone); return; }
     const edit = e.target.closest("[data-agenda-edit]");
@@ -3127,9 +3131,8 @@ function showAgenda() {
   showOnly("agendaView");
   setActiveNav("agenda");
   renderAgenda();
-  // Beim ersten Öffnen je Sitzung automatisch eine Empfehlung erstellen
-  // (danach manuell per „Aktualisieren"). Nur wenn die KI aktiv ist.
-  if (aiEnabled && !agendaAi && !agendaAiLoading) loadAgendaRecommendations();
+  // Keine automatische KI-Anfrage beim Öffnen mehr: Die Empfehlung wird erst
+  // geladen, wenn die (standardmäßig eingeklappte) Sektion aufgeklappt wird.
   window.scrollTo(0, 0);
 }
 
@@ -3180,7 +3183,10 @@ function agendaRecHtml(rec, i) {
 }
 
 // Die komplette KI-Sektion je nach Zustand (lädt / Ergebnis / leer / Start).
+// Standardmäßig eingeklappt: Der Body wird nur sichtbar (und die Anfrage erst
+// gestartet), wenn die Sektion aufgeklappt ist – das spart unnötige KI-Kosten.
 function agendaAiSectionHtml() {
+  const open = agendaAiOpen;
   let body;
   if (agendaAiLoading) {
     body = `<div class="ai-loading"><span class="spinner"></span> KI wählt die wichtigsten Handlungen…</div>`;
@@ -3194,16 +3200,37 @@ function agendaAiSectionHtml() {
   const stamp = agendaAi && agendaAi.generatedAt
     ? `<span class="agenda-ai-stamp">aktualisiert ${esc(relTime(agendaAi.generatedAt))}</span>` : "";
   const btnLabel = agendaAiLoading ? "⏳ …" : agendaAi ? "🔄 Aktualisieren" : "✨ Empfehlungen";
-  return `<section class="card agenda-ai">
+  // Untertitel signalisiert im eingeklappten Zustand, dass erst beim Aufklappen geladen wird.
+  const sub = open
+    ? "Deine nächsten 3 Handlungen"
+    : (agendaAi ? "Aufklappen zum Ansehen" : "Aufklappen, um zu laden");
+  return `<section class="card agenda-ai ${open ? "open" : "collapsed"}">
     <div class="agenda-ai-head">
-      <h3>🤖 KI-Empfehlung <span class="agenda-ai-sub">Deine nächsten 3 Handlungen</span></h3>
+      <h3 class="agenda-ai-titlewrap">
+        <button type="button" class="agenda-ai-toggle" data-agenda-ai-toggle aria-expanded="${open ? "true" : "false"}" aria-controls="agendaAiBody">
+          <span class="agenda-ai-chevron" aria-hidden="true">▸</span>
+          <span class="agenda-ai-title">🤖 KI-Empfehlung</span>
+          <span class="agenda-ai-sub">${esc(sub)}</span>
+        </button>
+      </h3>
       <div class="agenda-ai-tools">
         ${stamp}
         <button type="button" class="btn btn-ai btn-sm" data-agenda-ai-refresh ${agendaAiLoading ? "disabled" : ""}>${btnLabel}</button>
       </div>
     </div>
-    <div class="agenda-ai-body">${body}</div>
+    <div class="agenda-ai-body" id="agendaAiBody">${body}</div>
   </section>`;
+}
+
+// Auf-/Zuklappen der KI-Empfehlung. Beim ersten Aufklappen (noch kein Ergebnis)
+// wird die Empfehlung automatisch nachgeladen – sonst nur die Ansicht neu gezeichnet.
+function toggleAgendaAi() {
+  agendaAiOpen = !agendaAiOpen;
+  if (agendaAiOpen && aiEnabled && !agendaAi && !agendaAiLoading) {
+    loadAgendaRecommendations(); // zeichnet selbst neu
+  } else {
+    renderAgenda();
+  }
 }
 
 // Holt die KI-Empfehlung vom Server und zeichnet die „Heute"-Seite neu. Übergibt
