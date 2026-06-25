@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>FU/GE Solutions · Lead-Verwaltung mit KI</title>
-  <link rel="stylesheet" href="styles.css?v=39" />
+  <link rel="stylesheet" href="styles.css?v=40" />
   <link rel="icon" href="Branding/Logo_Icon_Quadratisch_Transparent.png" />
 </head>
 <body>
@@ -21,11 +21,13 @@
         <input type="search" id="globalSearchInput" class="gs-input" placeholder="🔍 Schnellsuche…" autocomplete="off" aria-label="Schnellsuche über Leads, Prospects, Funktionen, Tags und Eingruppierung" />
         <div id="globalSearchResults" class="gs-results hidden" role="listbox"></div>
       </div>
-      <a class="navlink" href="#/" data-nav-link="list">🗂 Leads</a>
-      <a class="navlink" href="#/heute" data-nav-link="agenda">📅 Heute <span id="agendaDue" class="nav-badge agenda-due hidden">0</span></a>
-      <a class="navlink" href="#/prospects" data-nav-link="prospects">📇 Prospects</a>
-      <a class="navlink" href="#/reports" data-nav-link="reports">📊 Berichte</a>
-      <button id="settingsBtn" class="icon-btn" title="Einstellungen" aria-label="Einstellungen">⚙️</button>
+      <nav class="nav-group" aria-label="Seitenbereiche">
+        <a class="navlink" href="#/" data-nav-link="list">🗂 Leads</a>
+        <a class="navlink" href="#/heute" data-nav-link="agenda">📅 Heute <span id="agendaDue" class="nav-badge agenda-due hidden">0</span></a>
+        <a class="navlink" href="#/prospects" data-nav-link="prospects">📇 Prospects</a>
+        <a class="navlink" href="#/reports" data-nav-link="reports">📊 Berichte</a>
+      </nav>
+      <button id="settingsBtn" class="icon-btn topbar-icon" title="Einstellungen" aria-label="Einstellungen">⚙️</button>
       <button id="addLeadBtn" class="btn btn-primary">🔎 Lead recherchieren</button>
     </div>
   </header>
@@ -362,6 +364,6 @@
 
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=43"></script>
+  <script src="app.js?v=44"></script>
 </body>
 </html>
