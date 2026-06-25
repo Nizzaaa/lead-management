@@ -72,10 +72,13 @@ services:
 
   # Adminer – schlanker Web-Viewer für die Datenbank (nur Entwicklung).
   # Tabellen ansehen/bearbeiten und SQL ausführen, ohne externes DB-Tool.
-  # Login im Browser (Server ist vorbelegt):
+  # Im Browser über den VOLLSTÄNDIGEN Link öffnen (sonst stuft der Browser ein
+  # bloß getipptes "localhost:8080" evtl. auf HTTPS hoch – Adminer spricht nur
+  # HTTP, Fehler "Unsupported SSL request"):
+  #   http://127.0.0.1:8080/?pgsql=db
+  # Login (Server ist vorbelegt):
   #   System: PostgreSQL · Server: db · Benutzer: leadpilot
   #   Passwort: leadpilot · Datenbank: leadpilot
-  # Direktlink mit vorgewähltem PostgreSQL + Server: http://localhost:8080/?pgsql=db
   adminer:
     image: adminer:5
     container_name: leadpilot-dev-adminer

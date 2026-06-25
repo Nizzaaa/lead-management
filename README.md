@@ -155,12 +155,16 @@ docker compose -f docker-compose.dev.yml up
 Browser: **http://localhost:3000** · KI optional: `ANTHROPIC_API_KEY` vorab setzen
 oder in `.env` hinterlegen. So siehst du Änderungen sofort, ganz ohne Image-Build.
 
-**DB-Viewer (Adminer):** parallel läuft unter **http://localhost:8080** ein
-schlanker Datenbank-Viewer (nur lokal erreichbar). Damit lassen sich Tabellen
-ansehen/bearbeiten und SQL ausführen, ohne externes DB-Tool. Login: *System*
-PostgreSQL, *Server* `db`, Benutzer/Passwort/Datenbank jeweils `leadpilot`.
-Direktlink mit Vorauswahl: **http://localhost:8080/?pgsql=db** (nur Dev – in
-Produktion bewusst nicht enthalten). Anderer Host-Port bei Bedarf via `ADMINER_PORT`.
+**DB-Viewer (Adminer):** parallel läuft ein schlanker Datenbank-Viewer (nur lokal
+erreichbar) zum Ansehen/Bearbeiten von Tabellen und Ausführen von SQL. Über den
+**vollständigen Link** öffnen: **http://127.0.0.1:8080/?pgsql=db** — Login: *System*
+PostgreSQL, *Server* `db`, Benutzer/Passwort/Datenbank jeweils `leadpilot`. (Nur Dev,
+in Produktion bewusst nicht enthalten; anderer Host-Port via `ADMINER_PORT`.)
+
+> Tipp: **nicht** bloß `localhost:8080` in die Adressleiste tippen — der Browser stuft
+> das evtl. auf `https://` hoch (Adminer spricht nur HTTP → Fehler „Unsupported SSL
+> request"). Den vollständigen `http://`-Link nutzen. Hält sich HTTPS hartnäckig: HSTS
+> für den Host unter `chrome://net-internals/#hsts` löschen bzw. HTTPS-Only-Ausnahme setzen.
 
 ### 2. Feature-Branch → Pull Request → CI
 
