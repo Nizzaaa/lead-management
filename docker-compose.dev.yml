@@ -70,6 +70,27 @@ services:
       db:
         condition: service_healthy
 
+  # Adminer – schlanker Web-Viewer für die Datenbank (nur Entwicklung).
+  # Tabellen ansehen/bearbeiten und SQL ausführen, ohne externes DB-Tool.
+  # Login im Browser (Server ist vorbelegt):
+  #   System: PostgreSQL · Server: db · Benutzer: leadpilot
+  #   Passwort: leadpilot · Datenbank: leadpilot
+  # Direktlink mit vorgewähltem PostgreSQL + Server: http://localhost:8080/?pgsql=db
+  adminer:
+    image: adminer:5
+    container_name: leadpilot-dev-adminer
+    ports:
+      # Nur lokal erreichbar (an 127.0.0.1 gebunden) – der DB-Viewer wird bewusst
+      # nicht im LAN exponiert, analog zur Postgres-Bindung oben.
+      - "127.0.0.1:${ADMINER_PORT:-8080}:8080"
+    environment:
+      # "db" (der Postgres-Service) als Server vorbelegen, damit im Login-Formular
+      # nur noch Benutzer/Passwort/Datenbank (jeweils "leadpilot") nötig sind.
+      - ADMINER_DEFAULT_SERVER=db
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   leadpilot-db-dev:
   leadpilot-node-modules:

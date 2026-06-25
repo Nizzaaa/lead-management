@@ -155,6 +155,13 @@ docker compose -f docker-compose.dev.yml up
 Browser: **http://localhost:3000** · KI optional: `ANTHROPIC_API_KEY` vorab setzen
 oder in `.env` hinterlegen. So siehst du Änderungen sofort, ganz ohne Image-Build.
 
+**DB-Viewer (Adminer):** parallel läuft unter **http://localhost:8080** ein
+schlanker Datenbank-Viewer (nur lokal erreichbar). Damit lassen sich Tabellen
+ansehen/bearbeiten und SQL ausführen, ohne externes DB-Tool. Login: *System*
+PostgreSQL, *Server* `db`, Benutzer/Passwort/Datenbank jeweils `leadpilot`.
+Direktlink mit Vorauswahl: **http://localhost:8080/?pgsql=db** (nur Dev – in
+Produktion bewusst nicht enthalten). Anderer Host-Port bei Bedarf via `ADMINER_PORT`.
+
 ### 2. Feature-Branch → Pull Request → CI
 
 - Auf einem **Branch** arbeiten, nicht direkt auf `main`.
