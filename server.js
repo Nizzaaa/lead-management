@@ -1675,7 +1675,13 @@ function sanitizeFollowUpInput(body = {}) {
     const d = typeof body.dueDate === "string" ? body.dueDate.trim() : "";
     dueDate = /^\d{4}-\d{2}-\d{2}$/.test(d) && !Number.isNaN(new Date(d).getTime()) ? d : null;
   }
-  return { title, dueDate };
+  // Optionale Uhrzeit "HH:MM" (für echte Termine). Ungültig/leer → null.
+  let dueTime;
+  if (body.dueTime !== undefined) {
+    const t = typeof body.dueTime === "string" ? body.dueTime.trim() : "";
+    dueTime = /^([01]\d|2[0-3]):[0-5]\d$/.test(t) ? t : null;
+  }
+  return { title, dueDate, dueTime };
 }
 
 // Fällige offene Wiedervorlagen auf geschlossenen Leads (Gruppe „Kundenpflege /
@@ -1693,11 +1699,22 @@ app.get("/api/leads/:id/follow-ups", wrap(async (req, res) => {
 app.post("/api/leads/:id/follow-ups", wrap(async (req, res) => {
   const lead = await db.getLead(req.params.id);
   if (!lead) return res.status(404).json({ error: "Lead nicht gefunden." });
-  const { title, dueDate } = sanitizeFollowUpInput(req.body);
+  const { title, dueDate, dueTime } = sanitizeFollowUpInput(req.body);
   if (!dueDate) return res.status(400).json({ error: "Gültiges Datum (YYYY-MM-DD) erforderlich." });
-  const fu = await db.createFollowUp({ leadId: lead.id, source: "manual", kind: "manual", title: title || "", dueDate });
+  // Ein echter Termin (kind 'appointment') trägt eine Uhrzeit und landet als
+  // besetzter Kalendereintrag im CalDAV-Sync; sonst eine reine Wiedervorlage.
+  const kind = req.body.kind === "appointment" ? "appointment" : "manual";
+  const fu = await db.createFollowUp({
+    leadId: lead.id, source: "manual", kind, title: title || "", dueDate, dueTime: dueTime || null,
+  });
   await db.syncLeadMirror(lead.id);
-  await logActivity(lead.id, { type: "system", title: `Wiedervorlage geplant: ${fu.title || dueDate}` }, actor(req));
+  if (kind === "appointment") {
+    const [yy, mm, dd] = dueDate.split("-");
+    const when = [`${dd}.${mm}.${yy}`, fu.dueTime ? `${fu.dueTime} Uhr` : ""].filter(Boolean).join(" ");
+    await logActivity(lead.id, { type: "meeting", title: `Termin vereinbart: ${[fu.title, when].filter(Boolean).join(" – ")}` }, actor(req));
+  } else {
+    await logActivity(lead.id, { type: "system", title: `Wiedervorlage geplant: ${fu.title || dueDate}` }, actor(req));
+  }
   caldav.syncFollowUp(lead, fu, null, reqBaseUrl(req));
   res.status(201).json(fu);
 }));
@@ -1719,11 +1736,11 @@ app.patch("/api/follow-ups/:id", wrap(async (req, res) => {
         actor(req));
     }
   } else {
-    const { title, dueDate } = sanitizeFollowUpInput(req.body);
+    const { title, dueDate, dueTime } = sanitizeFollowUpInput(req.body);
     if (req.body.dueDate !== undefined && !dueDate) {
       return res.status(400).json({ error: "Gültiges Datum (YYYY-MM-DD) erforderlich." });
     }
-    fu = await db.updateFollowUp(existing.id, { title, dueDate });
+    fu = await db.updateFollowUp(existing.id, { title, dueDate, dueTime });
   }
   await db.syncLeadMirror(existing.leadId);
   const lead = await db.getLead(existing.leadId);

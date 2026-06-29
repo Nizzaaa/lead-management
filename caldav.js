@@ -97,6 +97,7 @@ function fingerprint(lead, followUp) {
   if (!lead || !followUp) return "";
   return JSON.stringify([
     followUp.dueDate || "",
+    followUp.dueTime || "",
     followUp.title || "",
     followUp.kind || "",
     followUp.status || "",
@@ -215,6 +216,7 @@ function summaryFor(lead, followUp) {
   const prefix =
     followUp.kind === "reference" ? "Referenz"
     : followUp.kind === "anniversary" ? "Jubiläum"
+    : followUp.kind === "appointment" ? "Termin"
     : "Lead";
   let s;
   if (base && step) s = `${prefix}: ${base} – ${step}`;
@@ -252,14 +254,22 @@ function buildICS(lead, followUp, { baseUrl } = {}) {
     `DTSTAMP:${utcStamp()}`,
     `SEQUENCE:${sequence(followUp)}`,
   ];
-  if (EVENT_TIME_MIN === null) {
+  // Eine eigene Uhrzeit der Wiedervorlage (echter Termin, z. B. „Termin
+  // vereinbart") hat Vorrang vor der global konfigurierten Standardzeit.
+  const ownTimeMin = parseHhmm(followUp.dueTime);
+  const timeMin = ownTimeMin === null ? EVENT_TIME_MIN : ownTimeMin;
+  // Ein konkret terminierter Eintrag (eigene Uhrzeit ODER kind 'appointment')
+  // ist ein echter Termin und blockt Verfügbarkeit (OPAQUE) – im Gegensatz zur
+  // reinen Erinnerung an eine Wiedervorlage (TRANSPARENT).
+  const isAppointment = ownTimeMin !== null || followUp.kind === "appointment";
+  if (timeMin === null) {
     // Ganztags-Termin
     lines.push(`DTSTART;VALUE=DATE:${ymdCompact(followUp.dueDate)}`);
     lines.push(`DTEND;VALUE=DATE:${nextDayCompact(followUp.dueDate)}`);
   } else {
     // Termin mit Uhrzeit und Dauer
-    lines.push(`DTSTART:${floating(followUp.dueDate, EVENT_TIME_MIN)}`);
-    lines.push(`DTEND:${floating(followUp.dueDate, EVENT_TIME_MIN + EVENT_DURATION_MIN)}`);
+    lines.push(`DTSTART:${floating(followUp.dueDate, timeMin)}`);
+    lines.push(`DTEND:${floating(followUp.dueDate, timeMin + EVENT_DURATION_MIN)}`);
   }
   lines.push(`SUMMARY:${esc(summaryFor(lead, followUp))}`);
   const desc = descriptionFor(lead, followUp, baseUrl);
@@ -269,7 +279,8 @@ function buildICS(lead, followUp, { baseUrl } = {}) {
   const kindCat = followUp.kind && followUp.kind !== "manual" ? `,${followUp.kind}` : "";
   lines.push(`CATEGORIES:LeadPilot,Wiedervorlage${kindCat}`);
   lines.push("STATUS:CONFIRMED");
-  lines.push("TRANSP:TRANSPARENT"); // blockt keine Verfügbarkeit (es ist eine Erinnerung)
+  // Echter Termin blockt Verfügbarkeit; eine bloße Wiedervorlage-Erinnerung nicht.
+  lines.push(isAppointment ? "TRANSP:OPAQUE" : "TRANSP:TRANSPARENT");
   if (REMINDER_MIN > 0) {
     lines.push("BEGIN:VALARM");
     lines.push("ACTION:DISPLAY");

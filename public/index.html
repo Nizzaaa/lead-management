@@ -307,8 +307,9 @@
       <form id="nextStepForm" class="form">
         <input type="hidden" id="ns_lead_id" />
         <input type="hidden" id="ns_followup_id" />
-        <label>Nächster Schritt<input type="text" id="ns_step" placeholder="z. B. Angebot nachfassen" /></label>
-        <label>Wiedervorlage am<input type="date" id="ns_at" /></label>
+        <label id="ns_step_label"><span id="ns_step_text">Nächster Schritt</span><input type="text" id="ns_step" placeholder="z. B. Angebot nachfassen" /></label>
+        <label id="ns_date_label"><span id="ns_date_text">Wiedervorlage am</span><input type="date" id="ns_at" /></label>
+        <label id="ns_time_label" class="hidden">Uhrzeit<input type="time" id="ns_time" /></label>
         <div class="form-actions">
           <button type="button" class="btn" id="nsClear">Entfernen</button>
           <button type="button" class="btn" id="nsCancel">Abbrechen</button>

@@ -964,11 +964,12 @@ function followUpsCardHtml(l, list) {
   const open = (Array.isArray(list) ? list : []).filter((f) => f.status === "open");
   const next = open[0] || null;
   const rest = open.slice(1);
-  const dueChip = (ymd) => {
-    const info = dueInfo(ymd);
+  const dueChip = (fu) => {
+    const info = dueInfo(fu.dueDate);
+    const time = fu.dueTime ? ` ${esc(fu.dueTime)}` : "";
     return info
-      ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}</span>`
-      : `<span class="ns-due">${esc(fmtDate(ymd))}</span>`;
+      ? `<span class="ns-due ${info.state}">⏰ ${esc(info.label)}${time}</span>`
+      : `<span class="ns-due">${esc(fmtDate(fu.dueDate))}${time}</span>`;
   };
   // Einheitliche Aktionen je Wiedervorlage – auf jeder Zeile gleich:
   // erledigen, bearbeiten (Stift) und verwerfen (Papierkorb).
@@ -986,7 +987,7 @@ function followUpsCardHtml(l, list) {
       <div class="ns-main">
         <span class="ns-label">Nächster Schritt</span>
         <span class="ns-text">${esc(next.title || "Wiedervorlage")}</span>
-        ${dueChip(next.dueDate)}
+        ${dueChip(next)}
       </div>
       <div class="ns-actions">${fuButtons(next.id)}</div>
     </div>`;
@@ -1015,7 +1016,7 @@ function followUpsCardHtml(l, list) {
   const moreRows = rest.map((fu) => `
     <div class="fu-row open">
       <span class="fu-icon">${followUpKindIcon(fu.kind)}</span>
-      <span class="fu-main"><span class="fu-title">${esc(fu.title || "Wiedervorlage")}</span> ${dueChip(fu.dueDate)}</span>
+      <span class="fu-main"><span class="fu-title">${esc(fu.title || "Wiedervorlage")}</span> ${dueChip(fu)}</span>
       <div class="fu-actions">${fuButtons(fu.id)}</div>
     </div>`).join("");
   const more = rest.length
@@ -1072,13 +1073,18 @@ const ACTIVITY_META = {
 
 // --- Composer (Tab-basierte Aktivitätserfassung) ---------------------------
 // Pro Typ: Platzhalter, Button-Text, ob ein Ergebnisfeld gezeigt wird und
-// optionale Schnell-Ergebnisse (für Anrufe).
+// optionale Schnell-Ergebnisse. „Termin vereinbart" ist bei jeder Aktionsart
+// verfügbar (nicht nur beim Anruf): es öffnet anschließend direkt die
+// Termin-Erfassung (Datum + Uhrzeit → Kalender), siehe addDetailActivity.
 const COMPOSER_META = {
-  note:    { ph: "Notiz hinzufügen … Kontext, Vereinbarungen, To-dos", btn: "Notiz speichern", outcome: false, chips: [] },
+  note:    { ph: "Notiz hinzufügen … Kontext, Vereinbarungen, To-dos", btn: "Notiz speichern", outcome: true,
+             chips: ["Termin vereinbart"] },
   call:    { ph: "Gesprächsnotiz … worüber wurde gesprochen?", btn: "Anruf protokollieren", outcome: true,
              chips: ["Erreicht", "Mailbox", "Kein Anschluss", "Rückruf vereinbart", "Termin vereinbart", "Kein Interesse"] },
-  email:   { ph: "Worum ging es in der E-Mail?", btn: "E-Mail protokollieren", outcome: false, chips: [] },
-  meeting: { ph: "Termin-Notiz … Teilnehmer, Ergebnis, nächste Schritte", btn: "Termin protokollieren", outcome: true, chips: [] },
+  email:   { ph: "Worum ging es in der E-Mail?", btn: "E-Mail protokollieren", outcome: true,
+             chips: ["Antwort erhalten", "Termin vereinbart", "Keine Reaktion"] },
+  meeting: { ph: "Termin-Notiz … Teilnehmer, Ergebnis, nächste Schritte", btn: "Termin protokollieren", outcome: true,
+             chips: ["Termin vereinbart", "Angebot gewünscht", "Kein Interesse"] },
 };
 const COMPOSER_TABS = [["note", "📝", "Notiz"], ["call", "📞", "Anruf"], ["email", "✉️", "E-Mail"], ["meeting", "📅", "Termin"]];
 
@@ -1890,14 +1896,25 @@ async function dismissLegacyNextStep(id) {
 }
 
 // Modus des Wiedervorlage-Modals: "legacy" = Spiegel des Leads (Banner),
-// "followup-new" = neue Wiedervorlage, "followup-edit" = bestehende bearbeiten.
+// "followup-new" = neue Wiedervorlage, "followup-edit" = bestehende bearbeiten,
+// "appointment-new" = echter Termin (Datum + Uhrzeit) → Kalender.
 let nsMode = "legacy";
+
+// Stellt das Modal auf reine Wiedervorlage (Datum) oder echten Termin
+// (Datum + Uhrzeit) um: Beschriftungen und Sichtbarkeit des Uhrzeit-Felds.
+function configureNsModal({ stepText = "Nächster Schritt", dateText = "Wiedervorlage am", withTime = false, stepPh = "z. B. Angebot nachfassen" } = {}) {
+  const st = $("#ns_step_text"); if (st) st.textContent = stepText;
+  const dt = $("#ns_date_text"); if (dt) dt.textContent = dateText;
+  const tl = $("#ns_time_label"); if (tl) tl.classList.toggle("hidden", !withTime);
+  const sp = $("#ns_step"); if (sp) sp.placeholder = stepPh;
+}
 
 // Eigenes, schlankes Modal zum Planen/Bearbeiten der Wiedervorlage (Banner).
 function openNextStepModal(id) {
   const l = getLead(id);
   if (!l) return;
   nsMode = "legacy";
+  configureNsModal();
   $("#ns_lead_id").value = id;
   $("#ns_followup_id").value = "";
   $("#ns_step").value = l.nextStep || "";
@@ -1913,6 +1930,7 @@ function openNextStepModal(id) {
 function openFollowUpModal(id) {
   if (!id) return;
   nsMode = "followup-new";
+  configureNsModal();
   $("#ns_lead_id").value = id;
   $("#ns_followup_id").value = "";
   $("#ns_step").value = "";
@@ -1923,17 +1941,41 @@ function openFollowUpModal(id) {
   $("#ns_step").focus();
 }
 
+// „Termin vereinbart" → direkt einen echten Kalendertermin (Datum + Uhrzeit)
+// erfassen. Wird nach dem Protokollieren eines Anrufs mit diesem Ergebnis
+// automatisch geöffnet und legt eine Termin-Wiedervorlage an (kind=appointment),
+// die der CalDAV-Sync als besetzten Termin in den Kalender schreibt.
+function openAppointmentModal(id, { title = "", date = "", time = "" } = {}) {
+  if (!id) return;
+  nsMode = "appointment-new";
+  configureNsModal({ stepText: "Betreff", dateText: "Termin am", withTime: true, stepPh: "z. B. Erstgespräch (optional)" });
+  $("#ns_lead_id").value = id;
+  $("#ns_followup_id").value = "";
+  $("#ns_step").value = title;
+  $("#ns_at").value = date || todayYMD();
+  $("#ns_time").value = time;
+  $("#nsModalTitle").textContent = "Termin eintragen";
+  $("#nsClear").classList.add("hidden");
+  $("#nextStepModal").classList.remove("hidden");
+  $("#ns_time").focus();
+}
+
 // Bestehende Wiedervorlage bearbeiten (Detail-Karte „Bearbeiten" am Top-Eintrag):
 // Titel/Datum dieser konkreten Wiedervorlage ändern – auch automatische.
 function openFollowUpEditModal(fuId) {
   const fu = Array.isArray(detailFollowUps) ? detailFollowUps.find((f) => f.id === fuId) : null;
   if (!fu) return;
   nsMode = "followup-edit";
+  const isAppt = fu.kind === "appointment" || Boolean(fu.dueTime);
+  configureNsModal(isAppt
+    ? { stepText: "Betreff", dateText: "Termin am", withTime: true, stepPh: "z. B. Erstgespräch (optional)" }
+    : {});
   $("#ns_lead_id").value = detailId || "";
   $("#ns_followup_id").value = fu.id;
   $("#ns_step").value = fu.title || "";
   $("#ns_at").value = fu.dueDate || "";
-  $("#nsModalTitle").textContent = "Wiedervorlage bearbeiten";
+  $("#ns_time").value = fu.dueTime || "";
+  $("#nsModalTitle").textContent = isAppt ? "Termin bearbeiten" : "Wiedervorlage bearbeiten";
   $("#nsClear").classList.remove("hidden");
   $("#nextStepModal").classList.remove("hidden");
   $("#ns_step").focus();
@@ -1947,18 +1989,27 @@ async function saveNextStep(e, clear = false) {
   if (e) e.preventDefault();
   const id = $("#ns_lead_id").value;
   try {
-    if (nsMode === "followup-edit") {
+    // Uhrzeit-Feld ist nur im Termin-Modus sichtbar → nur dann mitsenden.
+    const timeShown = !$("#ns_time_label").classList.contains("hidden");
+    if (nsMode === "appointment-new" && !clear) {
+      if (!$("#ns_at").value) { toast("Bitte ein Datum wählen.", "error"); return; }
+      if (!$("#ns_time").value) { toast("Bitte eine Uhrzeit wählen.", "error"); return; }
+      await api(`/api/leads/${id}/follow-ups`, {
+        method: "POST",
+        body: JSON.stringify({ kind: "appointment", title: $("#ns_step").value, dueDate: $("#ns_at").value, dueTime: $("#ns_time").value }),
+      });
+      toast("Termin eingetragen", "success");
+    } else if (nsMode === "followup-edit") {
       const fuId = $("#ns_followup_id").value;
       if (clear) {
         await api(`/api/follow-ups/${fuId}`, { method: "PATCH", body: JSON.stringify({ status: "dismissed" }) });
         toast("Wiedervorlage verworfen", "success");
       } else {
         if (!$("#ns_at").value) { toast("Bitte ein Datum wählen.", "error"); return; }
-        await api(`/api/follow-ups/${fuId}`, {
-          method: "PATCH",
-          body: JSON.stringify({ title: $("#ns_step").value, dueDate: $("#ns_at").value }),
-        });
-        toast("Wiedervorlage gespeichert", "success");
+        const body = { title: $("#ns_step").value, dueDate: $("#ns_at").value };
+        if (timeShown && $("#ns_time").value) body.dueTime = $("#ns_time").value;
+        await api(`/api/follow-ups/${fuId}`, { method: "PATCH", body: JSON.stringify(body) });
+        toast(timeShown ? "Termin gespeichert" : "Wiedervorlage gespeichert", "success");
       }
     } else if (nsMode === "followup-new" && !clear) {
       if (!$("#ns_at").value) { toast("Bitte ein Datum wählen.", "error"); return; }
@@ -2780,7 +2831,13 @@ async function addDetailActivity() {
       body: JSON.stringify({ type, body, outcome }),
     });
     toast("Aktivität festgehalten", "success");
-    loadDetailExtras(detailId);
+    await loadDetailExtras(detailId);
+    // Ergebnis „Termin vereinbart" → direkt einen echten Kalendertermin erfassen.
+    // Betreff bleibt leer (der Kalender stellt Firma/Sorte ohnehin voran); der
+    // Nutzer kann optional einen Anlass ergänzen.
+    if (/termin vereinbart/i.test(outcome)) {
+      openAppointmentModal(detailId);
+    }
   } catch (err) {
     toast(err.message, "error");
   }
@@ -3318,7 +3375,7 @@ function renderAgenda() {
 
 // Symbol je Wiedervorlage-Sorte (Referenz/Jubiläum/manuell).
 function followUpKindIcon(kind) {
-  return kind === "reference" ? "⭐" : kind === "anniversary" ? "🎉" : kind === "winback" ? "♻️" : "📌";
+  return kind === "reference" ? "⭐" : kind === "anniversary" ? "🎉" : kind === "winback" ? "♻️" : kind === "appointment" ? "📅" : "📌";
 }
 
 // Eine Agenda-Zeile: gewonnener Kunde ohne Kontakt seit längerem (Health-Nudge).
