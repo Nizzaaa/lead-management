@@ -23,6 +23,16 @@ function toYMD(d) {
   return String(d).slice(0, 10);
 }
 
+// Ein TIME-Wert (due_time) als reines "HH:MM". Der Treiber liefert i. d. R.
+// "HH:MM:SS"; eine fehlende/leere Zeit bleibt null (= reine Datums-Wiedervorlage
+// ohne Uhrzeit, kein echter Kalendertermin).
+function toHM(t) {
+  if (!t) return null;
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(t));
+  if (!m) return null;
+  return `${String(m[1]).padStart(2, "0")}:${m[2]}`;
+}
+
 // Wandelt eine DB-Zeile (snake_case) in die vom Frontend erwartete Form (camelCase) um.
 function rowToLead(row) {
   return {
@@ -146,6 +156,11 @@ async function init({ retries = 15, delayMs = 2000 } = {}) {
       await pool.query("CREATE INDEX IF NOT EXISTS idx_follow_ups_due ON follow_ups(due_date) WHERE status = 'open';");
       // Idempotenz-Garant für Auto-Regeln: höchstens eine Zeile je (Lead, Regel).
       await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS uq_follow_ups_rule ON follow_ups(lead_id, rule_key) WHERE rule_key IS NOT NULL;");
+      // Optionale Uhrzeit für Termin-Wiedervorlagen (kind='appointment'): hebt
+      // eine reine Datums-Wiedervorlage zu einem echten Kalendertermin mit fester
+      // Uhrzeit an (z. B. nach dem Anruf-Ergebnis „Termin vereinbart"). NULL =
+      // wie bisher eine datumsbasierte Erinnerung ohne Uhrzeit.
+      await pool.query("ALTER TABLE follow_ups ADD COLUMN IF NOT EXISTS due_time TIME;");
       // Einmal-Migration: bestehende Wiedervorlagen (next_step_at) als manuelle
       // Follow-up-Zeilen übernehmen. Idempotent über den Leer-Check.
       const { rowCount: hasFollowUps } = await pool.query("SELECT 1 FROM follow_ups LIMIT 1");
@@ -496,6 +511,7 @@ function rowToFollowUp(row) {
     ruleKey: row.rule_key || null,
     title: row.title || "",
     dueDate: toYMD(row.due_date),
+    dueTime: toHM(row.due_time),
     status: row.status,
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
     updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
@@ -520,11 +536,11 @@ async function getFollowUp(id) {
   return rows[0] ? rowToFollowUp(rows[0]) : null;
 }
 
-async function createFollowUp({ leadId, source = "manual", kind = "manual", ruleKey = null, title = "", dueDate, status = "open" }) {
+async function createFollowUp({ leadId, source = "manual", kind = "manual", ruleKey = null, title = "", dueDate, dueTime = null, status = "open" }) {
   const { rows } = await pool.query(
-    `INSERT INTO follow_ups (lead_id, source, kind, rule_key, title, due_date, status)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-    [leadId, source, kind, ruleKey, title, dueDate, status]
+    `INSERT INTO follow_ups (lead_id, source, kind, rule_key, title, due_date, due_time, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+    [leadId, source, kind, ruleKey, title, dueDate, dueTime, status]
   );
   return rowToFollowUp(rows[0]);
 }
@@ -556,14 +572,15 @@ async function setFollowUpStatus(id, status) {
   return rows[0] ? rowToFollowUp(rows[0]) : null;
 }
 
-async function updateFollowUp(id, { title, dueDate } = {}) {
+async function updateFollowUp(id, { title, dueDate, dueTime } = {}) {
   const { rows } = await pool.query(
     `UPDATE follow_ups
         SET title = COALESCE($2, title),
             due_date = COALESCE($3, due_date),
+            due_time = COALESCE($4, due_time),
             updated_at = now()
       WHERE id = $1 RETURNING *`,
-    [id, title === undefined ? null : title, dueDate === undefined ? null : dueDate]
+    [id, title === undefined ? null : title, dueDate === undefined ? null : dueDate, dueTime === undefined ? null : dueTime]
   );
   return rows[0] ? rowToFollowUp(rows[0]) : null;
 }

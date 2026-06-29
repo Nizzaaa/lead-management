@@ -25,6 +25,13 @@ auf – ohne sie doppelt zu pflegen.
 Der Termin trägt als Titel `Wiedervorlage: <Firma> – <nächster Schritt>` und in
 der Beschreibung Kontaktdaten, Status, Wert sowie einen **Rücklink zum Lead**.
 
+- **Echte Termine mit Uhrzeit.** Wird ein Anruf mit dem Ergebnis
+  **„Termin vereinbart"** protokolliert, öffnet sich sofort eine Maske für
+  **Datum + Uhrzeit**. Ein so erfasster Termin (Titel `Termin: <Firma> – …`)
+  bekommt eine feste Start-/Endzeit (Dauer aus `CALDAV_EVENT_DURATION_MIN`) und
+  **blockt die Verfügbarkeit** (`TRANSP:OPAQUE`). Reine Wiedervorlagen ohne
+  Uhrzeit bleiben unverbindliche, transparente Erinnerungen.
+
 ## Schritt 1 – CalDAV-Adresse des Kalenders ermitteln
 
 1. In Nextcloud die **Kalender**-App öffnen (ggf. einen eigenen Kalender, z. B.
