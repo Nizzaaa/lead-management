@@ -1073,13 +1073,18 @@ const ACTIVITY_META = {
 
 // --- Composer (Tab-basierte Aktivitätserfassung) ---------------------------
 // Pro Typ: Platzhalter, Button-Text, ob ein Ergebnisfeld gezeigt wird und
-// optionale Schnell-Ergebnisse (für Anrufe).
+// optionale Schnell-Ergebnisse. „Termin vereinbart" ist bei jeder Aktionsart
+// verfügbar (nicht nur beim Anruf): es öffnet anschließend direkt die
+// Termin-Erfassung (Datum + Uhrzeit → Kalender), siehe addDetailActivity.
 const COMPOSER_META = {
-  note:    { ph: "Notiz hinzufügen … Kontext, Vereinbarungen, To-dos", btn: "Notiz speichern", outcome: false, chips: [] },
+  note:    { ph: "Notiz hinzufügen … Kontext, Vereinbarungen, To-dos", btn: "Notiz speichern", outcome: true,
+             chips: ["Termin vereinbart"] },
   call:    { ph: "Gesprächsnotiz … worüber wurde gesprochen?", btn: "Anruf protokollieren", outcome: true,
              chips: ["Erreicht", "Mailbox", "Kein Anschluss", "Rückruf vereinbart", "Termin vereinbart", "Kein Interesse"] },
-  email:   { ph: "Worum ging es in der E-Mail?", btn: "E-Mail protokollieren", outcome: false, chips: [] },
-  meeting: { ph: "Termin-Notiz … Teilnehmer, Ergebnis, nächste Schritte", btn: "Termin protokollieren", outcome: true, chips: [] },
+  email:   { ph: "Worum ging es in der E-Mail?", btn: "E-Mail protokollieren", outcome: true,
+             chips: ["Antwort erhalten", "Termin vereinbart", "Keine Reaktion"] },
+  meeting: { ph: "Termin-Notiz … Teilnehmer, Ergebnis, nächste Schritte", btn: "Termin protokollieren", outcome: true,
+             chips: ["Termin vereinbart", "Angebot gewünscht", "Kein Interesse"] },
 };
 const COMPOSER_TABS = [["note", "📝", "Notiz"], ["call", "📞", "Anruf"], ["email", "✉️", "E-Mail"], ["meeting", "📅", "Termin"]];
 
